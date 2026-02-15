@@ -1913,3 +1913,22 @@
 - **zb5**: Implement blacksmith adapter info/list/test commands (P3)
 - **hhv**: Implement blacksmith metrics reingest command (P3)
 - **c37**: Implement blacksmith metrics beads per-bead timing report (P3)
+
+--- 2026-02-15 18:11:48 | simple-agent-harness-zb5 ---
+## Last Session: Implement blacksmith adapter info/list/test commands (zb5)
+
+### Completed
+- Added `blacksmith adapter info` — shows detected/configured adapter and supported metrics
+- Added `blacksmith adapter list` — lists all available adapters (claude, codex, opencode, raw) with their supported metrics
+- Added `blacksmith adapter test <file>` — parses a session file with the configured adapter and displays extracted metrics
+- Added `AdapterAction` enum with `Info`, `List`, `Test` subcommands
+- Wired into main.rs command dispatch alongside existing subcommands
+- Added 6 new tests (818 total passing)
+
+### Key Files Modified
+- `src/main.rs` — added `Adapter` command variant, `AdapterAction` enum, three handler functions, and tests
+
+### Suggested Next Tasks
+- **2su**: Implement aider agent adapter (P3)
+- **hhv**: Implement blacksmith metrics reingest command (P3)
+- **c37**: Implement blacksmith metrics beads per-bead timing report (P3)

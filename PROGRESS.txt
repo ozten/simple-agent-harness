@@ -1,24 +1,17 @@
-## Last Session: Implement opencode agent adapter (y74)
+## Last Session: Implement blacksmith adapter info/list/test commands (zb5)
 
 ### Completed
-- Created `src/adapters/opencode.rs` implementing the `AgentAdapter` trait for OpenCode
-- Handles two input formats: JSONL (line-by-line messages) and single JSON (session export)
-- Single JSON supports: array of messages, object with `messages` key, nested `session.messages`
-- Supported metrics: `turns.total`, `turns.tool_calls`, `cost.input_tokens`, `cost.output_tokens` (when available), `session.output_bytes`, `session.exit_code`, `session.duration_secs`
-- OpenCode message parts: `text`, `toolCall`/`tool_call`, `toolResult`/`tool_result`, `finish`
-- Token accumulation from message-level `usage` field (both `input_tokens`/`output_tokens` and `prompt_tokens`/`completion_tokens` keys)
-- Session-level token extraction from wrapper objects in session exports
-- Duration calculated from message timestamps (created_at, finished_at, timestamp, updated_at)
-- Text/tool extraction scoped to assistant messages only (matches codex adapter pattern)
-- Registered module in `src/adapters/mod.rs` and wired into `create_adapter()`
-- Added 24 new tests (812 total passing)
+- Added `blacksmith adapter info` — shows detected/configured adapter and supported metrics
+- Added `blacksmith adapter list` — lists all available adapters (claude, codex, opencode, raw) with their supported metrics
+- Added `blacksmith adapter test <file>` — parses a session file with the configured adapter and displays extracted metrics
+- Added `AdapterAction` enum with `Info`, `List`, `Test` subcommands
+- Wired into main.rs command dispatch alongside existing subcommands
+- Added 6 new tests (818 total passing)
 
 ### Key Files Modified
-- `src/adapters/opencode.rs` — new file, OpencodeAdapter implementation
-- `src/adapters/mod.rs` — added `pub mod opencode`, wired `create_adapter`, added test
+- `src/main.rs` — added `Adapter` command variant, `AdapterAction` enum, three handler functions, and tests
 
 ### Suggested Next Tasks
 - **2su**: Implement aider agent adapter (P3)
-- **zb5**: Implement blacksmith adapter info/list/test commands (P3)
 - **hhv**: Implement blacksmith metrics reingest command (P3)
 - **c37**: Implement blacksmith metrics beads per-bead timing report (P3)

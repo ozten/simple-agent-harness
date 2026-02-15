@@ -131,6 +131,11 @@ enum Commands {
         #[arg(long)]
         workers: Option<u32>,
     },
+    /// Inspect and test agent adapters
+    Adapter {
+        #[command(subcommand)]
+        action: AdapterAction,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -216,6 +221,19 @@ enum IntegrationAction {
         /// Force rollback even if other tasks depend on this one (entangled)
         #[arg(long)]
         force: bool,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum AdapterAction {
+    /// Show the detected/configured adapter for the current project
+    Info,
+    /// List all available adapters with their supported metrics
+    List,
+    /// Parse a file with the configured adapter and show extracted metrics
+    Test {
+        /// Path to the session output file to parse
+        file: PathBuf,
     },
 }
 
@@ -651,6 +669,93 @@ fn handle_workers_kill(
     Ok(())
 }
 
+/// Handle `blacksmith adapter info` — show detected/configured adapter.
+fn handle_adapter_info(config: &HarnessConfig) {
+    let adapter_name =
+        adapters::resolve_adapter_name(config.agent.adapter.as_deref(), &config.agent.command);
+    let detected = adapters::detect_adapter_name(&config.agent.command);
+
+    println!("Agent command:     {}", config.agent.command);
+    println!("Detected adapter:  {detected}");
+
+    if let Some(ref explicit) = config.agent.adapter {
+        println!("Configured adapter: {explicit}");
+    } else {
+        println!("Configured adapter: (auto-detect)");
+    }
+
+    println!("Resolved adapter:  {adapter_name}");
+
+    let adapter = adapters::create_adapter(adapter_name);
+    let supported = adapter.supported_metrics();
+    if supported.is_empty() {
+        println!("Supported metrics: (none)");
+    } else {
+        println!("Supported metrics:");
+        for metric in supported {
+            println!("  - {metric}");
+        }
+    }
+}
+
+/// Handle `blacksmith adapter list` — list all available adapters.
+fn handle_adapter_list() {
+    let all_names = ["claude", "codex", "opencode", "raw"];
+
+    for name in &all_names {
+        let adapter = adapters::create_adapter(name);
+        let supported = adapter.supported_metrics();
+
+        print!("{name}");
+        if supported.is_empty() {
+            println!("  (no built-in metrics)");
+        } else {
+            println!();
+            for metric in supported {
+                println!("  - {metric}");
+            }
+        }
+    }
+}
+
+/// Handle `blacksmith adapter test <file>` — parse a file and show extracted metrics.
+fn handle_adapter_test(
+    config: &HarnessConfig,
+    file: &std::path::Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if !file.exists() {
+        eprintln!("File not found: {}", file.display());
+        std::process::exit(1);
+    }
+
+    let adapter_name =
+        adapters::resolve_adapter_name(config.agent.adapter.as_deref(), &config.agent.command);
+    let adapter = adapters::create_adapter(adapter_name);
+
+    println!("Adapter: {} ({})", adapter.name(), adapter_name);
+    println!("File:    {}", file.display());
+    println!();
+
+    match adapter.extract_builtin_metrics(file) {
+        Ok(metrics) => {
+            if metrics.is_empty() {
+                println!("No metrics extracted.");
+            } else {
+                println!("Extracted metrics:");
+                for (kind, value) in &metrics {
+                    println!("  {kind} = {value}");
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("Error extracting metrics: {e}");
+            std::process::exit(1);
+        }
+    }
+
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
@@ -770,6 +875,21 @@ async fn main() {
             }
             WorkersAction::Kill { worker_id } => {
                 if let Err(e) = handle_workers_kill(&db_path, *worker_id) {
+                    eprintln!("Error: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        return;
+    }
+
+    if let Some(Commands::Adapter { action }) = &cli.command {
+        let config_for_adapter = HarnessConfig::load(&cli.config).unwrap_or_default();
+        match action {
+            AdapterAction::Info => handle_adapter_info(&config_for_adapter),
+            AdapterAction::List => handle_adapter_list(),
+            AdapterAction::Test { file } => {
+                if let Err(e) = handle_adapter_test(&config_for_adapter, file) {
                     eprintln!("Error: {e}");
                     std::process::exit(1);
                 }
@@ -1323,5 +1443,66 @@ mod tests {
         let result = db::find_integration_by_bead(&conn, "beads-rb").unwrap();
         assert!(result.is_some());
         assert_eq!(result.unwrap().status, "rolled_back");
+    }
+
+    #[test]
+    fn test_adapter_info_default_config() {
+        // Should not panic with default config
+        let config = HarnessConfig::default();
+        handle_adapter_info(&config);
+    }
+
+    #[test]
+    fn test_adapter_info_explicit_adapter() {
+        let mut config = HarnessConfig::default();
+        config.agent.adapter = Some("raw".to_string());
+        handle_adapter_info(&config);
+    }
+
+    #[test]
+    fn test_adapter_list() {
+        // Should not panic
+        handle_adapter_list();
+    }
+
+    #[test]
+    fn test_adapter_test_with_claude_jsonl() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("session.jsonl");
+        // Write a minimal Claude JSONL session
+        std::fs::write(
+            &file,
+            r#"{"type":"result","subtype":"success","cost_usd":0.05,"duration_ms":1234,"duration_api_ms":1000,"num_turns":3,"session_id":"test"}
+"#,
+        )
+        .unwrap();
+
+        let config = HarnessConfig::default(); // default command is "claude"
+        let result = handle_adapter_test(&config, &file);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_adapter_test_with_empty_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("empty.jsonl");
+        std::fs::write(&file, "").unwrap();
+
+        let config = HarnessConfig::default();
+        // Should handle empty file without panic
+        let result = handle_adapter_test(&config, &file);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_adapter_test_with_raw_adapter() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("output.txt");
+        std::fs::write(&file, "some output\n").unwrap();
+
+        let mut config = HarnessConfig::default();
+        config.agent.adapter = Some("raw".to_string());
+        let result = handle_adapter_test(&config, &file);
+        assert!(result.is_ok());
     }
 }
