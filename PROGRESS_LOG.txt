@@ -753,3 +753,24 @@
 - Implement metrics migrate command for V1 data import (j1w) — P3, ready
 - Implement metrics rebuild command (9cm) — P3, ready
 - Implement metrics export, query, and events dump commands (odo) — P3, ready
+
+--- 2026-02-15 14:45:42 | simple-agent-harness-j1w ---
+## Last Session: Implement metrics migrate command for V1 data import (simple-agent-harness-j1w)
+
+### Completed
+- Added `blacksmith metrics migrate --from <path>` CLI subcommand
+- Imports V1 self-improvement.db sessions table into V2 events + observations
+- Maps V1 columns to V2 event kinds: assistant_turns->turns.total, narration_turns->turns.narration_only, parallel_turns->turns.parallel, num_tool_calls->turns.tool_calls, input/output/cache tokens, cost_usd->cost.estimate_usd, duration_secs->session.duration_ms (*1000), output_bytes, exit_code
+- Imports V1 improvements table, mapping severity->category (critical/high->reliability, medium/normal->workflow, low/minor->code-quality, cost->cost, performance->performance)
+- Handles partial V1 schemas gracefully (missing columns default to 0)
+- Opens V1 database read-only for safety
+- Added 9 new tests covering: not-found, empty V1, full session migration, partial columns, severity mapping, category passthrough, both tables, severity-to-category unit test, no exit_code column
+- All 367 tests pass, clippy clean, fmt applied
+
+### Current State
+- `metrics migrate` command is fully functional and tested
+- V1->V2 migration path is complete for sessions and improvements data
+
+### Suggested Next Tasks
+- Implement metrics rebuild command (9cm) — P3, ready
+- Implement metrics export, query, and events dump commands (odo) — P3, ready

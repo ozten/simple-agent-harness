@@ -106,6 +106,12 @@ enum MetricsAction {
         #[arg(long, default_value = "10")]
         last: i64,
     },
+    /// Import data from a V1 self-improvement database
+    Migrate {
+        /// Path to the V1 self-improvement.db file
+        #[arg(long)]
+        from: PathBuf,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -314,6 +320,7 @@ async fn main() {
             MetricsAction::Targets { last } => {
                 metrics_cmd::handle_targets(&db_path, *last, &config_for_metrics.metrics.targets)
             }
+            MetricsAction::Migrate { from } => metrics_cmd::handle_migrate(&db_path, from),
         };
 
         if let Err(e) = result {
