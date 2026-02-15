@@ -169,6 +169,14 @@ async fn main() {
         );
         println!("  hooks.pre_session = {:?}", config.hooks.pre_session);
         println!("  hooks.post_session = {:?}", config.hooks.post_session);
+        println!(
+            "  output.event_log = {:?}",
+            config
+                .output
+                .event_log
+                .as_ref()
+                .map(|p| p.display().to_string())
+        );
         println!();
         println!("Dry run mode — config validated, not running.");
         return;

@@ -35,3 +35,6 @@ post_session = []
 [prompt]
 # file = "PROMPT.md"
 prepend_commands = []
+
+[output]
+# event_log = "harness-events.jsonl"

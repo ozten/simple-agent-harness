@@ -14,6 +14,7 @@ pub struct HarnessConfig {
     pub shutdown: ShutdownConfig,
     pub hooks: HooksConfig,
     pub prompt: PromptConfig,
+    pub output: OutputConfig,
 }
 
 impl HarnessConfig {
@@ -177,6 +178,13 @@ pub struct PromptConfig {
     pub prepend_commands: Vec<String>,
 }
 
+#[derive(Debug, Deserialize, Clone)]
+#[serde(default)]
+#[derive(Default)]
+pub struct OutputConfig {
+    pub event_log: Option<PathBuf>,
+}
+
 // --- Default implementations ---
 
 impl Default for SessionConfig {
@@ -274,6 +282,7 @@ mod tests {
         assert!(config.hooks.post_session.is_empty());
         assert!(config.prompt.file.is_none());
         assert!(config.prompt.prepend_commands.is_empty());
+        assert!(config.output.event_log.is_none());
     }
 
     #[test]
@@ -360,6 +369,9 @@ post_session = ["echo post"]
 [prompt]
 file = "CUSTOM.md"
 prepend_commands = ["date"]
+
+[output]
+event_log = "harness-events.jsonl"
 "#,
         )
         .unwrap();
@@ -379,6 +391,10 @@ prepend_commands = ["date"]
         assert_eq!(config.hooks.post_session, vec!["echo post"]);
         assert_eq!(config.prompt.file, Some(PathBuf::from("CUSTOM.md")));
         assert_eq!(config.prompt.prepend_commands, vec!["date"]);
+        assert_eq!(
+            config.output.event_log,
+            Some(PathBuf::from("harness-events.jsonl"))
+        );
     }
 
     #[test]

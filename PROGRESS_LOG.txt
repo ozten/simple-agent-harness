@@ -109,3 +109,35 @@
 - Implement JSONL event log (t0t) — P2, unblocked
 - Implement pre/post-session hook execution (8ff) — P2, unblocked
 - Implement prompt prepend_commands (mxg) — P2, unblocked
+
+--- 2026-02-15 01:25:32 | simple-agent-harness-t0t ---
+## Last Session: Implement JSONL event log for external tooling (simple-agent-harness-t0t)
+
+### Completed
+- Added `OutputConfig` struct with `event_log: Option<PathBuf>` to config.rs
+- Replaced placeholder metrics.rs with full `EventLog` implementation:
+  - `SessionEvent` struct with serde Serialize, fields: ts, event, iteration, global, output_bytes, exit_code, duration_secs, committed, retries, rate_limited
+  - `EventLog` struct with append-only JSONL writing (open+append+writeln per event)
+  - `EventLogError` error type with Display + Error impls
+  - `SessionEvent::session_complete()` constructor
+- Integrated event log into runner.rs:
+  - Creates EventLog from config.output.event_log if configured
+  - Emits session_complete event on both Proceed and Skip retry decisions
+  - Tracks retries_this_session counter for accurate retry counts
+- Updated main.rs dry_run output to display output.event_log setting
+- Updated harness.toml with commented-out [output] section
+- Updated config tests for new OutputConfig field
+- Added 2 runner integration tests: event log creation + no-event-log-when-unconfigured
+- Added 6 metrics unit tests for serialization, appending, error handling
+- All 87 tests pass, clippy clean, fmt applied
+
+### Current State
+- Event log is fully functional: configure `[output] event_log = "harness-events.jsonl"` to enable
+- The `committed` and `rate_limited` fields are always false for now (will be populated when commit detection and rate limit features are implemented)
+- Pre-existing dead_code warnings remain for unimplemented modules (hooks, retry.current_attempt, session.output_file, watchdog.ProcessExited)
+
+### Suggested Next Tasks
+- Implement pre/post-session hook execution (8ff) — P2, unblocked
+- Implement prompt prepend_commands (mxg) — P2, unblocked
+- Implement rate limit detection with exponential backoff (7d0) — P3, will populate rate_limited field
+- Implement commit detection in session output (ee7) — P3, will populate committed field

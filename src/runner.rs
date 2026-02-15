@@ -3,6 +3,7 @@
 /// The runner orchestrates the main iteration loop, coordinating
 /// session spawning, watchdog monitoring, retry logic, and signal handling.
 use crate::config::HarnessConfig;
+use crate::metrics::{EventLog, SessionEvent};
 use crate::retry::{RetryDecision, RetryPolicy};
 use crate::session::{self, SessionResult};
 use crate::signals::SignalHandler;
@@ -57,6 +58,14 @@ pub async fn run(config: &HarnessConfig, signals: &SignalHandler) -> RunSummary 
     let status_path = config.session.output_dir.join("harness.status");
     let mut status = StatusTracker::new(status_path, max_iterations, global_iteration);
     status.update(HarnessState::Starting);
+
+    // Event log: optional JSONL append-only log for external tooling
+    let event_log = config
+        .output
+        .event_log
+        .as_ref()
+        .map(|p| EventLog::new(p.clone()));
+    let mut retries_this_session = 0u32;
 
     tracing::info!(max_iterations, global_iteration, "starting iteration loop");
 
@@ -165,9 +174,27 @@ pub async fn run(config: &HarnessConfig, signals: &SignalHandler) -> RunSummary 
         let decision = retry_policy.evaluate(result.output_bytes);
         match decision {
             RetryDecision::Proceed => {
+                // Emit event log entry
+                if let Some(ref log) = event_log {
+                    let event = SessionEvent::session_complete(
+                        productive,
+                        global_iteration,
+                        result.output_bytes,
+                        result.exit_code,
+                        result.duration.as_secs(),
+                        false, // committed — harness doesn't detect this yet
+                        retries_this_session,
+                        false, // rate_limited — not yet implemented
+                    );
+                    if let Err(e) = log.append(&event) {
+                        tracing::warn!(error = %e, "failed to write event log");
+                    }
+                }
+
                 productive += 1;
                 global_iteration += 1;
                 retry_policy.reset();
+                retries_this_session = 0;
                 save_counter(&config.session.counter_file, global_iteration);
 
                 status.set_iteration(productive);
@@ -188,6 +215,7 @@ pub async fn run(config: &HarnessConfig, signals: &SignalHandler) -> RunSummary 
                     max = config.retry.max_empty_retries,
                     "retrying empty session"
                 );
+                retries_this_session += 1;
                 global_iteration += 1;
                 save_counter(&config.session.counter_file, global_iteration);
                 status.set_global_iteration(global_iteration);
@@ -200,10 +228,28 @@ pub async fn run(config: &HarnessConfig, signals: &SignalHandler) -> RunSummary 
                 continue; // Skip the inter-iteration delay
             }
             RetryDecision::Skip => {
+                // Emit event log entry for skipped (empty) session
+                if let Some(ref log) = event_log {
+                    let event = SessionEvent::session_complete(
+                        productive,
+                        global_iteration,
+                        result.output_bytes,
+                        result.exit_code,
+                        result.duration.as_secs(),
+                        false,
+                        retries_this_session,
+                        false,
+                    );
+                    if let Err(e) = log.append(&event) {
+                        tracing::warn!(error = %e, "failed to write event log");
+                    }
+                }
+
                 tracing::warn!("skipping iteration after exhausting retries");
                 productive += 1;
                 global_iteration += 1;
                 retry_policy.reset();
+                retries_this_session = 0;
                 save_counter(&config.session.counter_file, global_iteration);
 
                 status.set_iteration(productive);
@@ -485,6 +531,7 @@ mod tests {
             },
             hooks: HooksConfig::default(),
             prompt: PromptConfig::default(),
+            output: OutputConfig::default(),
         }
     }
 
@@ -669,5 +716,63 @@ mod tests {
         assert_eq!(summary.productive_iterations, 1);
         assert_eq!(summary.exit_reason, ExitReason::MaxIterations);
         assert_eq!(summary.global_iteration, 1);
+    }
+
+    #[tokio::test]
+    async fn test_run_writes_event_log() {
+        let dir = tempdir().unwrap();
+        let event_log_path = dir.path().join("harness-events.jsonl");
+        let mut config = test_config(dir.path(), "echo", vec!["hello from iteration".to_string()]);
+        config.output.event_log = Some(event_log_path.clone());
+
+        std::fs::write(&config.session.prompt_file, "test prompt").unwrap();
+
+        let signals = make_signals();
+        let summary = run(&config, &signals).await;
+
+        assert_eq!(summary.productive_iterations, 3);
+
+        // Verify event log was created with 3 entries
+        assert!(event_log_path.exists(), "event log should be created");
+        let contents = std::fs::read_to_string(&event_log_path).unwrap();
+        let lines: Vec<&str> = contents.lines().collect();
+        assert_eq!(
+            lines.len(),
+            3,
+            "should have one event per productive iteration"
+        );
+
+        // Each line should be valid JSON with expected fields
+        for (i, line) in lines.iter().enumerate() {
+            let parsed: serde_json::Value = serde_json::from_str(line).unwrap();
+            assert_eq!(parsed["event"], "session_complete");
+            assert_eq!(parsed["iteration"], i as u64);
+            assert_eq!(parsed["global"], i as u64);
+            assert!(parsed["output_bytes"].as_u64().unwrap() > 0);
+            assert_eq!(parsed["exit_code"], 0);
+            assert!(parsed["ts"].is_string());
+            assert_eq!(parsed["retries"], 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_run_no_event_log_when_not_configured() {
+        let dir = tempdir().unwrap();
+        let config = test_config(dir.path(), "echo", vec!["hello".to_string()]);
+        // output.event_log is None by default
+
+        std::fs::write(&config.session.prompt_file, "test prompt").unwrap();
+
+        let signals = make_signals();
+        let summary = run(&config, &signals).await;
+
+        assert_eq!(summary.productive_iterations, 3);
+
+        // No event log file should exist
+        let event_log_path = dir.path().join("harness-events.jsonl");
+        assert!(
+            !event_log_path.exists(),
+            "no event log should be created when not configured"
+        );
     }
 }
