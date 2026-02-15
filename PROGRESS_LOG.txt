@@ -340,3 +340,27 @@
 - Implement --dry-run mode (5x6) — P3
 - Implement --quiet mode for minimal output (r43) — P3
 - Implement config validation with helpful error messages (edb) — P3
+
+--- 2026-02-15 13:52:03 | simple-agent-harness-sxy ---
+## Last Session: Add SQLite dependency and create database module with improvements table (simple-agent-harness-sxy)
+
+### Completed
+- Added `rusqlite` v0.31 with `bundled` feature to Cargo.toml
+- Created `src/db.rs` module with:
+  - `open_or_create(path)` function that opens/creates SQLite database at given path
+  - Improvements table schema per PRD: id, ref, created, resolved, category, status, title, body, context, tags, meta
+  - Indexes on status and category columns
+  - WAL journal mode enabled for better concurrent read performance
+  - `next_ref(conn)` function for auto-increment ref assignment (R1, R2, ...)
+- Added `mod db` to `src/main.rs`
+- 13 comprehensive tests covering: creation, idempotency, insert/query, defaults, timestamps, uniqueness, ref generation, all columns, index usage, persistence
+- All 171 tests pass (158 existing + 13 new), clippy clean, fmt applied
+
+### Current State
+- Database module is ready but not yet wired into the runner loop
+- Pre-existing dead_code warnings remain for unimplemented features (metrics.path, retry.current_attempt, etc.)
+- The db::open_or_create and db::next_ref are pub but currently show dead_code warnings since nothing calls them yet
+
+### Suggested Next Tasks
+- Create events and observations tables in database module (cl6) — P1, now unblocked
+- Implement improve add and improve list CLI subcommands (evl) — P1, now unblocked

@@ -1,5 +1,6 @@
 mod commit;
 mod config;
+mod db;
 mod hooks;
 mod metrics;
 mod prompt;

@@ -1,27 +1,22 @@
-## Last Session: Rename package and binary from simple-agent-harness to blacksmith (simple-agent-harness-ynf)
+## Last Session: Add SQLite dependency and create database module with improvements table (simple-agent-harness-sxy)
 
 ### Completed
-- Renamed Cargo.toml package name from `simple-agent-harness` to `blacksmith`
-- Updated CLI struct: command name to `blacksmith`, default config to `blacksmith.toml`
-- Updated dry-run output header from `simple-agent-harness` to `blacksmith`
-- Updated startup log message from `simple-agent-harness starting` to `blacksmith starting`
-- Updated `--status` output to say "No running blacksmith detected"
-- Updated status file from `harness.status` to `blacksmith.status` in main.rs and runner.rs
-- Updated status.rs doc comments and temp file pattern from `.harness.status.tmp` to `.blacksmith.status.tmp`
-- Updated all status.rs test file names to `blacksmith.status`
-- Added backwards-compatible config loading: tries `blacksmith.toml` first, falls back to `harness.toml`
-- Created `blacksmith.toml` from `harness.toml` with updated header comment
-- Kept `harness.toml` for backwards compatibility (users can migrate at their own pace)
-- Kept `HARNESS_*` environment variables unchanged (public API for hooks)
-- All 158 tests pass, clippy clean, fmt applied
+- Added `rusqlite` v0.31 with `bundled` feature to Cargo.toml
+- Created `src/db.rs` module with:
+  - `open_or_create(path)` function that opens/creates SQLite database at given path
+  - Improvements table schema per PRD: id, ref, created, resolved, category, status, title, body, context, tags, meta
+  - Indexes on status and category columns
+  - WAL journal mode enabled for better concurrent read performance
+  - `next_ref(conn)` function for auto-increment ref assignment (R1, R2, ...)
+- Added `mod db` to `src/main.rs`
+- 13 comprehensive tests covering: creation, idempotency, insert/query, defaults, timestamps, uniqueness, ref generation, all columns, index usage, persistence
+- All 171 tests pass (158 existing + 13 new), clippy clean, fmt applied
 
 ### Current State
-- Binary is now `blacksmith` (cargo builds as `blacksmith`)
-- Config defaults to `blacksmith.toml` with fallback to `harness.toml`
-- Status file is now `blacksmith.status`
-- Pre-existing dead_code warnings remain for unimplemented features
+- Database module is ready but not yet wired into the runner loop
+- Pre-existing dead_code warnings remain for unimplemented features (metrics.path, retry.current_attempt, etc.)
+- The db::open_or_create and db::next_ref are pub but currently show dead_code warnings since nothing calls them yet
 
 ### Suggested Next Tasks
-- Implement --dry-run mode (5x6) — P3
-- Implement --quiet mode for minimal output (r43) — P3
-- Implement config validation with helpful error messages (edb) — P3
+- Create events and observations tables in database module (cl6) — P1, now unblocked
+- Implement improve add and improve list CLI subcommands (evl) — P1, now unblocked
