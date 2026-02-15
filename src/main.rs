@@ -6,6 +6,7 @@ mod hooks;
 mod improve;
 mod ingest;
 mod metrics;
+mod metrics_cmd;
 mod prompt;
 mod ratelimit;
 mod retry;
@@ -78,6 +79,26 @@ enum Commands {
     Improve {
         #[command(subcommand)]
         action: ImproveAction,
+    },
+    /// View and manage session metrics
+    Metrics {
+        #[command(subcommand)]
+        action: MetricsAction,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum MetricsAction {
+    /// Ingest a JSONL session file into the metrics database
+    Log {
+        /// Path to the JSONL session output file
+        file: PathBuf,
+    },
+    /// Display a dashboard of recent session metrics
+    Status {
+        /// Number of recent sessions to show (default: 10)
+        #[arg(long, default_value = "10")]
+        last: i64,
     },
 }
 
@@ -193,6 +214,25 @@ async fn main() {
             ImproveAction::List { status, category } => {
                 improve::handle_list(&db_path, status.as_deref(), category.as_deref())
             }
+        };
+
+        if let Err(e) = result {
+            eprintln!("Error: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
+    if let Some(Commands::Metrics { action }) = &cli.command {
+        let output_dir = cli
+            .output_dir
+            .as_deref()
+            .unwrap_or_else(|| std::path::Path::new("."));
+        let db_path = output_dir.join("blacksmith.db");
+
+        let result = match action {
+            MetricsAction::Log { file } => metrics_cmd::handle_log(&db_path, file),
+            MetricsAction::Status { last } => metrics_cmd::handle_status(&db_path, *last),
         };
 
         if let Err(e) = result {

@@ -523,3 +523,27 @@
 - Implement metrics log and metrics status CLI commands (pr9) — P1, ready
 - Implement improve show/update/promote/dismiss/search commands (v25) — P2, ready
 - Implement configurable extraction rules from TOML config (i9s) — P2, ready
+
+--- 2026-02-15 14:12:38 | simple-agent-harness-pr9 ---
+## Last Session: Implement metrics log and metrics status CLI commands (simple-agent-harness-pr9)
+
+### Completed
+- Created `src/metrics_cmd.rs` with two command handlers:
+  - `handle_log(db_path, file)`: Ingests a JSONL session file into the metrics DB, auto-assigning session number as max(session)+1
+  - `handle_status(db_path, last)`: Displays a dashboard table of recent sessions with turns, cost, duration, narration%, parallel% plus summary averages and totals
+- Wired `Metrics` subcommand into `main.rs` with `MetricsAction` enum (Log + Status variants)
+- Added `--last N` flag to `metrics status` (default: 10)
+- 8 new tests in metrics_cmd module covering all code paths
+- All 237 tests pass, clippy clean, fmt applied
+
+### Current State
+- CLI now supports `blacksmith metrics log <file>` and `blacksmith metrics status [--last N]`
+- The `metrics log` command calls the same `ingest::ingest_session` used by the runner loop
+- The `metrics status` command queries `db::recent_observations` and displays a formatted table
+- Some db.rs dead_code warnings remain for functions that will be consumed by future features (events_by_session, events_by_kind, get_observation, etc.)
+
+### Suggested Next Tasks
+- Implement improve show/update/promote/dismiss/search commands (v25) — P2, ready
+- Implement configurable extraction rules from TOML config (i9s) — P2, ready
+- Implement configurable target thresholds and metrics targets command (obm) — P2, ready
+- Add quantitative metrics summary to brief command output (pcb) — P2, now unblocked by pr9
