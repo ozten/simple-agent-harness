@@ -38,3 +38,6 @@ prepend_commands = []
 
 [output]
 # event_log = "harness-events.jsonl"
+
+[commit_detection]
+patterns = ["bd-finish", "(?i)git commit", "(?i)\\bcommitted\\b"]

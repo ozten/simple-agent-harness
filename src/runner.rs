@@ -2,6 +2,7 @@
 ///
 /// The runner orchestrates the main iteration loop, coordinating
 /// session spawning, watchdog monitoring, retry logic, and signal handling.
+use crate::commit;
 use crate::config::HarnessConfig;
 use crate::hooks::{HookEnv, HookRunner};
 use crate::metrics::{EventLog, SessionEvent};
@@ -78,6 +79,15 @@ pub async fn run(config: &HarnessConfig, signals: &SignalHandler) -> RunSummary 
         config.hooks.pre_session.clone(),
         config.hooks.post_session.clone(),
     );
+
+    // Compile commit detection patterns once at startup
+    let commit_patterns = match commit::compile_patterns(&config.commit_detection.patterns) {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!(error = %e, "invalid commit detection pattern, disabling commit detection");
+            vec![]
+        }
+    };
 
     tracing::info!(max_iterations, global_iteration, "starting iteration loop");
 
@@ -219,6 +229,12 @@ pub async fn run(config: &HarnessConfig, signals: &SignalHandler) -> RunSummary 
                 // Check for rate limiting in session output
                 let rate_limited = ratelimit::detect_rate_limit(&output_path);
 
+                // Check for commit indicators in session output
+                let committed = commit::detect_commit(&output_path, &commit_patterns);
+                if committed {
+                    tracing::info!("commit detected in session output");
+                }
+
                 // Emit event log entry
                 if let Some(ref log) = event_log {
                     let event = SessionEvent::session_complete(
@@ -227,7 +243,7 @@ pub async fn run(config: &HarnessConfig, signals: &SignalHandler) -> RunSummary 
                         result.output_bytes,
                         result.exit_code,
                         result.duration.as_secs(),
-                        false, // committed — harness doesn't detect this yet
+                        committed,
                         retries_this_session,
                         rate_limited,
                     );
@@ -247,7 +263,7 @@ pub async fn run(config: &HarnessConfig, signals: &SignalHandler) -> RunSummary 
                         result.exit_code,
                         result.output_bytes,
                         result.duration.as_secs(),
-                        false, // committed — not yet implemented
+                        committed,
                     );
                     hook_runner.run_post_session(&post_env);
                 }
@@ -308,12 +324,14 @@ pub async fn run(config: &HarnessConfig, signals: &SignalHandler) -> RunSummary 
                 status.set_iteration(productive);
                 status.set_global_iteration(global_iteration);
                 status.set_last_completed(global_iteration - 1);
+                status.set_last_committed(committed);
                 status.update(HarnessState::Idle);
 
                 tracing::info!(
                     productive = productive,
                     max = max_iterations,
                     global = global_iteration,
+                    committed,
                     "productive iteration completed"
                 );
             }
@@ -364,7 +382,7 @@ pub async fn run(config: &HarnessConfig, signals: &SignalHandler) -> RunSummary 
                         result.exit_code,
                         result.output_bytes,
                         result.duration.as_secs(),
-                        false, // committed — not yet implemented
+                        false, // empty session — no commit possible
                     );
                     hook_runner.run_post_session(&post_env);
                 }
@@ -651,6 +669,7 @@ mod tests {
             hooks: HooksConfig::default(),
             prompt: PromptConfig::default(),
             output: OutputConfig::default(),
+            commit_detection: CommitDetectionConfig::default(),
         }
     }
 
@@ -1160,5 +1179,101 @@ printf '{"type":"result","subtype":"success","is_error":false,"result":"Done."}\
             count, 1,
             "post hook should run once (on skip), not during retries"
         );
+    }
+
+    #[tokio::test]
+    async fn test_commit_detected_in_event_log() {
+        let dir = tempdir().unwrap();
+        let event_log_path = dir.path().join("events.jsonl");
+        // Script outputs text containing "bd-finish" which matches the default commit pattern
+        let script = dir.path().join("commit_echo.sh");
+        std::fs::write(
+            &script,
+            r#"#!/bin/sh
+printf '{"type":"assistant","message":"running bd-finish.sh bead-123"}\n'
+printf '{"type":"result","subtype":"success","is_error":false,"result":"Done."}\n'
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+
+        let mut config = test_config(dir.path(), script.to_str().unwrap(), vec![]);
+        config.session.max_iterations = 1;
+        config.backoff.initial_delay_secs = 0;
+        config.output.event_log = Some(event_log_path.clone());
+
+        std::fs::write(&config.session.prompt_file, "test prompt").unwrap();
+
+        let signals = make_signals();
+        let summary = run(&config, &signals).await;
+
+        assert_eq!(summary.productive_iterations, 1);
+
+        // Verify event log has committed=true
+        let contents = std::fs::read_to_string(&event_log_path).unwrap();
+        let lines: Vec<&str> = contents.lines().collect();
+        assert_eq!(lines.len(), 1);
+        let parsed: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+        assert_eq!(parsed["committed"], true, "committed should be true when bd-finish detected");
+    }
+
+    #[tokio::test]
+    async fn test_no_commit_detected_in_event_log() {
+        let dir = tempdir().unwrap();
+        let event_log_path = dir.path().join("events.jsonl");
+        let mut config = test_config(dir.path(), "echo", vec!["just regular output".to_string()]);
+        config.session.max_iterations = 1;
+        config.backoff.initial_delay_secs = 0;
+        config.output.event_log = Some(event_log_path.clone());
+
+        std::fs::write(&config.session.prompt_file, "test prompt").unwrap();
+
+        let signals = make_signals();
+        let summary = run(&config, &signals).await;
+
+        assert_eq!(summary.productive_iterations, 1);
+
+        // Verify event log has committed=false
+        let contents = std::fs::read_to_string(&event_log_path).unwrap();
+        let lines: Vec<&str> = contents.lines().collect();
+        assert_eq!(lines.len(), 1);
+        let parsed: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+        assert_eq!(parsed["committed"], false, "committed should be false when no commit pattern matched");
+    }
+
+    #[tokio::test]
+    async fn test_commit_detected_in_post_hook_env() {
+        let dir = tempdir().unwrap();
+        let marker = dir.path().join("hook_output");
+        // Script outputs text containing "git commit" which matches a default commit pattern
+        let script = dir.path().join("commit_echo.sh");
+        std::fs::write(
+            &script,
+            r#"#!/bin/sh
+echo "Changes committed via git commit -m fix"
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+
+        let mut config = test_config(dir.path(), script.to_str().unwrap(), vec![]);
+        config.session.max_iterations = 1;
+        config.backoff.initial_delay_secs = 0;
+        config.hooks.post_session = vec![format!(
+            "echo $HARNESS_COMMITTED > {}",
+            marker.display()
+        )];
+
+        std::fs::write(&config.session.prompt_file, "test prompt").unwrap();
+
+        let signals = make_signals();
+        let summary = run(&config, &signals).await;
+
+        assert_eq!(summary.productive_iterations, 1);
+        assert!(marker.exists(), "post hook should have run");
+        let contents = std::fs::read_to_string(&marker).unwrap();
+        assert_eq!(contents.trim(), "true", "HARNESS_COMMITTED should be true");
     }
 }

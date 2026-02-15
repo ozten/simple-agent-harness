@@ -15,6 +15,7 @@ pub struct HarnessConfig {
     pub hooks: HooksConfig,
     pub prompt: PromptConfig,
     pub output: OutputConfig,
+    pub commit_detection: CommitDetectionConfig,
 }
 
 impl HarnessConfig {
@@ -185,6 +186,20 @@ pub struct OutputConfig {
     pub event_log: Option<PathBuf>,
 }
 
+#[derive(Debug, Deserialize, Clone)]
+#[serde(default)]
+pub struct CommitDetectionConfig {
+    pub patterns: Vec<String>,
+}
+
+impl Default for CommitDetectionConfig {
+    fn default() -> Self {
+        Self {
+            patterns: crate::commit::default_patterns(),
+        }
+    }
+}
+
 // --- Default implementations ---
 
 impl Default for SessionConfig {
@@ -283,6 +298,7 @@ mod tests {
         assert!(config.prompt.file.is_none());
         assert!(config.prompt.prepend_commands.is_empty());
         assert!(config.output.event_log.is_none());
+        assert_eq!(config.commit_detection.patterns.len(), 3);
     }
 
     #[test]

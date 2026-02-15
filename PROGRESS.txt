@@ -1,25 +1,33 @@
-## Last Session: Fix rate limit false positives (simple-agent-harness-0t2)
+## Last Session: Implement commit detection in session output (simple-agent-harness-ee7)
 
 ### Completed
-- Rewrote rate limit detection to only inspect the final `type=result` JSONL event
-- Previously: `detect_rate_limit()` grepped the entire output file for rate limit patterns,
-  causing false positives when the agent read source files mentioning rate limiting
-- Now: `detect_rate_limit_in_result_event()` finds the last `"type":"result"` line, checks
-  `is_error`/`subtype`, and only scans for rate limit patterns if the session ended in error
-- A successful session (`is_error: false`, `subtype: "success"`) is NEVER classified as rate-limited
-- Simplified patterns: removed `resets.*UTC` pattern (too broad), consolidated to:
-  `rate[_.\s]limit`, `usage limit`, `hit your limit` (all case-insensitive)
-- Updated all ratelimit.rs unit tests (21 tests) to use JSONL result event format
-- Updated 3 runner.rs integration tests to produce proper JSONL result events via shell scripts
-- Added new integration test: `test_successful_session_with_rate_limit_text_not_detected`
-  verifying the core false-positive fix works end-to-end
-- All 140 tests pass, clippy clean, fmt applied
+- Created `src/commit.rs` module with commit detection logic
+  - `detect_commit()`: scans session output file for commit indicator patterns
+  - `compile_patterns()`: compiles user-configurable regex patterns at startup
+  - `default_patterns()`: provides 3 defaults — `bd-finish`, `(?i)git commit`, `(?i)\bcommitted\b`
+  - 15 unit tests covering pattern matching, file I/O, custom patterns, edge cases
+- Added `CommitDetectionConfig` to `config.rs` with configurable `patterns` field
+  - Defaults use `commit::default_patterns()` — backward-compatible
+  - Configurable via `[commit_detection] patterns = [...]` in harness.toml
+- Wired commit detection into `runner.rs`:
+  - Patterns compiled once at loop start
+  - After each productive session, scans output for commit indicators
+  - Sets `committed` field in event log (`SessionEvent`)
+  - Sets `last_committed` in status file (`StatusTracker`)
+  - Passes `committed` to post-session hooks via `HARNESS_COMMITTED` env var
+- Added 3 integration tests in runner.rs:
+  - `test_commit_detected_in_event_log` — verifies committed=true in event log
+  - `test_no_commit_detected_in_event_log` — verifies committed=false when no match
+  - `test_commit_detected_in_post_hook_env` — verifies HARNESS_COMMITTED=true in hooks
+- Updated `harness.toml` with `[commit_detection]` section
+- Updated `--dry-run` output to show commit_detection.patterns
+- All 158 tests pass, clippy clean, fmt applied
 
 ### Current State
-- Rate limit detection is now safe against false positives from tool output content
-- Pre-existing dead_code warnings remain for unimplemented features (metrics, status, watchdog, session)
+- Commit detection fully implemented and tested
+- Pre-existing dead_code warnings remain for unimplemented features (metrics path, status path, watchdog, session, retry)
 
 ### Suggested Next Tasks
-- Implement commit detection in session output (ee7) — P3
 - Implement --dry-run mode (5x6) — P3
 - Implement --quiet mode for minimal output (r43) — P3
+- Implement config validation with helpful error messages (edb) — P3

@@ -1,3 +1,4 @@
+mod commit;
 mod config;
 mod hooks;
 mod metrics;
@@ -178,6 +179,10 @@ async fn main() {
                 .event_log
                 .as_ref()
                 .map(|p| p.display().to_string())
+        );
+        println!(
+            "  commit_detection.patterns = {:?}",
+            config.commit_detection.patterns
         );
         println!();
         println!("Dry run mode — config validated, not running.");
