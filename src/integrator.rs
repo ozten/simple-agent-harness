@@ -569,6 +569,19 @@ impl IntegrationQueue {
             tracing::warn!(error = %e, "failed to record integration log");
         }
 
+        // Record integration iteration count
+        let iteration_count = circuit_breaker.attempt_count(bead_id);
+        if let Err(e) = db::record_integration_iterations(
+            db_conn,
+            assignment_id,
+            bead_id,
+            iteration_count,
+            cross_task_str.as_deref(),
+            &merged_at,
+        ) {
+            tracing::warn!(error = %e, "failed to record integration iterations");
+        }
+
         // Update assignment status to integrated
         if let Err(e) =
             db::update_worker_assignment_status(db_conn, assignment_id, "integrated", None)

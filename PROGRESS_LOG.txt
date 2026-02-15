@@ -2232,3 +2232,26 @@
 ### Suggested Next Tasks
 - simple-agent-harness-ldy (P2): Add integration loop iteration tracking
 - simple-agent-harness-34d (P3): Add architecture agent configuration knobs
+
+--- 2026-02-15 22:25:41 | simple-agent-harness-ldy ---
+## Last Session: Integration Loop Iteration Tracking (2026-02-15)
+
+### What Was Done
+- Implemented bead simple-agent-harness-ldy: Add integration loop iteration tracking
+- Added `integration_iterations` DB table to schema in `open_or_create` (db.rs)
+- Added `IntegrationIteration` struct and three API functions:
+  - `record_integration_iterations()` - records iteration count + modules per task
+  - `integration_iterations_by_bead()` - query iterations for a specific bead
+  - `high_iteration_integrations()` - query tasks exceeding an iteration threshold (for architecture agent)
+- Wired recording call into `IntegrationQueue::integrate()` in integrator.rs
+  - Records iteration count from circuit breaker + modules involved before reset
+- Added 4 tests: insert+query, empty result, zero-count, threshold filtering
+
+### Current State
+- All 944 tests pass (1 pre-existing coordinator test failure remains)
+- Clippy clean, fmt clean
+- The query functions are `#[allow(dead_code)]` since they'll be consumed by the historical signal correlator (simple-agent-harness-4wc)
+
+### Suggested Next Tasks
+- simple-agent-harness-4wc (P2): Implement historical signal correlator (now unblocked by this work)
+- simple-agent-harness-34d (P3): Add architecture agent configuration knobs

@@ -87,6 +87,17 @@ pub fn open_or_create(path: &Path) -> Result<Connection> {
 
         CREATE INDEX IF NOT EXISTS idx_integration_log_assignment ON integration_log(assignment_id);
 
+        CREATE TABLE IF NOT EXISTS integration_iterations (
+            id              INTEGER PRIMARY KEY,
+            assignment_id   INTEGER NOT NULL REFERENCES worker_assignments(id),
+            bead_id         TEXT NOT NULL,
+            iteration_count INTEGER NOT NULL,
+            modules         TEXT,
+            recorded_at     TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_integration_iterations_bead ON integration_iterations(bead_id);
+
         CREATE TABLE IF NOT EXISTS bead_metrics (
             bead_id               TEXT PRIMARY KEY,
             sessions              INTEGER NOT NULL DEFAULT 0,
@@ -916,6 +927,92 @@ pub fn find_entangled_beads(conn: &Connection, bead_id: &str) -> Result<Vec<(Str
     let rows = stmt
         .query_map(rusqlite::params![pattern, bead_id], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+// ── Integration Iterations ─────────────────────────────────────────
+
+/// A row from the integration_iterations table.
+#[derive(Debug)]
+#[allow(dead_code)]
+pub struct IntegrationIteration {
+    pub id: i64,
+    pub assignment_id: i64,
+    pub bead_id: String,
+    pub iteration_count: u32,
+    pub modules: Option<String>,
+    pub recorded_at: String,
+}
+
+/// Record integration loop iteration count for a task.
+///
+/// `iteration_count` is the number of fix-loop iterations during integration
+/// (0 means the compiler check passed on the first try).
+/// `modules` is a comma-separated list of modules involved in the fix loop.
+pub fn record_integration_iterations(
+    conn: &Connection,
+    assignment_id: i64,
+    bead_id: &str,
+    iteration_count: u32,
+    modules: Option<&str>,
+    recorded_at: &str,
+) -> Result<i64> {
+    conn.execute(
+        "INSERT INTO integration_iterations (assignment_id, bead_id, iteration_count, modules, recorded_at) \
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        rusqlite::params![assignment_id, bead_id, iteration_count, modules, recorded_at],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+/// Get integration iteration records for a bead.
+#[allow(dead_code)]
+pub fn integration_iterations_by_bead(
+    conn: &Connection,
+    bead_id: &str,
+) -> Result<Vec<IntegrationIteration>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, assignment_id, bead_id, iteration_count, modules, recorded_at \
+         FROM integration_iterations WHERE bead_id = ?1 ORDER BY id ASC",
+    )?;
+    let rows = stmt
+        .query_map(rusqlite::params![bead_id], |row| {
+            Ok(IntegrationIteration {
+                id: row.get(0)?,
+                assignment_id: row.get(1)?,
+                bead_id: row.get(2)?,
+                iteration_count: row.get(3)?,
+                modules: row.get(4)?,
+                recorded_at: row.get(5)?,
+            })
+        })?
+        .collect::<Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+/// Get all integration iterations with high iteration counts (> threshold).
+/// Useful for the architecture agent to identify problematic interfaces.
+#[allow(dead_code)]
+pub fn high_iteration_integrations(
+    conn: &Connection,
+    threshold: u32,
+) -> Result<Vec<IntegrationIteration>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, assignment_id, bead_id, iteration_count, modules, recorded_at \
+         FROM integration_iterations WHERE iteration_count > ?1 ORDER BY iteration_count DESC",
+    )?;
+    let rows = stmt
+        .query_map(rusqlite::params![threshold], |row| {
+            Ok(IntegrationIteration {
+                id: row.get(0)?,
+                assignment_id: row.get(1)?,
+                bead_id: row.get(2)?,
+                iteration_count: row.get(3)?,
+                modules: row.get(4)?,
+                recorded_at: row.get(5)?,
+            })
         })?
         .collect::<Result<Vec<_>>>()?;
     Ok(rows)
@@ -2756,5 +2853,105 @@ mod tests {
 
         let result = find_entangled_beads(&conn, "beads-abc").unwrap();
         assert!(result.is_empty());
+    }
+
+    // ── Integration Iterations tests ─────────────────────────────────────
+
+    #[test]
+    fn record_and_query_integration_iterations() {
+        let (_dir, conn) = test_db();
+        let aid = insert_worker_assignment(&conn, 0, "beads-iter", "/tmp/wt-0", "integrated", None)
+            .unwrap();
+
+        let row_id = record_integration_iterations(
+            &conn,
+            aid,
+            "beads-iter",
+            2,
+            Some("auth,models"),
+            "2026-02-15T12:00:00Z",
+        )
+        .unwrap();
+        assert!(row_id > 0);
+
+        let entries = integration_iterations_by_bead(&conn, "beads-iter").unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].bead_id, "beads-iter");
+        assert_eq!(entries[0].iteration_count, 2);
+        assert_eq!(entries[0].modules.as_deref(), Some("auth,models"));
+        assert_eq!(entries[0].recorded_at, "2026-02-15T12:00:00Z");
+    }
+
+    #[test]
+    fn integration_iterations_empty_for_unknown_bead() {
+        let (_dir, conn) = test_db();
+        let entries = integration_iterations_by_bead(&conn, "beads-unknown").unwrap();
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn integration_iterations_zero_count() {
+        let (_dir, conn) = test_db();
+        let aid = insert_worker_assignment(&conn, 0, "beads-zero", "/tmp/wt-0", "integrated", None)
+            .unwrap();
+
+        record_integration_iterations(&conn, aid, "beads-zero", 0, None, "2026-02-15T12:00:00Z")
+            .unwrap();
+
+        let entries = integration_iterations_by_bead(&conn, "beads-zero").unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].iteration_count, 0);
+        assert!(entries[0].modules.is_none());
+    }
+
+    #[test]
+    fn high_iteration_integrations_filters_by_threshold() {
+        let (_dir, conn) = test_db();
+
+        let aid1 = insert_worker_assignment(&conn, 0, "beads-low", "/tmp/wt-0", "integrated", None)
+            .unwrap();
+        let aid2 =
+            insert_worker_assignment(&conn, 1, "beads-high", "/tmp/wt-1", "integrated", None)
+                .unwrap();
+        let aid3 = insert_worker_assignment(&conn, 2, "beads-mid", "/tmp/wt-2", "integrated", None)
+            .unwrap();
+
+        record_integration_iterations(&conn, aid1, "beads-low", 1, None, "2026-02-15T12:00:00Z")
+            .unwrap();
+        record_integration_iterations(
+            &conn,
+            aid2,
+            "beads-high",
+            3,
+            Some("auth,db"),
+            "2026-02-15T12:01:00Z",
+        )
+        .unwrap();
+        record_integration_iterations(
+            &conn,
+            aid3,
+            "beads-mid",
+            2,
+            Some("models"),
+            "2026-02-15T12:02:00Z",
+        )
+        .unwrap();
+
+        // Threshold=1: should return beads-high (3) and beads-mid (2)
+        let results = high_iteration_integrations(&conn, 1).unwrap();
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].bead_id, "beads-high"); // highest first
+        assert_eq!(results[0].iteration_count, 3);
+        assert_eq!(results[1].bead_id, "beads-mid");
+        assert_eq!(results[1].iteration_count, 2);
+
+        // Threshold=2: should return only beads-high (3)
+        let results = high_iteration_integrations(&conn, 2).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].bead_id, "beads-high");
+
+        // Threshold=5: should return nothing
+        let results = high_iteration_integrations(&conn, 5).unwrap();
+        assert!(results.is_empty());
     }
 }

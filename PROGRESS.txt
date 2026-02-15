@@ -1,18 +1,21 @@
-## Last Session: Singleton Lock Verification (2026-02-15)
+## Last Session: Integration Loop Iteration Tracking (2026-02-15)
 
 ### What Was Done
-- Verified that the singleton lock (bead simple-agent-harness-ckq) is fully implemented and working
-- The reopening note claiming "fs2 crate missing from Cargo.toml, singleton.rs has unresolved imports, DataDir::lock() doesn't exist" was outdated — all three issues were already resolved
-- Implementation verified: src/singleton.rs (try_acquire, PID writing, LockError types, 5 tests)
-- Integration verified: main.rs line 1251 acquires lock before coordinator/runner starts
-- Dependencies verified: fs2 = "0.4" in Cargo.toml, DataDir::lock() at data_dir.rs:49
-- All 5 singleton tests pass, all 9 data_dir tests pass, compilation clean
+- Implemented bead simple-agent-harness-ldy: Add integration loop iteration tracking
+- Added `integration_iterations` DB table to schema in `open_or_create` (db.rs)
+- Added `IntegrationIteration` struct and three API functions:
+  - `record_integration_iterations()` - records iteration count + modules per task
+  - `integration_iterations_by_bead()` - query iterations for a specific bead
+  - `high_iteration_integrations()` - query tasks exceeding an iteration threshold (for architecture agent)
+- Wired recording call into `IntegrationQueue::integrate()` in integrator.rs
+  - Records iteration count from circuit breaker + modules involved before reset
+- Added 4 tests: insert+query, empty result, zero-count, threshold filtering
 
 ### Current State
-- Singleton lock is functional: prevents concurrent blacksmith instances via flock
-- All tests pass (except coordinator test which is a pre-existing known slow test)
-- No code changes were needed this session — bead was already complete
+- All 944 tests pass (1 pre-existing coordinator test failure remains)
+- Clippy clean, fmt clean
+- The query functions are `#[allow(dead_code)]` since they'll be consumed by the historical signal correlator (simple-agent-harness-4wc)
 
 ### Suggested Next Tasks
-- simple-agent-harness-ldy (P2): Add integration loop iteration tracking
+- simple-agent-harness-4wc (P2): Implement historical signal correlator (now unblocked by this work)
 - simple-agent-harness-34d (P3): Add architecture agent configuration knobs
