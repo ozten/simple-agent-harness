@@ -488,7 +488,10 @@ mod tests {
     fn make_targets_config(
         rules: Vec<crate::config::TargetRule>,
     ) -> crate::config::MetricsTargetsConfig {
-        crate::config::MetricsTargetsConfig { rules }
+        crate::config::MetricsTargetsConfig {
+            rules,
+            streak_threshold: 3,
+        }
     }
 
     fn make_rule(

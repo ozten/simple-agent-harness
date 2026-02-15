@@ -223,10 +223,27 @@ pub struct MetricsConfig {
     pub targets: MetricsTargetsConfig,
 }
 
-#[derive(Debug, Deserialize, Clone, Default)]
+#[derive(Debug, Deserialize, Clone)]
 #[serde(default)]
 pub struct MetricsTargetsConfig {
     pub rules: Vec<TargetRule>,
+    /// Number of consecutive misses before escalating to an ALERT in brief output.
+    /// Default: 3
+    #[serde(default = "default_streak_threshold")]
+    pub streak_threshold: u32,
+}
+
+fn default_streak_threshold() -> u32 {
+    3
+}
+
+impl Default for MetricsTargetsConfig {
+    fn default() -> Self {
+        Self {
+            rules: Vec::new(),
+            streak_threshold: default_streak_threshold(),
+        }
+    }
 }
 
 /// A configurable target rule that defines a performance threshold.
@@ -779,5 +796,35 @@ max_iterations = 50
         let config = HarnessConfig::load(&path).unwrap();
         assert_eq!(config.session.max_iterations, 50);
         assert!(config.metrics.extract.rules.is_empty());
+    }
+
+    #[test]
+    fn test_default_streak_threshold() {
+        let config = HarnessConfig::default();
+        assert_eq!(config.metrics.targets.streak_threshold, 3);
+    }
+
+    #[test]
+    fn test_load_streak_threshold_from_toml() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("blacksmith.toml");
+        std::fs::write(
+            &path,
+            r#"
+[metrics.targets]
+streak_threshold = 5
+
+[[metrics.targets.rules]]
+kind = "turns.total"
+compare = "avg"
+threshold = 80
+direction = "below"
+label = "Avg turns"
+"#,
+        )
+        .unwrap();
+        let config = HarnessConfig::load(&path).unwrap();
+        assert_eq!(config.metrics.targets.streak_threshold, 5);
+        assert_eq!(config.metrics.targets.rules.len(), 1);
     }
 }

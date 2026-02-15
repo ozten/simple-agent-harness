@@ -231,7 +231,15 @@ async fn main() {
             .unwrap_or_else(|| std::path::Path::new("."));
         let db_path = output_dir.join("blacksmith.db");
 
-        if let Err(e) = brief::handle_brief(&db_path) {
+        let config_for_brief = HarnessConfig::load(&cli.config).unwrap_or_default();
+        let targets = &config_for_brief.metrics.targets;
+        let targets_opt = if targets.rules.is_empty() {
+            None
+        } else {
+            Some(targets)
+        };
+
+        if let Err(e) = brief::handle_brief(&db_path, targets_opt) {
             eprintln!("Error: {e}");
             std::process::exit(1);
         }

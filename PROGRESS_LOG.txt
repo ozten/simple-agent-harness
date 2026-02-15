@@ -651,3 +651,34 @@
 - Add target miss warnings and streak detection to brief output (h97) — P2, was blocked by obm (now unblocked)
 - Implement --dry-run mode (5x6) — P3, ready
 - Implement --quiet mode for minimal output (r43) — P3, ready
+
+--- 2026-02-15 14:34:08 | simple-agent-harness-h97 ---
+## Last Session: Add target miss warnings and streak detection to brief output (simple-agent-harness-h97)
+
+### Completed
+- Extended `brief.rs` to auto-generate TARGET WARNINGS section when targets are missed
+  - `generate_brief` and `handle_brief` now accept optional `MetricsTargetsConfig`
+  - Evaluates each target rule against the most recent observation (per-observation, not aggregate)
+  - For each miss, counts consecutive miss streak working backwards through history
+  - If streak >= `streak_threshold`, escalates from WARNING to ALERT with streak count
+  - Supports "avg" and "pct_of" compare modes (pct_sessions skipped for per-observation evaluation)
+  - Format: `WARNING: Label value (target: <threshold)` or `ALERT: ... — missed N consecutive sessions`
+- Added `streak_threshold` config field to `MetricsTargetsConfig` in `config.rs`
+  - Default: 3, configurable via `[metrics.targets] streak_threshold = N`
+  - Manual Default impl ensures default value is 3 (not 0 from derive Default)
+- Updated callers in `main.rs` (loads config for Brief command) and `prompt.rs` (passes None)
+- Added 22 new tests (340 total pass): single miss, no miss, streak escalation, streak broken by pass,
+  pct_of miss, above direction, multiple rules mixed, position ordering, no rules, None config,
+  evaluate_single_observation (pass/miss/pct_of/pct_sessions/missing data), format helpers,
+  streak exactly at threshold, configurable threshold, config default/TOML parsing
+- Clippy clean, fmt applied
+
+### Current State
+- `blacksmith brief` output now has 3 sections: PERFORMANCE FEEDBACK → TARGET WARNINGS → OPEN IMPROVEMENTS
+- Target warnings only appear when targets are configured and at least one is missed
+- Pre-existing dead_code warnings remain for functions consumed by future features
+
+### Suggested Next Tasks
+- Implement --dry-run mode (5x6) — P3, ready
+- Implement --quiet mode for minimal output (r43) — P3, ready
+- Implement config validation with helpful error messages (edb) — P3, ready
