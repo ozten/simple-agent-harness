@@ -1,28 +1,30 @@
-## Last Session: Implement graceful metric degradation for adapter limitations (ee2)
+## Last Session: Implement dynamic affected set expansion via .blacksmith-expand (d2q)
 
 ### Completed
-- Added graceful metric degradation when target rules reference metrics the current adapter doesn't support
-- In `brief.rs`: Added `supported_metrics` parameter to `handle_brief`, `generate_brief`, and `format_target_warnings`. Rules for unsupported metrics are silently skipped in the brief output
-- In `metrics_cmd.rs`: Added `adapter_name` and `supported_metrics` parameters to `handle_targets`. Unsupported metrics show as "N/A (not available from <adapter> adapter)" in the targets display. Summary line includes count of unavailable targets
-- In `main.rs`: Both the Brief and Metrics Targets handlers now resolve the adapter and pass supported metrics through
-- In `prompt.rs`: Updated `generate_brief` call to include new parameter (passes None since no targets config in prompt context)
-- Added helper functions `is_rule_supported` (brief.rs) and `is_metric_available` (metrics_cmd.rs) to check if a rule's metrics (including `relative_to` for pct_of rules) are supported
-- Added 7 new tests (664 total passing):
-  - brief: target_warnings_skip_unsupported_metric
-  - brief: target_warnings_skip_unsupported_relative_to_metric
-  - brief: target_warnings_none_supported_metrics_means_no_filtering
-  - brief: is_rule_supported_tests
-  - metrics_cmd: targets_unsupported_metric_shows_na
-  - metrics_cmd: targets_all_unsupported_shows_summary
-  - metrics_cmd: is_metric_available_tests
+- Implemented `.blacksmith-expand` file watching in the coordinator loop
+- When a worker writes `.blacksmith-expand` in its worktree, the coordinator reads new file globs (one per line), merges them with existing affected_globs in the DB, and deletes the file
+- Expansion is always granted (optimistic concurrency per spec) — conflicts resolved at integration time
+- Comments (lines starting with #) and empty lines in expand files are ignored
+- Duplicate globs are not added twice during merge
+- Updated `build_in_progress_list` to read affected_globs from the database, so the scheduler uses accurate (including dynamically expanded) affected sets for conflict detection
+- Added `update_worker_assignment_affected_globs` DB function
+- Added `worker_assignment_id` and `worker_worktree_path` accessor methods to WorkerPool
+- Added `set_worker_state_for_test` helper to WorkerPool for test setup
+- Added 7 new tests (670 total passing):
+  - coordinator: test_parse_comma_separated_globs
+  - coordinator: test_expand_file_processing (full end-to-end)
+  - coordinator: test_expand_file_no_duplicates
+  - coordinator: test_expand_file_empty_file_ignored
+  - coordinator: test_expand_file_comments_ignored
+  - coordinator: test_no_expand_file_is_noop
+  - coordinator: test_build_in_progress_list_empty_pool (updated to use DB)
 
 ### Key Files Modified
-- `src/brief.rs` — added supported_metrics filtering to brief generation
-- `src/metrics_cmd.rs` — added N/A display for unsupported targets
-- `src/main.rs` — threaded adapter info through Brief and Metrics Targets handlers
-- `src/prompt.rs` — updated generate_brief call signature
+- `src/coordinator.rs` — expand file processing, updated build_in_progress_list
+- `src/db.rs` — added update_worker_assignment_affected_globs
+- `src/pool.rs` — added worker_assignment_id, worker_worktree_path, set_worker_state_for_test
 
 ### Suggested Next Tasks
-- **d2q**: Implement dynamic affected set expansion via .blacksmith-expand (P2)
 - **wdo**: Implement blacksmith workers status and kill commands (P2)
 - **3su**: Implement periodic reconciliation with full test suite (P2)
+- **dgh**: Implement session-to-bead attribution (P2)

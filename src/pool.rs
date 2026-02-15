@@ -394,6 +394,16 @@ impl WorkerPool {
         Ok(())
     }
 
+    /// Get a worker's assignment ID (if it has one).
+    pub fn worker_assignment_id(&self, worker_id: u32) -> Option<i64> {
+        self.workers.get(worker_id as usize)?.assignment_id
+    }
+
+    /// Get a worker's worktree path (if it has one).
+    pub fn worker_worktree_path(&self, worker_id: u32) -> Option<PathBuf> {
+        self.workers.get(worker_id as usize)?.worktree_path.clone()
+    }
+
     /// Get active worktree paths (for orphan cleanup).
     pub fn active_worktree_paths(&self) -> Vec<PathBuf> {
         self.workers
@@ -401,6 +411,24 @@ impl WorkerPool {
             .filter(|w| w.state == WorkerState::Coding)
             .filter_map(|w| w.worktree_path.clone())
             .collect()
+    }
+
+    /// Set a worker's state directly for testing purposes.
+    #[doc(hidden)]
+    pub fn set_worker_state_for_test(
+        &mut self,
+        worker_id: u32,
+        state: WorkerState,
+        assignment_id: Option<i64>,
+        bead_id: Option<String>,
+        worktree_path: Option<PathBuf>,
+    ) {
+        if let Some(worker) = self.workers.get_mut(worker_id as usize) {
+            worker.state = state;
+            worker.assignment_id = assignment_id;
+            worker.bead_id = bead_id;
+            worker.worktree_path = worktree_path;
+        }
     }
 }
 

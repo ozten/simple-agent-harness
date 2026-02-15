@@ -605,6 +605,19 @@ pub fn update_worker_assignment_status(
     Ok(rows > 0)
 }
 
+/// Update a worker assignment's affected_globs field (for dynamic expansion).
+pub fn update_worker_assignment_affected_globs(
+    conn: &Connection,
+    id: i64,
+    affected_globs: &str,
+) -> Result<bool> {
+    let rows = conn.execute(
+        "UPDATE worker_assignments SET affected_globs = ?1 WHERE id = ?2",
+        rusqlite::params![affected_globs, id],
+    )?;
+    Ok(rows > 0)
+}
+
 /// Get a worker assignment by id.
 pub fn get_worker_assignment(conn: &Connection, id: i64) -> Result<Option<WorkerAssignment>> {
     let mut stmt = conn.prepare(

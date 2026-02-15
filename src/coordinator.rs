@@ -11,8 +11,12 @@ use crate::integrator::{CircuitBreaker, IntegrationQueue, TrippedFailure};
 use crate::pool::{PoolError, WorkerPool};
 use crate::scheduler::{self, InProgressAssignment, ReadyBead};
 use crate::signals::SignalHandler;
+use rusqlite::Connection;
 use std::path::PathBuf;
 use tokio::time::Duration;
+
+/// Well-known filename that agents write to request affected set expansion.
+const EXPAND_FILE_NAME: &str = ".blacksmith-expand";
 
 /// Summary of a coordinator run, analogous to runner::RunSummary.
 #[derive(Debug)]
@@ -215,10 +219,13 @@ pub async fn run(
             }
         }
 
+        // Check for .blacksmith-expand files in worker worktrees
+        check_and_process_expand_files(&pool, &db_conn);
+
         // If we have idle workers, try to schedule work
         if pool.idle_count() > 0 {
             // Gather in-progress assignments for the scheduler
-            let in_progress = build_in_progress_list(&pool);
+            let in_progress = build_in_progress_list(&pool, &db_conn);
 
             // Query ready beads (stubbed — reads from `bd ready` equivalent)
             let ready_beads = query_ready_beads();
@@ -275,22 +282,166 @@ pub async fn run(
 }
 
 /// Build the list of in-progress assignments from the worker pool's current state.
-fn build_in_progress_list(pool: &WorkerPool) -> Vec<InProgressAssignment> {
+///
+/// Reads affected_globs from the database for each coding worker so the scheduler
+/// can make accurate conflict decisions (including dynamically expanded sets).
+fn build_in_progress_list(pool: &WorkerPool, db_conn: &Connection) -> Vec<InProgressAssignment> {
     pool.snapshot()
         .iter()
         .filter(|(_, state, bead_id)| {
             *state == crate::pool::WorkerState::Coding && bead_id.is_some()
         })
-        .map(|(_, _, bead_id)| {
-            // For now, we don't have the affected globs in the pool snapshot.
-            // Treat all in-progress tasks as affecting everything (conservative).
-            // Future: store affected_globs in the worker or look them up from DB.
+        .map(|(worker_id, _, bead_id)| {
+            let bead_id_str = bead_id.unwrap().to_string();
+
+            // Look up the assignment's affected_globs from the DB
+            let affected_globs = lookup_affected_globs_for_worker(pool, *worker_id, db_conn);
+
             InProgressAssignment {
-                bead_id: bead_id.unwrap().to_string(),
-                affected_globs: None,
+                bead_id: bead_id_str,
+                affected_globs,
             }
         })
         .collect()
+}
+
+/// Look up affected_globs from the DB for a worker's current assignment.
+fn lookup_affected_globs_for_worker(
+    pool: &WorkerPool,
+    worker_id: u32,
+    db_conn: &Connection,
+) -> Option<Vec<String>> {
+    let assignment_id = pool.worker_assignment_id(worker_id)?;
+    let wa = db::get_worker_assignment(db_conn, assignment_id).ok()??;
+    let globs_str = wa.affected_globs?;
+    Some(parse_comma_separated_globs(&globs_str))
+}
+
+/// Parse a comma-separated globs string into a vector.
+fn parse_comma_separated_globs(s: &str) -> Vec<String> {
+    s.split(',')
+        .map(|g| g.trim().to_string())
+        .filter(|g| !g.is_empty())
+        .collect()
+}
+
+/// Check all coding workers for `.blacksmith-expand` files and process them.
+///
+/// When a `.blacksmith-expand` file is found in a worker's worktree:
+/// 1. Read the new file globs from it (one per line)
+/// 2. Merge them with the assignment's existing affected_globs in the DB
+/// 3. Delete the file so it's not processed again
+///
+/// Per the spec, expansion is always granted (optimistic concurrency).
+/// Conflicts with other in-progress tasks are resolved at integration time.
+fn check_and_process_expand_files(pool: &WorkerPool, db_conn: &Connection) {
+    for (worker_id, state, _bead_id) in pool.snapshot() {
+        if state != crate::pool::WorkerState::Coding {
+            continue;
+        }
+
+        let worktree_path = match pool.worker_worktree_path(worker_id) {
+            Some(p) => p,
+            None => continue,
+        };
+
+        let expand_path = worktree_path.join(EXPAND_FILE_NAME);
+        if !expand_path.exists() {
+            continue;
+        }
+
+        // Read the expand file
+        let contents = match std::fs::read_to_string(&expand_path) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(
+                    worker_id,
+                    path = %expand_path.display(),
+                    error = %e,
+                    "failed to read .blacksmith-expand file"
+                );
+                continue;
+            }
+        };
+
+        // Parse new globs (one per line, ignoring empty lines and comments)
+        let new_globs: Vec<String> = contents
+            .lines()
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+            .collect();
+
+        if new_globs.is_empty() {
+            // Empty expand file — just delete it
+            let _ = std::fs::remove_file(&expand_path);
+            continue;
+        }
+
+        // Get the assignment ID for this worker
+        let assignment_id = match pool.worker_assignment_id(worker_id) {
+            Some(id) => id,
+            None => {
+                tracing::warn!(worker_id, "expand file found but no assignment ID");
+                let _ = std::fs::remove_file(&expand_path);
+                continue;
+            }
+        };
+
+        // Get existing affected_globs from DB and merge
+        let existing = db::get_worker_assignment(db_conn, assignment_id)
+            .ok()
+            .flatten()
+            .and_then(|wa| wa.affected_globs)
+            .map(|g| parse_comma_separated_globs(&g))
+            .unwrap_or_default();
+
+        let mut merged = existing;
+        for g in &new_globs {
+            if !merged.contains(g) {
+                merged.push(g.clone());
+            }
+        }
+
+        let merged_str = merged.join(", ");
+
+        // Update the DB
+        match db::update_worker_assignment_affected_globs(db_conn, assignment_id, &merged_str) {
+            Ok(true) => {
+                tracing::info!(
+                    worker_id,
+                    assignment_id,
+                    new_globs = ?new_globs,
+                    merged = %merged_str,
+                    "expanded affected set for worker"
+                );
+            }
+            Ok(false) => {
+                tracing::warn!(
+                    worker_id,
+                    assignment_id,
+                    "affected set expansion: assignment not found in DB"
+                );
+            }
+            Err(e) => {
+                tracing::error!(
+                    worker_id,
+                    assignment_id,
+                    error = %e,
+                    "failed to update affected set in DB"
+                );
+            }
+        }
+
+        // Delete the expand file so it's not processed again
+        if let Err(e) = std::fs::remove_file(&expand_path) {
+            tracing::warn!(
+                worker_id,
+                path = %expand_path.display(),
+                error = %e,
+                "failed to delete .blacksmith-expand file after processing"
+            );
+        }
+    }
 }
 
 /// Query ready beads from the beads system.
@@ -519,7 +670,9 @@ mod tests {
             worktrees_dir: "worktrees".to_string(),
         };
         let pool = WorkerPool::new(&config, dir.path().to_path_buf(), wt_dir);
-        let in_progress = build_in_progress_list(&pool);
+        let db_path = dir.path().join("test.db");
+        let db_conn = db::open_or_create(&db_path).unwrap();
+        let in_progress = build_in_progress_list(&pool, &db_conn);
         assert!(in_progress.is_empty());
     }
 
@@ -614,5 +767,336 @@ mod tests {
         cb.reset(bead_id);
         assert_eq!(cb.state(bead_id), CircuitState::Closed);
         assert!(cb.check_tripped(bead_id, "error", worktree_path).is_none());
+    }
+
+    #[test]
+    fn test_parse_comma_separated_globs() {
+        assert_eq!(
+            parse_comma_separated_globs("src/db.rs, src/config.rs"),
+            vec!["src/db.rs", "src/config.rs"]
+        );
+        assert_eq!(parse_comma_separated_globs("src/db.rs"), vec!["src/db.rs"]);
+        assert!(parse_comma_separated_globs("").is_empty());
+        assert_eq!(
+            parse_comma_separated_globs("  src/a.rs ,  src/b.rs  "),
+            vec!["src/a.rs", "src/b.rs"]
+        );
+    }
+
+    #[test]
+    fn test_expand_file_processing() {
+        use std::process::Command as StdCommand;
+        use std::process::Stdio;
+
+        // Set up a git repo with a worktree (needed for pool)
+        let dir = tempdir().unwrap();
+        let repo = dir.path();
+
+        StdCommand::new("git")
+            .args(["init"])
+            .current_dir(repo)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
+        StdCommand::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(repo)
+            .status()
+            .unwrap();
+        StdCommand::new("git")
+            .args(["config", "user.name", "Test"])
+            .current_dir(repo)
+            .status()
+            .unwrap();
+        std::fs::write(repo.join("README.md"), "test").unwrap();
+        StdCommand::new("git")
+            .args(["add", "."])
+            .current_dir(repo)
+            .status()
+            .unwrap();
+        StdCommand::new("git")
+            .args(["commit", "-m", "init"])
+            .current_dir(repo)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
+        StdCommand::new("git")
+            .args(["branch", "-M", "main"])
+            .current_dir(repo)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
+
+        // Create a fake worktree directory (simulate a worker's worktree)
+        let wt_dir = repo.join("worktrees");
+        std::fs::create_dir_all(&wt_dir).unwrap();
+        let fake_worktree = wt_dir.join("worker-0");
+        std::fs::create_dir_all(&fake_worktree).unwrap();
+
+        // Set up DB
+        let db_path = repo.join("test.db");
+        let db_conn = db::open_or_create(&db_path).unwrap();
+
+        // Insert a worker assignment with initial affected_globs
+        let assignment_id = db::insert_worker_assignment(
+            &db_conn,
+            0,
+            "beads-expand-test",
+            &fake_worktree.to_string_lossy(),
+            "coding",
+            Some("src/db.rs"),
+        )
+        .unwrap();
+
+        // Create a pool and manually set up a worker in Coding state
+        let workers_config = WorkersConfig {
+            max: 1,
+            base_branch: "main".to_string(),
+            worktrees_dir: "worktrees".to_string(),
+        };
+        let mut pool = WorkerPool::new(&workers_config, repo.to_path_buf(), wt_dir);
+
+        // Use set_worker_for_test to set up the coding state
+        pool.set_worker_state_for_test(
+            0,
+            crate::pool::WorkerState::Coding,
+            Some(assignment_id),
+            Some("beads-expand-test".to_string()),
+            Some(fake_worktree.clone()),
+        );
+
+        // Write a .blacksmith-expand file
+        std::fs::write(
+            fake_worktree.join(EXPAND_FILE_NAME),
+            "src/config.rs\nsrc/signals.rs\n",
+        )
+        .unwrap();
+
+        // Process expand files
+        check_and_process_expand_files(&pool, &db_conn);
+
+        // Verify the affected_globs were updated in DB
+        let wa = db::get_worker_assignment(&db_conn, assignment_id)
+            .unwrap()
+            .unwrap();
+        let globs = wa.affected_globs.unwrap();
+        assert!(globs.contains("src/db.rs"));
+        assert!(globs.contains("src/config.rs"));
+        assert!(globs.contains("src/signals.rs"));
+
+        // Verify the expand file was deleted
+        assert!(!fake_worktree.join(EXPAND_FILE_NAME).exists());
+    }
+
+    #[test]
+    fn test_expand_file_no_duplicates() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let db_conn = db::open_or_create(&db_path).unwrap();
+
+        let fake_worktree = dir.path().join("worker-0");
+        std::fs::create_dir_all(&fake_worktree).unwrap();
+
+        let assignment_id = db::insert_worker_assignment(
+            &db_conn,
+            0,
+            "beads-nodup",
+            &fake_worktree.to_string_lossy(),
+            "coding",
+            Some("src/db.rs, src/config.rs"),
+        )
+        .unwrap();
+
+        let workers_config = WorkersConfig {
+            max: 1,
+            base_branch: "main".to_string(),
+            worktrees_dir: "worktrees".to_string(),
+        };
+        let mut pool = WorkerPool::new(
+            &workers_config,
+            dir.path().to_path_buf(),
+            dir.path().join("wt"),
+        );
+        pool.set_worker_state_for_test(
+            0,
+            crate::pool::WorkerState::Coding,
+            Some(assignment_id),
+            Some("beads-nodup".to_string()),
+            Some(fake_worktree.clone()),
+        );
+
+        // Expand file includes one existing and one new glob
+        std::fs::write(
+            fake_worktree.join(EXPAND_FILE_NAME),
+            "src/db.rs\nsrc/new.rs\n",
+        )
+        .unwrap();
+
+        check_and_process_expand_files(&pool, &db_conn);
+
+        let wa = db::get_worker_assignment(&db_conn, assignment_id)
+            .unwrap()
+            .unwrap();
+        let globs_str = wa.affected_globs.unwrap();
+        let globs = parse_comma_separated_globs(&globs_str);
+
+        // src/db.rs should appear only once
+        assert_eq!(globs.iter().filter(|g| *g == "src/db.rs").count(), 1);
+        assert!(globs.contains(&"src/config.rs".to_string()));
+        assert!(globs.contains(&"src/new.rs".to_string()));
+    }
+
+    #[test]
+    fn test_expand_file_empty_file_ignored() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let db_conn = db::open_or_create(&db_path).unwrap();
+
+        let fake_worktree = dir.path().join("worker-0");
+        std::fs::create_dir_all(&fake_worktree).unwrap();
+
+        let assignment_id = db::insert_worker_assignment(
+            &db_conn,
+            0,
+            "beads-empty",
+            &fake_worktree.to_string_lossy(),
+            "coding",
+            Some("src/db.rs"),
+        )
+        .unwrap();
+
+        let workers_config = WorkersConfig {
+            max: 1,
+            base_branch: "main".to_string(),
+            worktrees_dir: "worktrees".to_string(),
+        };
+        let mut pool = WorkerPool::new(
+            &workers_config,
+            dir.path().to_path_buf(),
+            dir.path().join("wt"),
+        );
+        pool.set_worker_state_for_test(
+            0,
+            crate::pool::WorkerState::Coding,
+            Some(assignment_id),
+            Some("beads-empty".to_string()),
+            Some(fake_worktree.clone()),
+        );
+
+        // Empty expand file
+        std::fs::write(fake_worktree.join(EXPAND_FILE_NAME), "\n\n").unwrap();
+
+        check_and_process_expand_files(&pool, &db_conn);
+
+        // affected_globs should be unchanged
+        let wa = db::get_worker_assignment(&db_conn, assignment_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(wa.affected_globs, Some("src/db.rs".to_string()));
+
+        // But expand file should still be deleted
+        assert!(!fake_worktree.join(EXPAND_FILE_NAME).exists());
+    }
+
+    #[test]
+    fn test_expand_file_comments_ignored() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let db_conn = db::open_or_create(&db_path).unwrap();
+
+        let fake_worktree = dir.path().join("worker-0");
+        std::fs::create_dir_all(&fake_worktree).unwrap();
+
+        let assignment_id = db::insert_worker_assignment(
+            &db_conn,
+            0,
+            "beads-comments",
+            &fake_worktree.to_string_lossy(),
+            "coding",
+            None,
+        )
+        .unwrap();
+
+        let workers_config = WorkersConfig {
+            max: 1,
+            base_branch: "main".to_string(),
+            worktrees_dir: "worktrees".to_string(),
+        };
+        let mut pool = WorkerPool::new(
+            &workers_config,
+            dir.path().to_path_buf(),
+            dir.path().join("wt"),
+        );
+        pool.set_worker_state_for_test(
+            0,
+            crate::pool::WorkerState::Coding,
+            Some(assignment_id),
+            Some("beads-comments".to_string()),
+            Some(fake_worktree.clone()),
+        );
+
+        // Expand file with comments
+        std::fs::write(
+            fake_worktree.join(EXPAND_FILE_NAME),
+            "# Need these files too\nsrc/config.rs\n# Also this\nsrc/signals.rs\n",
+        )
+        .unwrap();
+
+        check_and_process_expand_files(&pool, &db_conn);
+
+        let wa = db::get_worker_assignment(&db_conn, assignment_id)
+            .unwrap()
+            .unwrap();
+        let globs = parse_comma_separated_globs(&wa.affected_globs.unwrap());
+        assert_eq!(globs, vec!["src/config.rs", "src/signals.rs"]);
+    }
+
+    #[test]
+    fn test_no_expand_file_is_noop() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let db_conn = db::open_or_create(&db_path).unwrap();
+
+        let fake_worktree = dir.path().join("worker-0");
+        std::fs::create_dir_all(&fake_worktree).unwrap();
+
+        let assignment_id = db::insert_worker_assignment(
+            &db_conn,
+            0,
+            "beads-noop",
+            &fake_worktree.to_string_lossy(),
+            "coding",
+            Some("src/db.rs"),
+        )
+        .unwrap();
+
+        let workers_config = WorkersConfig {
+            max: 1,
+            base_branch: "main".to_string(),
+            worktrees_dir: "worktrees".to_string(),
+        };
+        let mut pool = WorkerPool::new(
+            &workers_config,
+            dir.path().to_path_buf(),
+            dir.path().join("wt"),
+        );
+        pool.set_worker_state_for_test(
+            0,
+            crate::pool::WorkerState::Coding,
+            Some(assignment_id),
+            Some("beads-noop".to_string()),
+            Some(fake_worktree.clone()),
+        );
+
+        // No expand file — should be a no-op
+        check_and_process_expand_files(&pool, &db_conn);
+
+        let wa = db::get_worker_assignment(&db_conn, assignment_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(wa.affected_globs, Some("src/db.rs".to_string()));
     }
 }

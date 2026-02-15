@@ -1609,3 +1609,35 @@
 - **d2q**: Implement dynamic affected set expansion via .blacksmith-expand (P2)
 - **wdo**: Implement blacksmith workers status and kill commands (P2)
 - **3su**: Implement periodic reconciliation with full test suite (P2)
+
+--- 2026-02-15 17:24:50 | simple-agent-harness-d2q ---
+## Last Session: Implement dynamic affected set expansion via .blacksmith-expand (d2q)
+
+### Completed
+- Implemented `.blacksmith-expand` file watching in the coordinator loop
+- When a worker writes `.blacksmith-expand` in its worktree, the coordinator reads new file globs (one per line), merges them with existing affected_globs in the DB, and deletes the file
+- Expansion is always granted (optimistic concurrency per spec) — conflicts resolved at integration time
+- Comments (lines starting with #) and empty lines in expand files are ignored
+- Duplicate globs are not added twice during merge
+- Updated `build_in_progress_list` to read affected_globs from the database, so the scheduler uses accurate (including dynamically expanded) affected sets for conflict detection
+- Added `update_worker_assignment_affected_globs` DB function
+- Added `worker_assignment_id` and `worker_worktree_path` accessor methods to WorkerPool
+- Added `set_worker_state_for_test` helper to WorkerPool for test setup
+- Added 7 new tests (670 total passing):
+  - coordinator: test_parse_comma_separated_globs
+  - coordinator: test_expand_file_processing (full end-to-end)
+  - coordinator: test_expand_file_no_duplicates
+  - coordinator: test_expand_file_empty_file_ignored
+  - coordinator: test_expand_file_comments_ignored
+  - coordinator: test_no_expand_file_is_noop
+  - coordinator: test_build_in_progress_list_empty_pool (updated to use DB)
+
+### Key Files Modified
+- `src/coordinator.rs` — expand file processing, updated build_in_progress_list
+- `src/db.rs` — added update_worker_assignment_affected_globs
+- `src/pool.rs` — added worker_assignment_id, worker_worktree_path, set_worker_state_for_test
+
+### Suggested Next Tasks
+- **wdo**: Implement blacksmith workers status and kill commands (P2)
+- **3su**: Implement periodic reconciliation with full test suite (P2)
+- **dgh**: Implement session-to-bead attribution (P2)
