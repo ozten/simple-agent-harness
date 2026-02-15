@@ -959,6 +959,7 @@ mod tests {
             storage: StorageConfig::default(),
             workers: WorkersConfig::default(),
             reconciliation: ReconciliationConfig::default(),
+            architecture: ArchitectureConfig::default(),
         }
     }
 

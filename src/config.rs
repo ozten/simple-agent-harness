@@ -21,6 +21,7 @@ pub struct HarnessConfig {
     pub storage: StorageConfig,
     pub workers: WorkersConfig,
     pub reconciliation: ReconciliationConfig,
+    pub architecture: ArchitectureConfig,
 }
 
 impl HarnessConfig {
@@ -497,6 +498,77 @@ impl Default for ReconciliationConfig {
     }
 }
 
+/// Configuration knobs for the architecture agent.
+///
+/// These control how aggressively the architecture agent flags issues
+/// like high fan-in modules, integration loops, expansion storms,
+/// and metadata drift.
+#[derive(Debug, Deserialize, Clone)]
+#[serde(default)]
+pub struct ArchitectureConfig {
+    /// Fan-in ratio threshold (0.0–1.0). Modules with fan-in above this
+    /// fraction of total modules are flagged for potential refactoring.
+    /// Default: 0.3
+    pub fan_in_threshold: f64,
+    /// Maximum number of integration loop iterations before a task is
+    /// flagged as a potential architecture problem. Default: 5
+    pub integration_loop_max: u32,
+    /// Number of expansion events within `expansion_event_window` tasks
+    /// that triggers an architecture review. Default: 5
+    pub expansion_event_threshold: u32,
+    /// Window size (in tasks) over which expansion events are counted.
+    /// Default: 20
+    pub expansion_event_window: u32,
+    /// Metadata drift sensitivity as a multiplier. A module's metadata
+    /// change rate exceeding `metadata_drift_sensitivity` times the
+    /// baseline average triggers a drift alert. Default: 3.0
+    pub metadata_drift_sensitivity: f64,
+    /// Whether refactoring suggestions from the architecture agent are
+    /// automatically approved and queued, or require human confirmation.
+    /// Default: false
+    pub refactor_auto_approve: bool,
+}
+
+impl Default for ArchitectureConfig {
+    fn default() -> Self {
+        Self {
+            fan_in_threshold: 0.3,
+            integration_loop_max: 5,
+            expansion_event_threshold: 5,
+            expansion_event_window: 20,
+            metadata_drift_sensitivity: 3.0,
+            refactor_auto_approve: false,
+        }
+    }
+}
+
+#[allow(dead_code)]
+impl ArchitectureConfig {
+    /// Conservative preset: higher thresholds, fewer alerts, no auto-approve.
+    pub fn conservative() -> Self {
+        Self {
+            fan_in_threshold: 0.5,
+            integration_loop_max: 10,
+            expansion_event_threshold: 10,
+            expansion_event_window: 30,
+            metadata_drift_sensitivity: 5.0,
+            refactor_auto_approve: false,
+        }
+    }
+
+    /// Aggressive preset: lower thresholds, more alerts, auto-approve enabled.
+    pub fn aggressive() -> Self {
+        Self {
+            fan_in_threshold: 0.2,
+            integration_loop_max: 3,
+            expansion_event_threshold: 3,
+            expansion_event_window: 15,
+            metadata_drift_sensitivity: 2.0,
+            refactor_auto_approve: true,
+        }
+    }
+}
+
 #[derive(Debug, Deserialize, Clone, Default)]
 #[serde(default)]
 pub struct MetricsConfig {
@@ -767,6 +839,35 @@ impl HarnessConfig {
                     i
                 ));
             }
+        }
+
+        // Architecture config validation
+        if self.architecture.fan_in_threshold < 0.0 || self.architecture.fan_in_threshold > 1.0 {
+            errors.push(format!(
+                "architecture.fan_in_threshold: must be between 0.0 and 1.0, got {}",
+                self.architecture.fan_in_threshold
+            ));
+        }
+        if self.architecture.integration_loop_max == 0 {
+            errors.push(
+                "architecture.integration_loop_max: must be greater than 0".to_string(),
+            );
+        }
+        if self.architecture.expansion_event_threshold == 0 {
+            errors.push(
+                "architecture.expansion_event_threshold: must be greater than 0".to_string(),
+            );
+        }
+        if self.architecture.expansion_event_window == 0 {
+            errors.push(
+                "architecture.expansion_event_window: must be greater than 0".to_string(),
+            );
+        }
+        if self.architecture.metadata_drift_sensitivity <= 0.0 {
+            errors.push(format!(
+                "architecture.metadata_drift_sensitivity: must be positive, got {}",
+                self.architecture.metadata_drift_sensitivity
+            ));
         }
 
         errors
@@ -2095,5 +2196,160 @@ every = 0
             .any(|e| e.contains("agent.integration") && e.contains("not found")));
         // coding should still be valid
         assert!(!errors.iter().any(|e| e.contains("agent.coding")));
+    }
+
+    // --- Architecture config tests ---
+
+    #[test]
+    fn test_default_architecture_config() {
+        let config = HarnessConfig::default();
+        assert!((config.architecture.fan_in_threshold - 0.3).abs() < f64::EPSILON);
+        assert_eq!(config.architecture.integration_loop_max, 5);
+        assert_eq!(config.architecture.expansion_event_threshold, 5);
+        assert_eq!(config.architecture.expansion_event_window, 20);
+        assert!((config.architecture.metadata_drift_sensitivity - 3.0).abs() < f64::EPSILON);
+        assert!(!config.architecture.refactor_auto_approve);
+    }
+
+    #[test]
+    fn test_architecture_conservative_preset() {
+        let preset = ArchitectureConfig::conservative();
+        assert!((preset.fan_in_threshold - 0.5).abs() < f64::EPSILON);
+        assert_eq!(preset.integration_loop_max, 10);
+        assert_eq!(preset.expansion_event_threshold, 10);
+        assert_eq!(preset.expansion_event_window, 30);
+        assert!((preset.metadata_drift_sensitivity - 5.0).abs() < f64::EPSILON);
+        assert!(!preset.refactor_auto_approve);
+    }
+
+    #[test]
+    fn test_architecture_aggressive_preset() {
+        let preset = ArchitectureConfig::aggressive();
+        assert!((preset.fan_in_threshold - 0.2).abs() < f64::EPSILON);
+        assert_eq!(preset.integration_loop_max, 3);
+        assert_eq!(preset.expansion_event_threshold, 3);
+        assert_eq!(preset.expansion_event_window, 15);
+        assert!((preset.metadata_drift_sensitivity - 2.0).abs() < f64::EPSILON);
+        assert!(preset.refactor_auto_approve);
+    }
+
+    #[test]
+    fn test_load_architecture_from_toml() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("blacksmith.toml");
+        std::fs::write(
+            &path,
+            r#"
+[architecture]
+fan_in_threshold = 0.4
+integration_loop_max = 8
+expansion_event_threshold = 7
+expansion_event_window = 25
+metadata_drift_sensitivity = 4.0
+refactor_auto_approve = true
+"#,
+        )
+        .unwrap();
+        let config = HarnessConfig::load(&path).unwrap();
+        assert!((config.architecture.fan_in_threshold - 0.4).abs() < f64::EPSILON);
+        assert_eq!(config.architecture.integration_loop_max, 8);
+        assert_eq!(config.architecture.expansion_event_threshold, 7);
+        assert_eq!(config.architecture.expansion_event_window, 25);
+        assert!((config.architecture.metadata_drift_sensitivity - 4.0).abs() < f64::EPSILON);
+        assert!(config.architecture.refactor_auto_approve);
+    }
+
+    #[test]
+    fn test_architecture_defaults_when_not_specified() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("blacksmith.toml");
+        std::fs::write(
+            &path,
+            r#"
+[session]
+max_iterations = 10
+"#,
+        )
+        .unwrap();
+        let config = HarnessConfig::load(&path).unwrap();
+        assert!((config.architecture.fan_in_threshold - 0.3).abs() < f64::EPSILON);
+        assert_eq!(config.architecture.integration_loop_max, 5);
+        assert!(!config.architecture.refactor_auto_approve);
+    }
+
+    #[test]
+    fn test_architecture_partial_override() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("blacksmith.toml");
+        std::fs::write(
+            &path,
+            r#"
+[architecture]
+fan_in_threshold = 0.1
+refactor_auto_approve = true
+"#,
+        )
+        .unwrap();
+        let config = HarnessConfig::load(&path).unwrap();
+        assert!((config.architecture.fan_in_threshold - 0.1).abs() < f64::EPSILON);
+        assert!(config.architecture.refactor_auto_approve);
+        // Other fields should remain at defaults
+        assert_eq!(config.architecture.integration_loop_max, 5);
+        assert_eq!(config.architecture.expansion_event_window, 20);
+    }
+
+    #[test]
+    fn test_validate_architecture_fan_in_out_of_range() {
+        let mut config = valid_config();
+        config.architecture.fan_in_threshold = 1.5;
+        let errors = config.validate();
+        assert!(errors
+            .iter()
+            .any(|e| e.contains("architecture.fan_in_threshold")));
+
+        config.architecture.fan_in_threshold = -0.1;
+        let errors = config.validate();
+        assert!(errors
+            .iter()
+            .any(|e| e.contains("architecture.fan_in_threshold")));
+    }
+
+    #[test]
+    fn test_validate_architecture_zero_values() {
+        let mut config = valid_config();
+        config.architecture.integration_loop_max = 0;
+        config.architecture.expansion_event_threshold = 0;
+        config.architecture.expansion_event_window = 0;
+        let errors = config.validate();
+        assert!(errors
+            .iter()
+            .any(|e| e.contains("architecture.integration_loop_max")));
+        assert!(errors
+            .iter()
+            .any(|e| e.contains("architecture.expansion_event_threshold")));
+        assert!(errors
+            .iter()
+            .any(|e| e.contains("architecture.expansion_event_window")));
+    }
+
+    #[test]
+    fn test_validate_architecture_negative_drift_sensitivity() {
+        let mut config = valid_config();
+        config.architecture.metadata_drift_sensitivity = -1.0;
+        let errors = config.validate();
+        assert!(errors
+            .iter()
+            .any(|e| e.contains("architecture.metadata_drift_sensitivity")));
+    }
+
+    #[test]
+    fn test_validate_architecture_valid_config() {
+        let config = valid_config();
+        let errors = config.validate();
+        assert!(
+            !errors.iter().any(|e| e.contains("architecture")),
+            "unexpected architecture errors: {:?}",
+            errors
+        );
     }
 }

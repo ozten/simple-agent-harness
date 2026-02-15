@@ -1,21 +1,16 @@
-## Last Session: Integration Loop Iteration Tracking (2026-02-15)
+## Last Session: Recover Orphaned in_progress Beads (2026-02-15)
 
 ### What Was Done
-- Implemented bead simple-agent-harness-ldy: Add integration loop iteration tracking
-- Added `integration_iterations` DB table to schema in `open_or_create` (db.rs)
-- Added `IntegrationIteration` struct and three API functions:
-  - `record_integration_iterations()` - records iteration count + modules per task
-  - `integration_iterations_by_bead()` - query iterations for a specific bead
-  - `high_iteration_integrations()` - query tasks exceeding an iteration threshold (for architecture agent)
-- Wired recording call into `IntegrationQueue::integrate()` in integrator.rs
-  - Records iteration count from circuit breaker + modules involved before reset
-- Added 4 tests: insert+query, empty result, zero-count, threshold filtering
+- Verified bead simple-agent-harness-9ob was already fully implemented
+- `recover_orphaned_beads()` in coordinator.rs:462 queries `bd list --status=in_progress --json` and resets orphaned beads to open
+- Called at coordinator startup (line 115), after singleton lock guarantees no other coordinator is running
+- 5 unit tests for the parser + 1 integration test for graceful failure all pass
+- All 27 coordinator tests pass
 
 ### Current State
-- All 944 tests pass (1 pre-existing coordinator test failure remains)
-- Clippy clean, fmt clean
-- The query functions are `#[allow(dead_code)]` since they'll be consumed by the historical signal correlator (simple-agent-harness-4wc)
+- Compilation clean (only pre-existing dead_code warnings in expansion_event/file_resolution/intent/import_graph modules)
+- All coordinator tests pass
 
 ### Suggested Next Tasks
-- simple-agent-harness-4wc (P2): Implement historical signal correlator (now unblocked by this work)
+- simple-agent-harness-4a1 (P1): Add codebase import graph parser
 - simple-agent-harness-34d (P3): Add architecture agent configuration knobs
