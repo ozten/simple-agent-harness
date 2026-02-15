@@ -849,19 +849,14 @@ impl HarnessConfig {
             ));
         }
         if self.architecture.integration_loop_max == 0 {
-            errors.push(
-                "architecture.integration_loop_max: must be greater than 0".to_string(),
-            );
+            errors.push("architecture.integration_loop_max: must be greater than 0".to_string());
         }
         if self.architecture.expansion_event_threshold == 0 {
-            errors.push(
-                "architecture.expansion_event_threshold: must be greater than 0".to_string(),
-            );
+            errors
+                .push("architecture.expansion_event_threshold: must be greater than 0".to_string());
         }
         if self.architecture.expansion_event_window == 0 {
-            errors.push(
-                "architecture.expansion_event_window: must be greater than 0".to_string(),
-            );
+            errors.push("architecture.expansion_event_window: must be greater than 0".to_string());
         }
         if self.architecture.metadata_drift_sensitivity <= 0.0 {
             errors.push(format!(
