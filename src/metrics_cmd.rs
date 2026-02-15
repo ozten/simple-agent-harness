@@ -1052,6 +1052,148 @@ pub fn handle_events(db_path: &Path, session: Option<i64>) -> Result<(), String>
     Ok(())
 }
 
+/// Handle the `metrics beads` subcommand.
+///
+/// Displays a per-bead timing report from the bead_metrics table.
+/// Shows each bead with its ID, status, sessions, wall time, turns, and title.
+/// Includes totals, averages, and fastest/slowest beads.
+pub fn handle_beads(db_path: &Path) -> Result<(), String> {
+    if !db_path.exists() {
+        println!("No metrics database found. Run some sessions first.");
+        return Ok(());
+    }
+
+    let conn = db::open_or_create(db_path).map_err(|e| format!("Failed to open database: {e}"))?;
+
+    let all =
+        db::all_bead_metrics(&conn).map_err(|e| format!("Failed to query bead metrics: {e}"))?;
+
+    if all.is_empty() {
+        println!("No bead metrics recorded yet.");
+        return Ok(());
+    }
+
+    // Print header
+    println!(
+        "{:<28} {:<10} {:>8} {:>10} {:>6}",
+        "BEAD", "STATUS", "SESSIONS", "WALL TIME", "TURNS"
+    );
+    println!("{}", "-".repeat(66));
+
+    let mut closed_count = 0u64;
+    let mut open_count = 0u64;
+    let mut total_wall_secs: f64 = 0.0;
+    let mut total_turns: i64 = 0;
+    let mut total_sessions: i64 = 0;
+    let mut fastest: Option<(&str, f64)> = None;
+    let mut slowest: Option<(&str, f64)> = None;
+
+    for bm in &all {
+        let status = if bm.completed_at.is_some() {
+            closed_count += 1;
+            "closed"
+        } else {
+            open_count += 1;
+            "open"
+        };
+
+        total_wall_secs += bm.wall_time_secs;
+        total_turns += bm.total_turns;
+        total_sessions += bm.sessions;
+
+        // Track fastest/slowest among completed beads
+        if bm.completed_at.is_some() && bm.wall_time_secs > 0.0 {
+            match fastest {
+                None => fastest = Some((&bm.bead_id, bm.wall_time_secs)),
+                Some((_, t)) if bm.wall_time_secs < t => {
+                    fastest = Some((&bm.bead_id, bm.wall_time_secs));
+                }
+                _ => {}
+            }
+            match slowest {
+                None => slowest = Some((&bm.bead_id, bm.wall_time_secs)),
+                Some((_, t)) if bm.wall_time_secs > t => {
+                    slowest = Some((&bm.bead_id, bm.wall_time_secs));
+                }
+                _ => {}
+            }
+        }
+
+        let wall_str = format_duration(bm.wall_time_secs as u64);
+
+        println!(
+            "{:<28} {:<10} {:>8} {:>10} {:>6}",
+            truncate_bead_id(&bm.bead_id, 27),
+            status,
+            bm.sessions,
+            wall_str,
+            bm.total_turns
+        );
+    }
+
+    // Totals
+    println!("{}", "-".repeat(66));
+    let closed_wall_secs: f64 = all
+        .iter()
+        .filter(|b| b.completed_at.is_some())
+        .map(|b| b.wall_time_secs)
+        .sum();
+    println!(
+        "{} closed ({}), {} open",
+        closed_count,
+        format_duration(closed_wall_secs as u64),
+        open_count
+    );
+
+    // Averages (over completed beads only)
+    if closed_count > 0 {
+        let avg_wall = closed_wall_secs / closed_count as f64;
+        let closed_turns: i64 = all
+            .iter()
+            .filter(|b| b.completed_at.is_some())
+            .map(|b| b.total_turns)
+            .sum();
+        let avg_turns = closed_turns as f64 / closed_count as f64;
+        println!(
+            "Avg: {}/bead, {:.0} turns/bead",
+            format_duration(avg_wall as u64),
+            avg_turns
+        );
+    }
+
+    // Fastest / slowest
+    if let Some((id, secs)) = fastest {
+        println!("Fastest: {} ({})", id, format_duration(secs as u64));
+    }
+    if let Some((id, secs)) = slowest {
+        // Only show slowest if different from fastest
+        if fastest.map(|(fid, _)| fid) != Some(id) {
+            println!("Slowest: {} ({})", id, format_duration(secs as u64));
+        }
+    }
+
+    // Overall totals
+    if total_sessions > 0 {
+        println!(
+            "\nTotal: {} session(s), {}, {} turns",
+            total_sessions,
+            format_duration(total_wall_secs as u64),
+            total_turns
+        );
+    }
+
+    Ok(())
+}
+
+/// Truncate a bead ID for display, adding "..." if it exceeds max_len.
+fn truncate_bead_id(id: &str, max_len: usize) -> String {
+    if id.len() <= max_len {
+        id.to_string()
+    } else {
+        format!("{}...", &id[..max_len - 3])
+    }
+}
+
 enum TargetResult {
     Pass { actual: f64 },
     Fail { actual: f64 },
@@ -2709,5 +2851,128 @@ label = "Avg turns per session"
     fn parse_session_iteration_other_ext() {
         let path = Path::new("/tmp/sessions/42.txt");
         assert_eq!(parse_session_iteration(path), None);
+    }
+
+    // ── Beads report tests ──────────────────────────────────────────────
+
+    #[test]
+    fn beads_no_database() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("nonexistent.db");
+        handle_beads(&path).unwrap();
+    }
+
+    #[test]
+    fn beads_empty_database() {
+        let (_dir, path) = test_db_path();
+        db::open_or_create(&path).unwrap();
+        handle_beads(&path).unwrap();
+    }
+
+    #[test]
+    fn beads_with_completed_and_open() {
+        let (_dir, path) = test_db_path();
+        let conn = db::open_or_create(&path).unwrap();
+
+        db::upsert_bead_metrics(
+            &conn,
+            "proj-abc",
+            2,
+            600.0,
+            80,
+            None,
+            None,
+            Some("2026-02-15T12:00:00Z"),
+        )
+        .unwrap();
+        db::upsert_bead_metrics(&conn, "proj-def", 1, 300.0, 40, None, None, None).unwrap();
+
+        drop(conn);
+        handle_beads(&path).unwrap();
+    }
+
+    #[test]
+    fn beads_fastest_slowest() {
+        let (_dir, path) = test_db_path();
+        let conn = db::open_or_create(&path).unwrap();
+
+        // Three completed beads with different times
+        db::upsert_bead_metrics(
+            &conn,
+            "proj-fast",
+            1,
+            120.0,
+            20,
+            None,
+            None,
+            Some("2026-01-01T00:00:00Z"),
+        )
+        .unwrap();
+        db::upsert_bead_metrics(
+            &conn,
+            "proj-mid",
+            2,
+            600.0,
+            50,
+            None,
+            None,
+            Some("2026-01-02T00:00:00Z"),
+        )
+        .unwrap();
+        db::upsert_bead_metrics(
+            &conn,
+            "proj-slow",
+            3,
+            1800.0,
+            100,
+            None,
+            None,
+            Some("2026-01-03T00:00:00Z"),
+        )
+        .unwrap();
+
+        drop(conn);
+        handle_beads(&path).unwrap();
+    }
+
+    #[test]
+    fn beads_single_completed() {
+        let (_dir, path) = test_db_path();
+        let conn = db::open_or_create(&path).unwrap();
+
+        db::upsert_bead_metrics(
+            &conn,
+            "proj-only",
+            1,
+            300.0,
+            40,
+            None,
+            None,
+            Some("2026-02-15T00:00:00Z"),
+        )
+        .unwrap();
+
+        drop(conn);
+        // Should not show "Slowest" when fastest == slowest
+        handle_beads(&path).unwrap();
+    }
+
+    #[test]
+    fn truncate_bead_id_short() {
+        assert_eq!(truncate_bead_id("proj-abc", 27), "proj-abc");
+    }
+
+    #[test]
+    fn truncate_bead_id_exact() {
+        let id = "a".repeat(27);
+        assert_eq!(truncate_bead_id(&id, 27), id);
+    }
+
+    #[test]
+    fn truncate_bead_id_long() {
+        let id = "a".repeat(30);
+        let result = truncate_bead_id(&id, 27);
+        assert_eq!(result.len(), 27);
+        assert!(result.ends_with("..."));
     }
 }

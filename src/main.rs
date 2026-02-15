@@ -197,6 +197,8 @@ enum MetricsAction {
         #[arg(long)]
         all: bool,
     },
+    /// Show per-bead timing report
+    Beads,
 }
 
 #[derive(Subcommand, Debug)]
@@ -1049,6 +1051,7 @@ async fn main() {
                     adapter.as_ref(),
                 )
             }
+            MetricsAction::Beads => metrics_cmd::handle_beads(&db_path),
         };
 
         if let Err(e) = result {

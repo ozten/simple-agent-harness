@@ -1,25 +1,23 @@
-## Last Session: Implement blacksmith metrics reingest command (hhv)
+## Last Session: Implement blacksmith metrics beads per-bead timing report (c37)
 
 ### Completed
-- Added `blacksmith metrics reingest [--last N] [--all]` CLI subcommand
-- Added `handle_reingest()` in `src/metrics_cmd.rs`:
-  - Lists session files (.jsonl and .jsonl.zst) in the sessions directory
-  - Filters by --last N (most recent N sessions) or --all
-  - Decompresses .jsonl.zst files to temp files using zstd
-  - Deletes old events for each session before re-ingesting
-  - Re-runs extraction through the configured adapter with extraction rules
-  - Reports per-session results (turns, cost, duration)
-- Added `Reingest` variant to `MetricsAction` enum in `src/main.rs`
-- Added match arm wiring adapter resolution and rule compilation
-- Added `delete_events_by_session()` to `src/db.rs`
-- Helper functions: `list_session_files`, `parse_session_iteration`, `decompress_if_needed`
-- 11 new tests (8 reingest handler tests, 3 parse_session_iteration tests)
-- All 846 tests passing
+- Added `blacksmith metrics beads` CLI subcommand
+- Added `Beads` variant to `MetricsAction` enum in `src/main.rs`
+- Added match arm wiring to call `metrics_cmd::handle_beads()`
+- Implemented `handle_beads()` in `src/metrics_cmd.rs`:
+  - Queries all bead_metrics from the database
+  - Displays a table with columns: BEAD, STATUS, SESSIONS, WALL TIME, TURNS
+  - Shows totals: X closed (Ym), Z open
+  - Shows averages: Xm/bead, Y turns/bead (over completed beads)
+  - Shows fastest and slowest completed beads
+  - Shows overall totals: sessions, wall time, turns
+- Added `truncate_bead_id()` helper for display truncation
+- 8 new tests (beads report + truncation tests)
+- All 854 tests passing
 
 ### Key Files Modified
-- `src/metrics_cmd.rs` — handle_reingest + helpers + 11 tests
-- `src/main.rs` — MetricsAction::Reingest variant + match arm
-- `src/db.rs` — delete_events_by_session function
+- `src/metrics_cmd.rs` — handle_beads + truncate_bead_id + 8 tests
+- `src/main.rs` — MetricsAction::Beads variant + match arm
 
 ### Suggested Next Tasks
-- **c37**: Implement blacksmith metrics beads per-bead timing report (P3)
+- Check `bd ready` for next available work items
