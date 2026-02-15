@@ -167,7 +167,18 @@ async fn main() {
         return;
     }
 
+    // Install signal handlers
+    let signals = signals::SignalHandler::install();
+
     println!("simple-agent-harness v{}", env!("CARGO_PKG_VERSION"));
     println!("Max iterations: {}", config.session.max_iterations);
-    println!("Main loop not yet implemented.");
+
+    // Run the main loop
+    let summary = runner::run(&config, &signals).await;
+
+    println!();
+    println!(
+        "Loop finished: {} productive iterations, global counter = {}, reason = {:?}",
+        summary.productive_iterations, summary.global_iteration, summary.exit_reason
+    );
 }

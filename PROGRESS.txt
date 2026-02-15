@@ -1,35 +1,38 @@
-## Last Session: Implement signal handling and graceful shutdown (simple-agent-harness-7rx)
+## Last Session: Implement main runner loop orchestration (simple-agent-harness-p0y)
 
 ### Completed
-- Implemented signals.rs with full signal handling:
-  - `SignalHandler` struct with Arc-shared atomic state for thread-safe shutdown coordination
-  - `install()`: spawns tokio tasks for SIGINT and SIGTERM listeners
-  - `shutdown_requested()` / `force_kill_requested()`: query shutdown state
-  - `set_child_pid()` / `clear_child_pid()`: track current child for force-kill
-  - `wait_for_force_kill()`: async wait with Notify for immediate force-kill reaction
-  - `request_shutdown()`: mark graceful shutdown (used by STOP file and signals)
-  - `check_stop_file()`: check for STOP file, delete it, mark shutdown
-  - SIGINT handler: first SIGINT sets graceful shutdown, second within 3s triggers force-kill + SIGKILL to process group
-  - SIGTERM handler: same as single SIGINT (graceful shutdown)
-  - `kill_process_group()`: sends SIGKILL via nix killpg
-- 10 tests covering:
-  - test_initial_state: fresh handler has no flags set
-  - test_request_shutdown: request_shutdown sets the flag
-  - test_child_pid_management: set/clear child PID
-  - test_stop_file_not_present: no STOP file returns NotPresent
-  - test_stop_file_detected_and_deleted: STOP file detected, deleted, shutdown flagged
-  - test_stop_file_sets_shutdown_flag: STOP file triggers shutdown
-  - test_force_kill_flag: force_kill flag works
-  - test_handler_is_clone: Arc-shared state across clones
-  - test_wait_for_force_kill_returns_immediately_when_set: immediate return if already set
-  - test_wait_for_force_kill_wakes_on_notify: async notify wakes waiter
-- All 48 tests pass (10 config + 12 session + 6 watchdog + 10 retry + 10 signals), clippy clean, fmt applied
+- Implemented runner.rs with full iteration loop:
+  - `run()`: async main loop that coordinates all modules
+  - `run_session_with_watchdog()`: spawns child process, runs watchdog + force-kill signal handler concurrently via tokio::select!
+  - `load_counter()` / `save_counter()`: persistent global iteration counter (reads/writes plain text file)
+  - `read_prompt()`: reads prompt file for session input
+  - `StopFileStatusExt` trait for ergonomic STOP file checks
+- Loop flow: check STOP file → check signals → read prompt → spawn session + watchdog → evaluate retry policy → update counters → inter-iteration delay
+- Watchdog integration: runs concurrently with child via tokio::select!, kills stale sessions
+- Signal integration: registers child PID for force-kill, checks shutdown between iterations
+- Retry integration: evaluates output size, retries empty sessions with delay, skips after exhausting retries
+- Consecutive error safety: breaks after 5 consecutive spawn/IO failures to prevent infinite loops
+- Exit code 124 convention for watchdog-killed sessions
+- RunSummary + ExitReason returned to main for final output
+- Wired runner into main.rs: installs SignalHandler, calls runner::run(), prints summary
+- 13 new tests (6 unit + 7 integration):
+  - test_load_counter_nonexistent, _valid, _with_whitespace, _invalid
+  - test_save_counter, test_save_and_load_roundtrip
+  - test_run_three_productive_iterations: verifies 3 iterations with echo, output files created, counter persisted
+  - test_run_stops_on_stop_file: STOP file prevents any iterations
+  - test_run_stops_on_signal: pre-set shutdown flag stops loop
+  - test_run_fails_on_missing_prompt: missing prompt file exits with PromptError
+  - test_run_retries_empty_sessions: verifies retry + skip behavior with 'true' command
+  - test_run_resumes_from_existing_counter: continues from persisted counter value
+  - test_run_with_single_iteration: single iteration works correctly
+- All 61 tests pass, clippy clean, fmt applied
 
 ### Current State
-- Signal handling is fully functional and tested
-- Unblocks: runner loop (p0y) which depends on signals (7rx), retry (jr7, done), session (d3v, done), and watchdog (fvr, done)
-- All P0 runner dependencies should now be satisfied
+- Core MVP loop is functional — can run N productive iterations with configurable agent
+- STOP file, SIGINT/SIGTERM, watchdog, and retry all integrated
+- Unblocks: status file (3dl), hooks (8ff), event log (t0t), rate limit detection (7d0), commit detection (ee7)
 
 ### Suggested Next Tasks
-- Implement main runner loop orchestration (simple-agent-harness-p0y) — P0, should now be unblocked
-- Implement structured console logging (simple-agent-harness-yyb) — P2, unblocked
+- Implement structured console logging with tracing (yyb) — P2, unblocked
+- Implement pre/post-session hook execution (8ff) — P2, now unblocked by runner
+- Implement status file with atomic JSON writes (3dl) — P2, now unblocked by runner
