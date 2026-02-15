@@ -18,6 +18,7 @@ mod scheduler;
 mod session;
 mod signals;
 mod status;
+mod task_manifest;
 mod watchdog;
 mod worktree;
 

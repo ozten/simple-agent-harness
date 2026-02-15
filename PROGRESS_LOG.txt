@@ -1128,3 +1128,31 @@
 - **v6v**: Implement task_manifest.toml parsing (independent P1)
 - **1ky**: Implement scheduler for assigning beads to idle workers (now unblocked by f9m)
 - **x1a**: Implement session compression with zstd (independent P2)
+
+--- 2026-02-15 15:52:11 | simple-agent-harness-v6v ---
+## Last Session: Implement task_manifest.toml parsing and manifest application (v6v)
+
+### Completed
+- Created src/task_manifest.rs with full parsing and application logic
+- TaskManifest struct: parses task_manifest.toml with serde/toml
+- Sections supported:
+  - [[lib_rs_additions]]: mod_declaration and reexport kinds, appended to lib.rs (falls back to main.rs)
+  - [[cargo_toml_additions]]: dependency and dev_dependency kinds, merged into Cargo.toml [dependencies]/[dev-dependencies]
+  - [[mod_rs_additions]]: targeted append to any mod.rs file
+  - [[ts_index_additions]]: targeted append to any TypeScript index.ts barrel file
+- parse(path) and parse_str(content) for file and string-based parsing
+- apply(manifest, root) applies all entries to a worktree, returns count of entries applied
+- All operations are idempotent (skip if line already exists / dep already present)
+- ManifestError enum: Io, Parse, CargoTomlParse
+- Registered module in main.rs
+- 15 new tests covering: parsing, invalid kinds, all apply types, idempotency, fallbacks, error cases
+- All 524 tests pass, clippy clean, fmt clean
+
+### Current State
+- task_manifest.rs is ready for use by the integrator module
+- Follows spec from SPEC-v3-agents.md lines 511-569
+
+### Suggested Next Tasks
+- **1ky**: Implement scheduler for assigning beads to idle workers (P1)
+- **x1a**: Implement session compression with zstd (P2)
+- **e2l**: Implement raw adapter with pass-through extraction (P2)

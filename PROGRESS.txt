@@ -1,33 +1,26 @@
-## Last Session: Implement worker pool manager (f9m)
+## Last Session: Implement task_manifest.toml parsing and manifest application (v6v)
 
 ### Completed
-- Created src/pool.rs with full worker pool manager implementation
-- WorkerState enum: Idle, Coding, Completed, Failed with as_str/from_str
-- Worker struct tracks: id, state, assignment_id, bead_id, worktree_path, child_handle
-- SessionOutcome struct: worker_id, exit_code, duration, output_bytes
-- WorkerPool manages up to workers.max concurrent agent sessions:
-  - new(): initializes pool with N idle worker slots
-  - capacity()/idle_count()/active_count(): pool status queries
-  - snapshot(): returns all worker states for monitoring
-  - spawn_worker(): assigns bead to idle worker, creates worktree, spawns agent, records in DB
-  - poll_completed(): async poll for finished workers (non-blocking via is_finished check)
-  - record_outcome(): updates DB assignment status on completion/failure
-  - completed_workers(): lists workers ready for integration
-  - reset_worker(): cleans up worktree and returns worker to idle
-  - active_worktree_paths(): for orphan cleanup
-- spawn_agent_in_worktree(): spawns agent process in worktree dir with process_group(0)
-- PoolError enum: NoIdleWorker, InvalidWorker, Worktree, Db, Spawn
-- Added WorkersConfig to config.rs: max (default 1), base_branch, worktrees_dir
-- Registered pool module in main.rs
-- 11 new tests covering all functions and edge cases
-- All 509 tests pass, clippy clean, fmt clean
+- Created src/task_manifest.rs with full parsing and application logic
+- TaskManifest struct: parses task_manifest.toml with serde/toml
+- Sections supported:
+  - [[lib_rs_additions]]: mod_declaration and reexport kinds, appended to lib.rs (falls back to main.rs)
+  - [[cargo_toml_additions]]: dependency and dev_dependency kinds, merged into Cargo.toml [dependencies]/[dev-dependencies]
+  - [[mod_rs_additions]]: targeted append to any mod.rs file
+  - [[ts_index_additions]]: targeted append to any TypeScript index.ts barrel file
+- parse(path) and parse_str(content) for file and string-based parsing
+- apply(manifest, root) applies all entries to a worktree, returns count of entries applied
+- All operations are idempotent (skip if line already exists / dep already present)
+- ManifestError enum: Io, Parse, CargoTomlParse
+- Registered module in main.rs
+- 15 new tests covering: parsing, invalid kinds, all apply types, idempotency, fallbacks, error cases
+- All 524 tests pass, clippy clean, fmt clean
 
 ### Current State
-- pool.rs is ready for use by the scheduler (1ky) and coordinator
-- WorkersConfig added to HarnessConfig with serde deserialization support
-- DB integration uses existing worker_assignments table from db.rs
+- task_manifest.rs is ready for use by the integrator module
+- Follows spec from SPEC-v3-agents.md lines 511-569
 
 ### Suggested Next Tasks
-- **v6v**: Implement task_manifest.toml parsing (independent P1)
-- **1ky**: Implement scheduler for assigning beads to idle workers (now unblocked by f9m)
-- **x1a**: Implement session compression with zstd (independent P2)
+- **1ky**: Implement scheduler for assigning beads to idle workers (P1)
+- **x1a**: Implement session compression with zstd (P2)
+- **e2l**: Implement raw adapter with pass-through extraction (P2)
