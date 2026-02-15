@@ -100,6 +100,12 @@ enum MetricsAction {
         #[arg(long, default_value = "10")]
         last: i64,
     },
+    /// Show configured targets vs recent performance
+    Targets {
+        /// Number of recent sessions to evaluate (default: 10)
+        #[arg(long, default_value = "10")]
+        last: i64,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -293,9 +299,13 @@ async fn main() {
             .unwrap_or_else(|| std::path::Path::new("."));
         let db_path = output_dir.join("blacksmith.db");
 
+        let config_for_metrics = HarnessConfig::load(&cli.config).unwrap_or_default();
         let result = match action {
             MetricsAction::Log { file } => metrics_cmd::handle_log(&db_path, file),
             MetricsAction::Status { last } => metrics_cmd::handle_status(&db_path, *last),
+            MetricsAction::Targets { last } => {
+                metrics_cmd::handle_targets(&db_path, *last, &config_for_metrics.metrics.targets)
+            }
         };
 
         if let Err(e) = result {

@@ -1,22 +1,28 @@
-## Last Session: Implement configurable extraction rules from TOML config (simple-agent-harness-i9s)
+## Last Session: Implement configurable target thresholds and metrics targets command (simple-agent-harness-obm)
 
 ### Completed
-- Added `MetricsConfig` → `MetricsExtractConfig` → `Vec<ExtractionRule>` to `config.rs`
-- Each rule supports: kind, pattern (regex), anti_pattern, source (tool_commands/text/raw), transform (last_segment/int/trim), first_match, count, emit
-- Added `CompiledRule` struct and `ExtractionRule::compile()` method for regex compilation
-- Updated `ingest.rs` to collect session text (raw lines, text blocks, tool commands) during parsing
-- Added `ingest_session_with_rules()` that applies configurable rules alongside built-in metrics
-- Rule results written as events and included in observation data JSON
-- Updated `runner.rs` to compile extraction rules at startup and pass them to ingestion
-- Added 24 new tests (301 total pass): config parsing, rule compilation, all rule modes (count, emit, first_match, anti_pattern, source types, transforms), end-to-end ingestion with rules
+- Added `MetricsTargetsConfig` and `TargetRule` structs to `config.rs`
+  - Each rule: kind, compare (pct_of/pct_sessions/avg), relative_to, threshold, direction (above/below), label, unit
+  - Nested under `[metrics.targets.rules]` in blacksmith.toml
+- Added `Targets` subcommand to `MetricsAction` enum in `main.rs`
+  - Accepts `--last N` flag (default 10) for window size
+  - Loads config to pass target rules to handler
+- Implemented `handle_targets` in `metrics_cmd.rs`
+  - Loads recent observations, parses JSON data
+  - Evaluates each rule: avg (average over sessions), pct_of (ratio of two metrics), pct_sessions (% sessions with event present)
+  - Direction-aware comparison: "above" = good when >= threshold, "below" = good when <= threshold
+  - Formatted output with unit-aware display ($, %, raw) and OK/MISS status
+  - Summary line: "All N target(s) met" or "X/N target(s) met, Y missed"
+- Added 17 new tests (318 total pass): evaluate_target for avg/pct_of/pct_sessions/no_data/unknown_mode, format_target_line with $/%/miss, full handle_targets with DB for pass/fail/empty/mixed cases, TOML config parsing
 - Clippy clean, fmt applied
 
 ### Current State
-- Adding a new metric = 3-4 lines of TOML in `[metrics.extract.rules]`
-- `ingest_session()` still works without rules (backward compatible)
+- `blacksmith metrics targets` command fully functional
+- Target rules are purely config-driven — add TOML, no code changes needed
 - Pre-existing dead_code warnings remain for functions consumed by future features
+- The `evaluate_target` and `format_target_line` functions are internal to metrics_cmd.rs
 
 ### Suggested Next Tasks
-- Implement configurable target thresholds and metrics targets command (obm) — P2, ready
-- Add target miss warnings and streak detection to brief output (h97) — P2, blocked by obm
+- Add target miss warnings and streak detection to brief output (h97) — P2, was blocked by obm (now unblocked)
 - Implement --dry-run mode (5x6) — P3, ready
+- Implement --quiet mode for minimal output (r43) — P3, ready

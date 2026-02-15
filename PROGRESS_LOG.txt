@@ -621,3 +621,33 @@
 - Implement configurable target thresholds and metrics targets command (obm) — P2, ready
 - Add target miss warnings and streak detection to brief output (h97) — P2, blocked by obm
 - Implement --dry-run mode (5x6) — P3, ready
+
+--- 2026-02-15 14:28:40 | simple-agent-harness-obm ---
+## Last Session: Implement configurable target thresholds and metrics targets command (simple-agent-harness-obm)
+
+### Completed
+- Added `MetricsTargetsConfig` and `TargetRule` structs to `config.rs`
+  - Each rule: kind, compare (pct_of/pct_sessions/avg), relative_to, threshold, direction (above/below), label, unit
+  - Nested under `[metrics.targets.rules]` in blacksmith.toml
+- Added `Targets` subcommand to `MetricsAction` enum in `main.rs`
+  - Accepts `--last N` flag (default 10) for window size
+  - Loads config to pass target rules to handler
+- Implemented `handle_targets` in `metrics_cmd.rs`
+  - Loads recent observations, parses JSON data
+  - Evaluates each rule: avg (average over sessions), pct_of (ratio of two metrics), pct_sessions (% sessions with event present)
+  - Direction-aware comparison: "above" = good when >= threshold, "below" = good when <= threshold
+  - Formatted output with unit-aware display ($, %, raw) and OK/MISS status
+  - Summary line: "All N target(s) met" or "X/N target(s) met, Y missed"
+- Added 17 new tests (318 total pass): evaluate_target for avg/pct_of/pct_sessions/no_data/unknown_mode, format_target_line with $/%/miss, full handle_targets with DB for pass/fail/empty/mixed cases, TOML config parsing
+- Clippy clean, fmt applied
+
+### Current State
+- `blacksmith metrics targets` command fully functional
+- Target rules are purely config-driven — add TOML, no code changes needed
+- Pre-existing dead_code warnings remain for functions consumed by future features
+- The `evaluate_target` and `format_target_line` functions are internal to metrics_cmd.rs
+
+### Suggested Next Tasks
+- Add target miss warnings and streak detection to brief output (h97) — P2, was blocked by obm (now unblocked)
+- Implement --dry-run mode (5x6) — P3, ready
+- Implement --quiet mode for minimal output (r43) — P3, ready

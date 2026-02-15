@@ -220,6 +220,34 @@ impl Default for CommitDetectionConfig {
 #[serde(default)]
 pub struct MetricsConfig {
     pub extract: MetricsExtractConfig,
+    pub targets: MetricsTargetsConfig,
+}
+
+#[derive(Debug, Deserialize, Clone, Default)]
+#[serde(default)]
+pub struct MetricsTargetsConfig {
+    pub rules: Vec<TargetRule>,
+}
+
+/// A configurable target rule that defines a performance threshold.
+#[derive(Debug, Deserialize, Clone)]
+pub struct TargetRule {
+    /// Event kind to evaluate (e.g. "turns.narration_only", "cost.estimate_usd")
+    pub kind: String,
+    /// Comparison mode: "pct_of", "pct_sessions", "avg"
+    pub compare: String,
+    /// For pct_of: the denominator metric kind (e.g. "turns.total")
+    #[serde(default)]
+    pub relative_to: Option<String>,
+    /// Numeric threshold value
+    pub threshold: f64,
+    /// Direction: "above" (good when >= threshold) or "below" (good when <= threshold)
+    pub direction: String,
+    /// Human-readable label for display
+    pub label: String,
+    /// Unit for display (e.g. "%", "$")
+    #[serde(default)]
+    pub unit: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone, Default)]

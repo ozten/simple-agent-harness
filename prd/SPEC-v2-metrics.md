@@ -1,6 +1,20 @@
-# Evolvable Metrics System — V2 Spec
+# Blacksmith V2 — Evolvable Metrics & Continuous Improvement
 
-Replaces the rigid `self-improvement` Python tool with an evolvable metrics backend built into `simple-agent-harness`.
+Replaces the rigid `self-improvement` Python tool with an evolvable metrics and institutional memory system built into `blacksmith` (renamed from `simple-agent-harness`).
+
+## Rename: simple-agent-harness → blacksmith
+
+The project, binary, and all references are renamed:
+
+- Cargo package name: `blacksmith`
+- Binary: `blacksmith`
+- Config file: `blacksmith.toml` (falls back to `harness.toml` for backwards compat)
+- Status file: `blacksmith.status`
+- CLI help/version strings: `blacksmith`
+
+The `simple-agent-harness` name was a placeholder. `blacksmith` is the permanent name.
+
+---
 
 ## Problem
 
@@ -8,24 +22,65 @@ The current system has three evolvability failures:
 
 1. **Fixed-column sessions table.** Every new metric requires `ALTER TABLE`, updating INSERT/UPDATE/SELECT queries, updating the parser, updating the dashboard, and updating the brief generator. Adding "context window utilization" today would touch 6 functions across 200 lines.
 
-2. **Hardcoded extraction rules.** The parser greps for `phpunit`, `lint:fix`, `bd-finish` — all specific to one WordPress plugin project. Moving to a different project (or even changing our toolchain within this project) means rewriting the parser.
+2. **Hardcoded extraction rules.** The parser greps for `phpunit`, `lint:fix`, `bd-finish` — all specific to one project. Moving to a different project means rewriting the parser.
 
-3. **Enum constraints baked into schema.** Severity, status, and outcome are CHECK-constrained strings. Adding a new category means a migration, which SQLite doesn't handle gracefully (no ALTER CONSTRAINT).
+3. **Enum constraints baked into schema.** Severity, status, and outcome are CHECK-constrained strings. Adding a new category means a migration, which SQLite doesn't handle gracefully.
+
+And one architectural gap:
+
+4. **No institutional memory.** Qualitative observations — "we should use a linter", "parallel tool calls reduce turn count" — have nowhere to live persistently. Low-priority ideas get forgotten and rediscovered. The system tracks *what happened* but not *what we learned*.
 
 ## Design Principles
 
+- **Qualitative first**: The primary purpose is continuous improvement — noticing patterns, recording observations, tracking whether ideas helped. Quantitative metrics serve this qualitative loop.
 - **Schema-last**: The system accepts arbitrary key-value metrics. Schema (types, thresholds, display rules) is defined in config, not in the database.
 - **Extract-via-config**: What to look for in session output is defined in pattern rules, not in code.
 - **Append-only core**: The fundamental storage is an append-only event log. Materialized views and aggregations are derived and rebuildable.
-- **Project-agnostic**: The harness knows nothing about WordPress, PHPUnit, or beads. It knows about "sessions that produce output files."
+- **Project-agnostic**: Blacksmith knows nothing about WordPress, PHPUnit, or beads. It knows about "sessions that produce output files."
 
 ---
 
 ## Storage Model
 
+All tables live in a single SQLite database (`blacksmith.db` in the output directory).
+
+### Improvements Table (institutional memory)
+
+The core of the continuous improvement system. Records qualitative observations, process improvement ideas, and lessons learned. This is *not* a task tracker — actionable work graduates to beads. This is where "we noticed X" lives so we don't rediscover it.
+
+```sql
+CREATE TABLE improvements (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    ref        TEXT UNIQUE,              -- human-friendly ID: R1, R15, etc.
+    created    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    resolved   TEXT,                     -- timestamp when promoted/dismissed
+    category   TEXT NOT NULL,            -- free-form: code-quality, workflow, cost, reliability, performance
+    status     TEXT NOT NULL DEFAULT 'open',
+    title      TEXT NOT NULL,
+    body       TEXT,                     -- markdown description
+    context    TEXT,                     -- evidence: "sessions 340-348 showed high narration turns"
+    tags       TEXT,                     -- comma-separated
+    meta       TEXT                      -- JSON blob for anything else
+);
+
+CREATE INDEX idx_improvements_status ON improvements(status);
+CREATE INDEX idx_improvements_category ON improvements(category);
+```
+
+**Status values** (convention, not constraint):
+- `open` — observed, not yet acted on
+- `promoted` — graduated to a bead / actionable task
+- `dismissed` — considered and rejected (with reason in `meta`)
+- `revisit` — not now, but check back later
+- `validated` — implemented and confirmed effective
+
+**No CHECK constraints.** The CLI validates against a configurable set of allowed values, but the database accepts anything. New statuses and categories can be added without schema changes.
+
+The `context` field links an observation to its evidence — session numbers, metric trends, specific incidents. This lets future sessions verify whether an improvement actually helped.
+
 ### Events Table (append-only)
 
-The single source of truth. One row per significant occurrence.
+The single source of truth for quantitative data. One row per significant occurrence.
 
 ```sql
 CREATE TABLE events (
@@ -71,13 +126,11 @@ commit.none                value: {"reason": "cutoff"}
 
 # Project-specific (extracted via configurable patterns)
 extract.test_runs          value: 3
-extract.full_suite_runs    value: 1
 extract.lint_runs          value: 1
 extract.bead_id            value: "udgd"
-extract.bead_title         value: "CHECKOUT-01b: Client-side JS validation"
 ```
 
-New metrics appear by emitting new event kinds. No migration needed. The dashboard and brief generator query by kind pattern, so new kinds surface automatically in raw views and can be added to formatted views via config.
+New metrics appear by emitting new event kinds. No migration needed.
 
 ### Observations Table (derived, rebuildable)
 
@@ -100,46 +153,92 @@ The `data` column is a JSON object assembled from all events for that session:
   "turns.total": 67,
   "turns.narration_only": 4,
   "turns.parallel": 8,
-  "turns.tool_calls": 142,
   "cost.estimate_usd": 24.57,
-  "extract.bead_id": "udgd",
-  "extract.test_runs": 3,
   "session.duration_secs": 1847,
-  "session.output_bytes": 128456,
   "commit.detected": true
 }
 ```
 
-Rebuild command: `simple-agent-harness metrics rebuild` — drops and recreates from `events`.
+Rebuild command: `blacksmith metrics rebuild` — drops and recreates from `events`.
 
-### Improvements Table
+---
 
-Same purpose as V1 but with free-form fields instead of enums:
+## Loop Integration
 
-```sql
-CREATE TABLE improvements (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    ref        TEXT UNIQUE,              -- human-friendly ID: R1, R15, etc.
-    created    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
-    resolved   TEXT,                     -- timestamp when fixed/closed
-    severity   TEXT NOT NULL,            -- free-form: critical, high, medium, low, info
-    status     TEXT NOT NULL DEFAULT 'open',  -- free-form: open, fixed, wontfix, monitoring, stale
-    title      TEXT NOT NULL,
-    body       TEXT,                     -- markdown description
-    tags       TEXT,                     -- comma-separated
-    meta       TEXT                      -- JSON blob for anything else
-);
+Metrics and improvements are first-class parts of the blacksmith session loop, not optional hook configurations. The harness handles these automatically.
 
-CREATE INDEX idx_improvements_status ON improvements(status);
+### Pre-session: Brief Injection
+
+Before each session, blacksmith automatically generates the brief and prepends it to the agent's prompt. This is built into the prompt assembly step — not a `prepend_commands` entry.
+
+The sequence:
+1. Run `prepend_commands` (user-configured, optional)
+2. **Generate brief** (built-in, always runs when `blacksmith.db` exists)
+3. Read prompt file
+4. Assemble: `[prepend output]\n---\n[brief]\n---\n[prompt file]`
+
+The brief includes open improvements and (once Milestone 2+ lands) quantitative target status. This means every session starts with institutional context — the agent knows what patterns have been observed, what's been tried, and what to watch for.
+
+If no database exists yet (first run), the brief step is silently skipped.
+
+### Post-session: Automatic Ingestion
+
+After each session completes (and passes retry evaluation), blacksmith automatically ingests the session's JSONL output file into the database. This is built into the loop — not a post-session hook.
+
+The sequence:
+1. Session completes, retry logic decides Proceed or Skip
+2. **Ingest session output** (built-in, always runs when metrics are configured)
+   - Extract built-in metrics (turns, cost, duration)
+   - Run configurable extraction rules
+   - Write events to `events` table
+   - Update `observations` table
+3. Run post-session hooks (user-configured, optional)
+
+Post-session hooks receive `HARNESS_SESSION_NUMBER` so they can query the database for the just-ingested session data if needed.
+
+### Agent-side: Creating Improvements
+
+The agent creates improvements by calling `blacksmith improve add` during sessions. This is not enforced by the harness — it depends on prompt instructions. The recommended pattern is to include guidance in `PROMPT.md`:
+
+```markdown
+## Continuous Improvement
+
+When you notice a recurring pattern, inefficiency, or potential process improvement:
+1. Check existing improvements: `blacksmith improve list`
+2. If it's new, record it: `blacksmith improve add "description" --category <cat>`
+3. If you're acting on one, note it: `blacksmith improve update <ref> --status promoted`
 ```
 
-No CHECK constraints. The CLI validates against a configurable set of allowed values, but the database accepts anything. This means you can add `status = "deferred"` or `severity = "critical"` without touching the schema.
+The agent has access to `blacksmith improve` as a regular CLI tool during its session. The brief injection ensures it sees existing improvements at the start of every session without needing to query manually.
+
+### Loop Lifecycle Summary
+
+```
+┌─ Loop iteration ──────────────────────────────────────────────┐
+│                                                               │
+│  1. Check STOP file / signals                                 │
+│  2. Assemble prompt                                           │
+│     a. Run prepend_commands              (user-configured)    │
+│     b. Generate brief from blacksmith.db (built-in)           │
+│     c. Read prompt file                                       │
+│  3. Run pre-session hooks                (user-configured)    │
+│  4. Spawn agent session + watchdog                            │
+│  5. Evaluate output (retry logic)                             │
+│  6. Ingest session JSONL into database   (built-in)           │
+│  7. Check rate limit + backoff                                │
+│  8. Run post-session hooks               (user-configured)    │
+│  9. Save iteration counter                                    │
+│                                                               │
+└───────────────────────────────────────────────────────────────┘
+```
+
+Steps 2b and 6 are the integration points. They're always active when `blacksmith.db` is present and require no user configuration.
 
 ---
 
 ## Configurable Extraction Rules
 
-The parser is driven by rules in `harness.toml`, not hardcoded logic.
+The parser is driven by rules in `blacksmith.toml`, not hardcoded logic.
 
 ```toml
 [metrics.extract]
@@ -147,7 +246,6 @@ The parser is driven by rules in `harness.toml`, not hardcoded logic.
 
 [[metrics.extract.rules]]
 kind = "extract.bead_id"
-# Scan tool_use commands for this regex. First capture group = value.
 pattern = 'bd update (\S+) --status.?in.?progress'
 transform = "last_segment"   # split on "-", take last segment
 first_match = true           # stop after first match
@@ -156,11 +254,6 @@ first_match = true           # stop after first match
 kind = "commit.detected"
 pattern = 'bd-finish'
 emit = true                  # emit boolean true if pattern found anywhere
-
-[[metrics.extract.rules]]
-kind = "extract.bead_title"
-pattern = 'bd-finish\.sh\s+\S+\s+"([^"]+)"'
-first_match = true
 
 [[metrics.extract.rules]]
 kind = "extract.test_runs"
@@ -181,7 +274,6 @@ pattern = "lint:fix|lint.*composer"
 source = "tool_commands"
 count = true
 
-# Easy to add new ones:
 [[metrics.extract.rules]]
 kind = "extract.file_reads"
 pattern = '"name":\s*"Read"'
@@ -203,7 +295,7 @@ Adding a new metric = adding 3-4 lines of TOML. No code changes.
 
 ### Built-in Metrics (not configurable)
 
-These are always extracted by the harness because they come from the JSONL structure, not pattern matching:
+Always extracted because they come from the JSONL structure, not pattern matching:
 
 - `turns.total` — count of `type: "assistant"` events
 - `turns.narration_only` — assistant events with text blocks but no tool_use blocks
@@ -218,12 +310,9 @@ These are always extracted by the harness because they come from the JSONL struc
 
 ## Targets & Thresholds (configurable)
 
-Replace hardcoded `>= 85%`, `< 20%`, `> 10%` with config:
+Replace hardcoded thresholds with config:
 
 ```toml
-[metrics.targets]
-# Each target: a metric kind, a comparison, a threshold, and display info
-
 [[metrics.targets.rules]]
 kind = "turns.narration_only"
 compare = "pct_of"           # compute as percentage of another metric
@@ -264,14 +353,6 @@ threshold = 30
 direction = "below"
 label = "Avg cost per session"
 unit = "$"
-
-# Project-specific target — easy to add/remove
-[[metrics.targets.rules]]
-kind = "extract.lint_runs"
-compare = "avg"
-threshold = 2
-direction = "below"
-label = "Lint runs per session"
 ```
 
 The dashboard and brief generator iterate over these rules dynamically. Adding a target = adding TOML. Removing one = deleting TOML. No code changes.
@@ -280,51 +361,35 @@ The dashboard and brief generator iterate over these rules dynamically. Adding a
 
 ## CLI Interface
 
-Subcommands under `simple-agent-harness metrics` (or standalone `sah-metrics` alias):
+### Improvement commands (institutional memory)
 
 ```
-simple-agent-harness metrics <COMMAND>
-
-Commands:
-  log <file>                   Parse JSONL file, emit events, update observations
-  status [--last N]            Dashboard: recent sessions, target status, trends
-  analyze [--last N]           Deep analysis with recommendations
-  brief [--last N]             Performance snippet for prompt injection
-  targets                      Show configured targets vs recent performance
-  query <kind> [--last N]      Raw query: show values for a metric kind across sessions
-  events [--session N]         Dump raw events (optionally filtered by session)
-  rebuild                      Rebuild observations table from events
-  export [--format csv|json]   Export all observations
-
-  improvement add <title> --severity <sev>
-  improvement fix <ref> [--impact "..."]
-  improvement list [--status <s>]
-  improvement search <query>
+blacksmith improve add <title> --category <cat> [--body "..."] [--context "sessions 340-348"] [--tags "tag1,tag2"]
+blacksmith improve list [--status open|promoted|dismissed|revisit|validated] [--category <cat>]
+blacksmith improve show <ref>
+blacksmith improve update <ref> --status <status> [--body "..."] [--context "..."]
+blacksmith improve promote <ref>          # sets status=promoted, records timestamp
+blacksmith improve dismiss <ref> [--reason "..."]
+blacksmith improve search <query>         # full-text search across title, body, context
 ```
 
-### New: `query` command
+### Metrics commands
 
-Ad-hoc metric exploration without writing SQL:
-
-```bash
-$ sah metrics query extract.test_runs --last 10
-Session  Value
-  348    3
-  347    2
-  346    0      # empty session
-  345    4
-  ...
-
-$ sah metrics query cost.estimate_usd --last 20 --aggregate avg
-Average cost.estimate_usd over last 20 sessions: $22.41
-
-$ sah metrics query turns.parallel --last 10 --aggregate trend
-turns.parallel trend (last 10): 0 0 0 2 3 1 5 4 6 8  ↑ improving
+```
+blacksmith metrics log <file>              # Parse JSONL file, emit events, update observations
+blacksmith metrics status [--last N]       # Dashboard: recent sessions, target status, trends
+blacksmith metrics brief [--last N]        # Performance snippet for prompt injection
+blacksmith metrics targets                 # Show configured targets vs recent performance
+blacksmith metrics query <kind> [--last N] [--aggregate avg|trend]
+blacksmith metrics events [--session N]    # Dump raw events
+blacksmith metrics rebuild                 # Rebuild observations from events
+blacksmith metrics export [--format csv|json]
+blacksmith metrics migrate --from <path>   # Import V1 self-improvement.db
 ```
 
-### Updated: `brief` command
+### Brief command output
 
-Reads targets from config, computes each one against recent sessions, emits warnings for misses and streaks. No hardcoded metric names.
+Includes both quantitative targets and qualitative context:
 
 ```
 ## PERFORMANCE FEEDBACK (auto-generated)
@@ -335,10 +400,16 @@ Last session #348:
   Avg turns: 67 (target: <80) — OK
   Lint runs: 1 (target: <2) — OK
 
-All targets met. Keep it up.
+All targets met.
+
+## OPEN IMPROVEMENTS (3 of 7)
+
+R12 [code-quality] Use ESLint --fix in pre-commit hook to reduce lint iterations
+R15 [workflow] Batch file reads when exploring unfamiliar directories
+R18 [cost] Skip full test suite when only touching CSS files
 ```
 
-When a target is missed for 3+ consecutive sessions, the brief escalates to a WARNING block (same as V1, but driven by config).
+The brief surfaces the most relevant open improvements so the agent has institutional context without manual prompting.
 
 ---
 
@@ -361,37 +432,55 @@ The V1 `self-improvement.db` has ~350 session rows. Migration path:
    - `session.outcome` = `outcome`
    - `commit.detected` = `committed` (as boolean)
 3. Rebuild `observations` table
-4. Copy `improvements` rows directly (schema is compatible)
-5. Copy `analysis_runs` into events as `analysis.run` events (or discard — they're derivable)
+4. Copy `improvements` rows (map `severity` → `category`, `status` values remain compatible)
 
-Command: `simple-agent-harness metrics migrate --from tools/self-improvement.db`
+Command: `blacksmith metrics migrate --from tools/self-improvement.db`
 
 ---
 
 ## Implementation Scope
 
-This is part of the `simple-agent-harness` Rust binary, not a separate tool.
+All features are part of the `blacksmith` Rust binary.
 
-### Milestone 1 (with harness MVP)
+### Milestone 0: Rename
+
+- Rename Cargo package to `blacksmith`
+- Rename binary to `blacksmith`
+- Config file: `blacksmith.toml` (fall back to `harness.toml`)
+- Status file: `blacksmith.status`
+- Update all log messages, help text, version strings
+
+### Milestone 1: Institutional Memory + Loop Integration
+
+- SQLite database setup (`blacksmith.db`)
+- `improvements` table creation
+- `improve add/list/show/update/promote/dismiss/search` commands
+- Auto-assign `ref` (R1, R2, ...) on creation
+- `brief` command generates improvement context
+- **Loop: pre-session brief injection** — brief output prepended to prompt automatically
+- Brief silently skipped when no database exists
+
+### Milestone 2: Session Metrics + Automatic Ingestion
+
 - `events` table + `observations` table creation
-- Built-in metric extraction (turns, cost, duration)
-- `log` command (parse JSONL → emit events → update observations)
-- `status` command (basic dashboard from observations)
+- Built-in metric extraction from JSONL (turns, cost, duration)
+- **Loop: post-session automatic ingestion** — JSONL parsed and written to database after each session
+- `metrics log` command (manual ingestion for ad-hoc / historical files)
+- `metrics status` command (dashboard from observations)
+- `brief` command adds quantitative summary alongside improvements
 
-### Milestone 2 (with harness observability)
-- Configurable extraction rules from `harness.toml`
-- Configurable targets from `harness.toml`
-- `brief` command (driven by targets config)
-- `query` command
+### Milestone 3: Configurable Extraction & Targets
 
-### Milestone 3 (with harness hooks)
-- `analyze` command with trend comparison
-- `improvement` subcommands
-- `migrate` command for V1 data
-- `export` command
+- `[metrics.extract]` rules in `blacksmith.toml`
+- `[metrics.targets]` thresholds in `blacksmith.toml`
+- `brief` auto-generates warnings from target misses
+- `metrics targets` command
+- Streak detection: escalate warnings after N consecutive misses (configurable)
 
-### Milestone 4 (polish)
-- `rebuild` command
-- `events` dump command
-- Streak detection in brief (configurable streak window)
-- Per-project config profiles (different targets for different repos)
+### Milestone 4: Migration & Polish
+
+- `metrics migrate` command for V1 data
+- `metrics rebuild` command
+- `metrics export` command
+- `metrics query` command with aggregation
+- `metrics events` dump command
