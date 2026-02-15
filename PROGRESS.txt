@@ -1,21 +1,22 @@
-## Last Session: Implement --quiet mode (simple-agent-harness-r43)
+## Last Session: Implement config validation with helpful error messages (simple-agent-harness-edb)
 
 ### Completed
-- Changed `--quiet` flag to filter at `error` level (was `warn`), matching PRD spec: "--quiet = error only"
-- Added final summary line in quiet mode via `println!` that bypasses tracing filters
-  - Format: `blacksmith: {productive}/{max} productive, global={global}, exit={reason}`
-- Passed `quiet` bool through `runner::run()` signature (3rd parameter)
-- Updated all 22 test call sites to pass `quiet: false`
-- Added `test_quiet_mode_completes_successfully` test
-- All 341 tests pass, clippy clean (pre-existing dead_code warnings only), fmt applied
+- Added `HarnessConfig::validate()` method that checks all config fields and returns actionable error messages
+- Validates: prompt_file exists, output_dir exists/creatable, agent.command in PATH, timeout values > 0, max_iterations > 0, initial_delay <= max_delay, commit_detection patterns compile, extraction rules compile, target rules have valid compare/direction values, pct_of requires relative_to
+- Added `command_in_path()` helper that searches PATH directories for the agent binary
+- Integrated validation call in main.rs after config load + CLI overrides, before dry_run or main loop
+- Removed redundant per-field extraction rule validation from dry_run path (now handled by validate())
+- Added 17 new tests covering all validation paths
+- All 358 tests pass, clippy clean (pre-existing dead_code warnings only), fmt applied
 
 ### Current State
-- `--quiet` suppresses all info/warn/debug tracing, only shows errors + one final summary line
-- `--verbose` shows debug-level messages (unchanged)
-- Default shows info+ messages (unchanged)
-- Pre-existing dead_code warnings remain for functions consumed by future features
+- Config validation runs on every startup, producing clear error messages like:
+  `session.prompt_file: file 'missing.md' does not exist`
+  `agent.command: binary 'nonexistent' not found in PATH`
+  `backoff.initial_delay_secs (1000) must not exceed backoff.max_delay_secs (100)`
+- Validation errors are collected (not fail-fast), so users see all issues at once
 
 ### Suggested Next Tasks
-- Implement config validation with helpful error messages (edb) — P3, ready
 - Implement metrics migrate command for V1 data import (j1w) — P3, ready
 - Implement metrics rebuild command (9cm) — P3, ready
+- Implement metrics export, query, and events dump commands (odo) — P3, ready

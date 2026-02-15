@@ -339,6 +339,141 @@ impl ExtractionRule {
     }
 }
 
+impl HarnessConfig {
+    /// Validate the resolved configuration, returning a list of actionable error messages.
+    /// Call this after loading config and applying CLI overrides so errors surface immediately.
+    pub fn validate(&self) -> Vec<String> {
+        let mut errors = Vec::new();
+
+        // prompt_file must exist
+        if !self.session.prompt_file.exists() {
+            errors.push(format!(
+                "session.prompt_file: file '{}' does not exist",
+                self.session.prompt_file.display()
+            ));
+        }
+
+        // output_dir must exist or be creatable
+        if !self.session.output_dir.exists() {
+            if let Err(e) = std::fs::create_dir_all(&self.session.output_dir) {
+                errors.push(format!(
+                    "session.output_dir: directory '{}' does not exist and cannot be created: {}",
+                    self.session.output_dir.display(),
+                    e
+                ));
+            }
+        }
+
+        // agent.command must be found on PATH (or be an absolute/relative path that exists)
+        if !self.agent.command.is_empty() {
+            let cmd = Path::new(&self.agent.command);
+            if cmd.is_absolute() || self.agent.command.contains('/') {
+                if !cmd.exists() {
+                    errors.push(format!(
+                        "agent.command: binary '{}' not found at specified path",
+                        self.agent.command
+                    ));
+                }
+            } else if !command_in_path(&self.agent.command) {
+                errors.push(format!(
+                    "agent.command: binary '{}' not found in PATH",
+                    self.agent.command
+                ));
+            }
+        } else {
+            errors.push("agent.command: must not be empty".to_string());
+        }
+
+        // Timeout values must be positive
+        if self.watchdog.check_interval_secs == 0 {
+            errors.push("watchdog.check_interval_secs: must be greater than 0".to_string());
+        }
+        if self.watchdog.stale_timeout_mins == 0 {
+            errors.push("watchdog.stale_timeout_mins: must be greater than 0".to_string());
+        }
+        if self.retry.retry_delay_secs == 0 {
+            errors.push("retry.retry_delay_secs: must be greater than 0".to_string());
+        }
+        if self.backoff.initial_delay_secs == 0 {
+            errors.push("backoff.initial_delay_secs: must be greater than 0".to_string());
+        }
+        if self.backoff.max_delay_secs == 0 {
+            errors.push("backoff.max_delay_secs: must be greater than 0".to_string());
+        }
+
+        // max_iterations must be positive
+        if self.session.max_iterations == 0 {
+            errors.push("session.max_iterations: must be greater than 0".to_string());
+        }
+
+        // backoff.initial_delay should not exceed max_delay
+        if self.backoff.initial_delay_secs > self.backoff.max_delay_secs {
+            errors.push(format!(
+                "backoff.initial_delay_secs ({}) must not exceed backoff.max_delay_secs ({})",
+                self.backoff.initial_delay_secs, self.backoff.max_delay_secs
+            ));
+        }
+
+        // commit_detection.patterns must be valid regexes
+        for (i, pat) in self.commit_detection.patterns.iter().enumerate() {
+            if let Err(e) = Regex::new(pat) {
+                errors.push(format!(
+                    "commit_detection.patterns[{}]: invalid regex '{}': {}",
+                    i, pat, e
+                ));
+            }
+        }
+
+        // metrics.extract.rules must compile
+        for (i, rule) in self.metrics.extract.rules.iter().enumerate() {
+            if let Err(e) = rule.compile() {
+                errors.push(format!("metrics.extract.rules[{}]: {}", i, e));
+            }
+        }
+
+        // metrics.targets.rules must have valid compare and direction values
+        let valid_compare = ["pct_of", "pct_sessions", "avg"];
+        let valid_direction = ["above", "below"];
+        for (i, rule) in self.metrics.targets.rules.iter().enumerate() {
+            if !valid_compare.contains(&rule.compare.as_str()) {
+                errors.push(format!(
+                    "metrics.targets.rules[{}]: invalid compare '{}', expected one of: {}",
+                    i,
+                    rule.compare,
+                    valid_compare.join(", ")
+                ));
+            }
+            if !valid_direction.contains(&rule.direction.as_str()) {
+                errors.push(format!(
+                    "metrics.targets.rules[{}]: invalid direction '{}', expected 'above' or 'below'",
+                    i, rule.direction
+                ));
+            }
+            if rule.compare == "pct_of" && rule.relative_to.is_none() {
+                errors.push(format!(
+                    "metrics.targets.rules[{}]: compare='pct_of' requires 'relative_to' field",
+                    i
+                ));
+            }
+        }
+
+        errors
+    }
+}
+
+/// Check if a command name exists on the system PATH.
+fn command_in_path(cmd: &str) -> bool {
+    if let Some(path_var) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&path_var) {
+            let full = dir.join(cmd);
+            if full.is_file() {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 // --- Default implementations ---
 
 impl Default for SessionConfig {
@@ -826,5 +961,212 @@ label = "Avg turns"
         let config = HarnessConfig::load(&path).unwrap();
         assert_eq!(config.metrics.targets.streak_threshold, 5);
         assert_eq!(config.metrics.targets.rules.len(), 1);
+    }
+
+    // --- Validation tests ---
+
+    /// Helper: create a valid config with real paths so validation passes.
+    fn valid_config() -> HarnessConfig {
+        let dir = tempfile::tempdir().unwrap();
+        let prompt = dir.path().join("PROMPT.md");
+        std::fs::write(&prompt, "test prompt").unwrap();
+        let mut config = HarnessConfig::default();
+        config.session.prompt_file = prompt;
+        config.session.output_dir = dir.path().to_path_buf();
+        // Use a command known to exist
+        config.agent.command = "sh".to_string();
+        // Leak the tempdir so it lives through validation
+        std::mem::forget(dir);
+        config
+    }
+
+    #[test]
+    fn test_validate_valid_config_no_errors() {
+        let config = valid_config();
+        let errors = config.validate();
+        assert!(errors.is_empty(), "expected no errors, got: {:?}", errors);
+    }
+
+    #[test]
+    fn test_validate_missing_prompt_file() {
+        let mut config = valid_config();
+        config.session.prompt_file = PathBuf::from("/nonexistent/prompt.md");
+        let errors = config.validate();
+        assert!(errors
+            .iter()
+            .any(|e| e.contains("session.prompt_file") && e.contains("does not exist")));
+    }
+
+    #[test]
+    fn test_validate_uncreatable_output_dir() {
+        let mut config = valid_config();
+        config.session.output_dir = PathBuf::from("/nonexistent/deeply/nested/dir");
+        let errors = config.validate();
+        assert!(errors.iter().any(|e| e.contains("session.output_dir")));
+    }
+
+    #[test]
+    fn test_validate_empty_command() {
+        let mut config = valid_config();
+        config.agent.command = String::new();
+        let errors = config.validate();
+        assert!(errors
+            .iter()
+            .any(|e| e.contains("agent.command") && e.contains("must not be empty")));
+    }
+
+    #[test]
+    fn test_validate_command_not_in_path() {
+        let mut config = valid_config();
+        config.agent.command = "nonexistent_binary_xyz_12345".to_string();
+        let errors = config.validate();
+        assert!(errors
+            .iter()
+            .any(|e| e.contains("agent.command") && e.contains("not found in PATH")));
+    }
+
+    #[test]
+    fn test_validate_command_absolute_path_missing() {
+        let mut config = valid_config();
+        config.agent.command = "/nonexistent/path/to/binary".to_string();
+        let errors = config.validate();
+        assert!(errors
+            .iter()
+            .any(|e| e.contains("agent.command") && e.contains("not found at specified path")));
+    }
+
+    #[test]
+    fn test_validate_zero_timeout_values() {
+        let mut config = valid_config();
+        config.watchdog.check_interval_secs = 0;
+        config.watchdog.stale_timeout_mins = 0;
+        config.retry.retry_delay_secs = 0;
+        config.backoff.initial_delay_secs = 0;
+        config.backoff.max_delay_secs = 0;
+        let errors = config.validate();
+        assert!(errors.iter().any(|e| e.contains("check_interval_secs")));
+        assert!(errors.iter().any(|e| e.contains("stale_timeout_mins")));
+        assert!(errors.iter().any(|e| e.contains("retry_delay_secs")));
+        assert!(errors.iter().any(|e| e.contains("initial_delay_secs")));
+        assert!(errors.iter().any(|e| e.contains("max_delay_secs")));
+    }
+
+    #[test]
+    fn test_validate_zero_max_iterations() {
+        let mut config = valid_config();
+        config.session.max_iterations = 0;
+        let errors = config.validate();
+        assert!(errors.iter().any(|e| e.contains("session.max_iterations")));
+    }
+
+    #[test]
+    fn test_validate_initial_delay_exceeds_max_delay() {
+        let mut config = valid_config();
+        config.backoff.initial_delay_secs = 1000;
+        config.backoff.max_delay_secs = 100;
+        let errors = config.validate();
+        assert!(errors
+            .iter()
+            .any(|e| e.contains("initial_delay_secs") && e.contains("must not exceed")));
+    }
+
+    #[test]
+    fn test_validate_invalid_commit_detection_pattern() {
+        let mut config = valid_config();
+        config.commit_detection.patterns = vec!["[invalid".to_string()];
+        let errors = config.validate();
+        assert!(errors
+            .iter()
+            .any(|e| e.contains("commit_detection.patterns")));
+    }
+
+    #[test]
+    fn test_validate_invalid_extraction_rule() {
+        let mut config = valid_config();
+        config.metrics.extract.rules.push(ExtractionRule {
+            kind: "bad".to_string(),
+            pattern: "[invalid".to_string(),
+            anti_pattern: None,
+            source: "tool_commands".to_string(),
+            transform: None,
+            first_match: false,
+            count: false,
+            emit: None,
+        });
+        let errors = config.validate();
+        assert!(errors.iter().any(|e| e.contains("metrics.extract.rules")));
+    }
+
+    #[test]
+    fn test_validate_invalid_target_compare() {
+        let mut config = valid_config();
+        config.metrics.targets.rules.push(TargetRule {
+            kind: "test".to_string(),
+            compare: "invalid_compare".to_string(),
+            relative_to: None,
+            threshold: 1.0,
+            direction: "above".to_string(),
+            label: "test".to_string(),
+            unit: None,
+        });
+        let errors = config.validate();
+        assert!(errors.iter().any(|e| e.contains("invalid compare")));
+    }
+
+    #[test]
+    fn test_validate_invalid_target_direction() {
+        let mut config = valid_config();
+        config.metrics.targets.rules.push(TargetRule {
+            kind: "test".to_string(),
+            compare: "avg".to_string(),
+            relative_to: None,
+            threshold: 1.0,
+            direction: "sideways".to_string(),
+            label: "test".to_string(),
+            unit: None,
+        });
+        let errors = config.validate();
+        assert!(errors.iter().any(|e| e.contains("invalid direction")));
+    }
+
+    #[test]
+    fn test_validate_pct_of_missing_relative_to() {
+        let mut config = valid_config();
+        config.metrics.targets.rules.push(TargetRule {
+            kind: "test".to_string(),
+            compare: "pct_of".to_string(),
+            relative_to: None,
+            threshold: 50.0,
+            direction: "below".to_string(),
+            label: "test".to_string(),
+            unit: None,
+        });
+        let errors = config.validate();
+        assert!(errors.iter().any(|e| e.contains("requires 'relative_to'")));
+    }
+
+    #[test]
+    fn test_validate_multiple_errors_collected() {
+        let mut config = valid_config();
+        config.session.max_iterations = 0;
+        config.watchdog.check_interval_secs = 0;
+        config.agent.command = "nonexistent_binary_xyz_12345".to_string();
+        let errors = config.validate();
+        assert!(
+            errors.len() >= 3,
+            "expected at least 3 errors, got {}: {:?}",
+            errors.len(),
+            errors
+        );
+    }
+
+    #[test]
+    fn test_command_in_path_finds_sh() {
+        assert!(command_in_path("sh"));
+    }
+
+    #[test]
+    fn test_command_in_path_missing_binary() {
+        assert!(!command_in_path("nonexistent_binary_xyz_12345"));
     }
 }

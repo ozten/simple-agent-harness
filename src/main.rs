@@ -335,22 +335,17 @@ async fn main() {
 
     tracing::debug!(?config, "resolved configuration");
 
-    if cli.dry_run {
-        // Validate extraction rule regexes before printing
-        let mut validation_errors = Vec::new();
-        for (i, rule) in config.metrics.extract.rules.iter().enumerate() {
-            if let Err(e) = rule.compile() {
-                validation_errors.push(format!("  metrics.extract.rules[{}]: {}", i, e));
-            }
+    // Validate config on load so errors surface immediately
+    let validation_errors = config.validate();
+    if !validation_errors.is_empty() {
+        eprintln!("Configuration validation failed:");
+        for err in &validation_errors {
+            eprintln!("  {err}");
         }
-        if !validation_errors.is_empty() {
-            eprintln!("Configuration validation failed:");
-            for err in &validation_errors {
-                eprintln!("{err}");
-            }
-            std::process::exit(1);
-        }
+        std::process::exit(1);
+    }
 
+    if cli.dry_run {
         println!("blacksmith v{}", env!("CARGO_PKG_VERSION"));
         println!("Config file: {}", cli.config.display());
         println!();
