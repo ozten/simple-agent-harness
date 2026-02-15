@@ -54,3 +54,32 @@
 - Implement structured console logging with tracing (yyb) — P2, unblocked
 - Implement pre/post-session hook execution (8ff) — P2, will use PreHooks/PostHooks states
 - Implement JSONL event log (t0t) — P2, unblocked
+
+--- 2026-02-15 01:17:31 | simple-agent-harness-fgf ---
+## Last Session: Implement --status CLI command (simple-agent-harness-fgf)
+
+### Completed
+- Implemented `--status` CLI command that reads `harness.status` JSON and displays formatted output
+- Added `Deserialize` derive to `HarnessState` and `StatusData` for JSON read-back
+- Added `StatusFile::read()` method to deserialize the status file (returns None if missing)
+- Added `StatusError::Deserialize` and `StatusError::Read` variants with Display/Error impls
+- Added `display_status()` function with:
+  - PID liveness check via `nix::sys::signal::kill(pid, None)` (signal 0)
+  - "not running (stale status file)" label when PID is dead
+  - Human-readable byte formatting (B/KB/MB)
+  - Human-readable uptime from session_start
+  - Last completed iteration with commit status
+  - Consecutive rate limits display
+- Updated main.rs to call `display_status()` instead of placeholder
+- Handles missing status file gracefully with "No running harness detected."
+- Added 10 new tests: read roundtrip, read missing, read invalid JSON, format_bytes, format_uptime, state display labels, display_status no file, display_status with data, deserialize error display, read error display
+- All 78 tests pass, clippy clean, fmt applied
+
+### Current State
+- `--status` command is fully functional, matches PRD output format
+- Pre-existing dead_code warnings remain for unimplemented modules (hooks, metrics, retry.current_attempt, session.output_file, watchdog.ProcessExited)
+
+### Suggested Next Tasks
+- Implement structured console logging with tracing (yyb) — P2, unblocked
+- Implement JSONL event log (t0t) — P2, unblocked
+- Implement pre/post-session hook execution (8ff) — P2, unblocked

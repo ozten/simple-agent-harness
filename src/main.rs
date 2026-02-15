@@ -164,7 +164,17 @@ async fn main() {
     }
 
     if cli.status {
-        println!("Status mode — not yet implemented.");
+        let status_path = config.session.output_dir.join("harness.status");
+        match status::display_status(&status_path) {
+            Ok(true) => {}
+            Ok(false) => {
+                println!("No running harness detected.");
+            }
+            Err(e) => {
+                eprintln!("Error reading status: {e}");
+                std::process::exit(1);
+            }
+        }
         return;
     }
 

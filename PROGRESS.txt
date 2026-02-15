@@ -1,29 +1,27 @@
-## Last Session: Implement status file with atomic JSON writes (simple-agent-harness-3dl)
+## Last Session: Implement --status CLI command (simple-agent-harness-fgf)
 
 ### Completed
-- Created src/status.rs with:
-  - `HarnessState` enum: Starting, PreHooks, SessionRunning, WatchdogKill, Retrying, PostHooks, RateLimitedBackoff, Idle, ShuttingDown (all states from PRD)
-  - `StatusData` struct: all JSON fields from PRD (pid, state, iteration, max_iterations, global_iteration, output_file, output_bytes, session_start, last_update, last_completed_iteration, last_committed, consecutive_rate_limits)
-  - `StatusFile`: atomic write (write-to-temp + rename) and remove operations
-  - `StatusTracker`: mutable state tracker with setter methods, builds StatusData and writes via StatusFile
-  - `StatusError` enum with Display/Error impls
-  - 7 unit tests covering atomic write, overwrite, remove, all state serialization, tracker lifecycle, error paths, error display
-- Integrated StatusTracker into runner.rs:
-  - Starting state at loop begin
-  - SessionRunning state before each session spawn (with output_file, iteration, session_start)
-  - Idle state after productive iterations
-  - Retrying state on empty session retry
-  - ShuttingDown state on all exit paths (STOP file, signal, prompt error, consecutive errors)
-  - Status file removed on clean exit
-- Status file written to `{output_dir}/harness.status`
-- All 68 tests pass, clippy clean, fmt applied
+- Implemented `--status` CLI command that reads `harness.status` JSON and displays formatted output
+- Added `Deserialize` derive to `HarnessState` and `StatusData` for JSON read-back
+- Added `StatusFile::read()` method to deserialize the status file (returns None if missing)
+- Added `StatusError::Deserialize` and `StatusError::Read` variants with Display/Error impls
+- Added `display_status()` function with:
+  - PID liveness check via `nix::sys::signal::kill(pid, None)` (signal 0)
+  - "not running (stale status file)" label when PID is dead
+  - Human-readable byte formatting (B/KB/MB)
+  - Human-readable uptime from session_start
+  - Last completed iteration with commit status
+  - Consecutive rate limits display
+- Updated main.rs to call `display_status()` instead of placeholder
+- Handles missing status file gracefully with "No running harness detected."
+- Added 10 new tests: read roundtrip, read missing, read invalid JSON, format_bytes, format_uptime, state display labels, display_status no file, display_status with data, deserialize error display, read error display
+- All 78 tests pass, clippy clean, fmt applied
 
 ### Current State
-- Status file is fully functional with atomic writes at every state transition
-- Pre-existing dead_code warnings remain for unimplemented modules (hooks, metrics) and not-yet-used status variants (PreHooks, PostHooks, WatchdogKill, RateLimitedBackoff)
-- Those variants will be used when hooks (8ff) and rate limiting (7d0) are implemented
+- `--status` command is fully functional, matches PRD output format
+- Pre-existing dead_code warnings remain for unimplemented modules (hooks, metrics, retry.current_attempt, session.output_file, watchdog.ProcessExited)
 
 ### Suggested Next Tasks
 - Implement structured console logging with tracing (yyb) — P2, unblocked
-- Implement pre/post-session hook execution (8ff) — P2, will use PreHooks/PostHooks states
 - Implement JSONL event log (t0t) — P2, unblocked
+- Implement pre/post-session hook execution (8ff) — P2, unblocked

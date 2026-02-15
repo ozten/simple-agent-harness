@@ -2,11 +2,11 @@
 ///
 /// Uses atomic write pattern: write to temp file then rename.
 use chrono::{DateTime, Utc};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 /// Harness states written to the status file.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HarnessState {
     Starting,
@@ -21,7 +21,7 @@ pub enum HarnessState {
 }
 
 /// The JSON payload written to `harness.status`.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StatusData {
     pub pid: u32,
     pub state: HarnessState,
@@ -81,6 +81,23 @@ impl StatusFile {
     /// Path to the status file.
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// Read and deserialize the status file.
+    /// Returns None if the file does not exist.
+    pub fn read(&self) -> Result<Option<StatusData>, StatusError> {
+        match std::fs::read_to_string(&self.path) {
+            Ok(contents) => {
+                let data = serde_json::from_str(&contents)
+                    .map_err(|e| StatusError::Deserialize { source: e })?;
+                Ok(Some(data))
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(StatusError::Read {
+                path: self.path.clone(),
+                source: e,
+            }),
+        }
     }
 }
 
@@ -185,13 +202,117 @@ impl StatusTracker {
     }
 }
 
+/// Format bytes into a human-readable string (e.g., "48.2 KB").
+fn format_bytes(bytes: u64) -> String {
+    if bytes < 1024 {
+        format!("{} B", bytes)
+    } else if bytes < 1024 * 1024 {
+        format!("{:.1} KB", bytes as f64 / 1024.0)
+    } else {
+        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+    }
+}
+
+/// Format a duration into human-readable uptime (e.g., "3h 42m").
+fn format_uptime(duration: chrono::Duration) -> String {
+    let total_secs = duration.num_seconds().max(0);
+    let hours = total_secs / 3600;
+    let mins = (total_secs % 3600) / 60;
+    if hours > 0 {
+        format!("{}h {}m", hours, mins)
+    } else {
+        format!("{}m", mins)
+    }
+}
+
+impl HarnessState {
+    /// Human-friendly label for display.
+    fn display_label(self) -> &'static str {
+        match self {
+            HarnessState::Starting => "starting",
+            HarnessState::PreHooks => "pre-hooks",
+            HarnessState::SessionRunning => "running",
+            HarnessState::WatchdogKill => "watchdog-kill",
+            HarnessState::Retrying => "retrying",
+            HarnessState::PostHooks => "post-hooks",
+            HarnessState::RateLimitedBackoff => "rate-limited",
+            HarnessState::Idle => "idle",
+            HarnessState::ShuttingDown => "shutting-down",
+        }
+    }
+}
+
+/// Display the status of a running harness.
+/// Reads the status file and prints formatted output to stdout.
+/// Returns Ok(true) if status was displayed, Ok(false) if no harness is running.
+pub fn display_status(status_path: &Path) -> Result<bool, StatusError> {
+    let file = StatusFile::new(status_path.to_path_buf());
+    let data = match file.read()? {
+        Some(data) => data,
+        None => return Ok(false),
+    };
+
+    // Check if the PID is still alive
+    let pid_alive =
+        nix::sys::signal::kill(nix::unistd::Pid::from_raw(data.pid as i32), None).is_ok();
+    let state_label = if pid_alive {
+        data.state.display_label()
+    } else {
+        "not running (stale status file)"
+    };
+
+    println!("Loop state: {} (PID {})", state_label, data.pid);
+    println!(
+        "Current iteration: {}/{} (global: {})",
+        data.iteration, data.max_iterations, data.global_iteration
+    );
+
+    // Output info
+    let size_str = format_bytes(data.output_bytes);
+    if !data.output_file.is_empty() {
+        println!("Session output: {} ({})", size_str, data.output_file);
+    } else {
+        println!("Session output: {}", size_str);
+    }
+
+    // Uptime from session_start
+    if let Some(start) = data.session_start {
+        let uptime = Utc::now() - start;
+        println!("Uptime: {}", format_uptime(uptime));
+    }
+
+    // Last completed iteration
+    if let Some(last) = data.last_completed_iteration {
+        let commit_info = if data.last_committed {
+            " — committed"
+        } else {
+            ""
+        };
+        println!("Last completed: iteration {}{}", last, commit_info);
+    }
+
+    // Rate limits
+    if data.consecutive_rate_limits > 0 {
+        println!("Consecutive rate limits: {}", data.consecutive_rate_limits);
+    }
+
+    Ok(true)
+}
+
 /// Errors from status file operations.
 #[derive(Debug)]
 pub enum StatusError {
     Serialize {
         source: serde_json::Error,
     },
+    Deserialize {
+        source: serde_json::Error,
+    },
     Write {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    Read {
         path: PathBuf,
         source: std::io::Error,
     },
@@ -206,12 +327,18 @@ impl std::fmt::Display for StatusError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             StatusError::Serialize { source } => write!(f, "failed to serialize status: {source}"),
+            StatusError::Deserialize { source } => {
+                write!(f, "failed to deserialize status: {source}")
+            }
             StatusError::Write { path, source } => {
                 write!(
                     f,
                     "failed to write temp status file {}: {source}",
                     path.display()
                 )
+            }
+            StatusError::Read { path, source } => {
+                write!(f, "failed to read status file {}: {source}", path.display())
             }
             StatusError::Rename { from, to, source } => {
                 write!(
@@ -229,7 +356,9 @@ impl std::error::Error for StatusError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             StatusError::Serialize { source } => Some(source),
+            StatusError::Deserialize { source } => Some(source),
             StatusError::Write { source, .. } => Some(source),
+            StatusError::Read { source, .. } => Some(source),
             StatusError::Rename { source, .. } => Some(source),
         }
     }
@@ -446,5 +575,155 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("failed to write temp status file"));
         assert!(msg.contains("no perms"));
+    }
+
+    #[test]
+    fn test_status_file_read_roundtrip() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("harness.status");
+        let sf = StatusFile::new(path.clone());
+
+        let now = Utc::now();
+        let data = StatusData {
+            pid: 42,
+            state: HarnessState::SessionRunning,
+            iteration: 5,
+            max_iterations: 25,
+            global_iteration: 105,
+            output_file: "claude-iteration-105.jsonl".to_string(),
+            output_bytes: 12345,
+            session_start: Some(now),
+            last_update: now,
+            last_completed_iteration: Some(104),
+            last_committed: true,
+            consecutive_rate_limits: 0,
+        };
+
+        sf.write(&data).unwrap();
+        let read_back = sf.read().unwrap().unwrap();
+
+        assert_eq!(read_back.pid, 42);
+        assert_eq!(read_back.state, HarnessState::SessionRunning);
+        assert_eq!(read_back.iteration, 5);
+        assert_eq!(read_back.max_iterations, 25);
+        assert_eq!(read_back.global_iteration, 105);
+        assert_eq!(read_back.output_file, "claude-iteration-105.jsonl");
+        assert_eq!(read_back.output_bytes, 12345);
+        assert_eq!(read_back.last_completed_iteration, Some(104));
+        assert!(read_back.last_committed);
+    }
+
+    #[test]
+    fn test_status_file_read_missing_returns_none() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("nonexistent.status");
+        let sf = StatusFile::new(path);
+
+        assert!(sf.read().unwrap().is_none());
+    }
+
+    #[test]
+    fn test_status_file_read_invalid_json() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("harness.status");
+        std::fs::write(&path, "not valid json").unwrap();
+        let sf = StatusFile::new(path);
+
+        let result = sf.read();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_format_bytes() {
+        assert_eq!(format_bytes(0), "0 B");
+        assert_eq!(format_bytes(512), "512 B");
+        assert_eq!(format_bytes(1023), "1023 B");
+        assert_eq!(format_bytes(1024), "1.0 KB");
+        assert_eq!(format_bytes(49331), "48.2 KB");
+        assert_eq!(format_bytes(1048576), "1.0 MB");
+        assert_eq!(format_bytes(1572864), "1.5 MB");
+    }
+
+    #[test]
+    fn test_format_uptime() {
+        assert_eq!(format_uptime(chrono::Duration::seconds(0)), "0m");
+        assert_eq!(format_uptime(chrono::Duration::seconds(59)), "0m");
+        assert_eq!(format_uptime(chrono::Duration::seconds(60)), "1m");
+        assert_eq!(format_uptime(chrono::Duration::seconds(3600)), "1h 0m");
+        assert_eq!(
+            format_uptime(chrono::Duration::seconds(3 * 3600 + 42 * 60)),
+            "3h 42m"
+        );
+    }
+
+    #[test]
+    fn test_harness_state_display_labels() {
+        assert_eq!(HarnessState::Starting.display_label(), "starting");
+        assert_eq!(HarnessState::SessionRunning.display_label(), "running");
+        assert_eq!(HarnessState::Idle.display_label(), "idle");
+        assert_eq!(HarnessState::ShuttingDown.display_label(), "shutting-down");
+        assert_eq!(
+            HarnessState::RateLimitedBackoff.display_label(),
+            "rate-limited"
+        );
+        assert_eq!(HarnessState::WatchdogKill.display_label(), "watchdog-kill");
+        assert_eq!(HarnessState::PreHooks.display_label(), "pre-hooks");
+        assert_eq!(HarnessState::PostHooks.display_label(), "post-hooks");
+        assert_eq!(HarnessState::Retrying.display_label(), "retrying");
+    }
+
+    #[test]
+    fn test_display_status_no_file() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("harness.status");
+        let result = display_status(&path).unwrap();
+        assert!(!result);
+    }
+
+    #[test]
+    fn test_display_status_with_data() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("harness.status");
+        let sf = StatusFile::new(path.clone());
+
+        // Use current PID so the "alive" check passes
+        let data = StatusData {
+            pid: std::process::id(),
+            state: HarnessState::SessionRunning,
+            iteration: 14,
+            max_iterations: 25,
+            global_iteration: 362,
+            output_file: "claude-iteration-362.jsonl".to_string(),
+            output_bytes: 49331,
+            session_start: Some(Utc::now()),
+            last_update: Utc::now(),
+            last_completed_iteration: Some(361),
+            last_committed: true,
+            consecutive_rate_limits: 0,
+        };
+
+        sf.write(&data).unwrap();
+        let result = display_status(&path).unwrap();
+        assert!(result);
+    }
+
+    #[test]
+    fn test_deserialize_error_display() {
+        let err = StatusError::Deserialize {
+            source: serde_json::from_str::<StatusData>("bad").unwrap_err(),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("failed to deserialize status"));
+    }
+
+    #[test]
+    fn test_read_error_display() {
+        let err = StatusError::Read {
+            path: PathBuf::from("/tmp/test"),
+            source: std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied"),
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("failed to read status file"));
+        assert!(msg.contains("denied"));
     }
 }
