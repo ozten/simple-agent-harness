@@ -1,27 +1,17 @@
-## Last Session: Clean up dead code warnings (simple-agent-harness-agq)
+## Last Session: Filed Milestone 8b beads (Dependency Cycle Detection)
 
 ### Status
-- Added #[allow(dead_code)] annotations across 13 files to suppress all rustc dead_code warnings
-- These are multi-agent infrastructure modules (pool, scheduler, integrator, worktree, etc.) that are scaffolded but not yet wired into the main loop
-- All 854 tests pass, cargo clippy clean, cargo fmt clean
-- Zero compiler warnings remaining
+- Created 4 beads from SPEC-v3-agents.md Milestone 8b (Dependency Cycle Detection)
+- All beads have descriptions referencing PRD line numbers
+- Dependency graph wired: core algorithm -> coordinator wiring + estimation -> CLI surface
 
-### Files Modified
-- src/adapters/mod.rs — AdapterError::Parse variant
-- src/config.rs — CliOverrides::output_dir, uses_legacy_flat_config()
-- src/db.rs — insert_event, get_observation, WorkerAssignment, worker_assignments_by_status, TaskFileChange, insert_task_file_change, file_changes_by_assignment, IntegrationLogEntry, integration_log_by_assignment, IntegrationLogView, map_integration_log
-- src/ingest.rs — IngestResult::bead_id field
-- src/integrator.rs — ReconciliationTracker, ReconciliationResult, IntegrationResult, run_reconciliation, run_test_suite
-- src/metrics.rs — EventLog::path()
-- src/pool.rs — WorkerState::from_str, SessionOutcome struct, capacity, completed_workers, active_worktree_paths, set_worker_state_for_test
-- src/retry.rs — RetryPolicy::current_attempt()
-- src/scheduler.rs — ReadyBead::priority, InProgressAssignment::bead_id, schedule_next()
-- src/session.rs — SessionResult::output_file
-- src/status.rs — StatusFile::path()
-- src/task_manifest.rs — reverse, reverse_lines_from_file, reverse_cargo_toml_additions
-- src/watchdog.rs — WatchdogOutcome::ProcessExited
-- src/worktree.rs — list, prune, cleanup_orphans
+### Beads Created
+- simple-agent-harness-9xv: Implement cycle detection algorithms (Kahn's + Tarjan's SCC) in cycle_detect.rs [READY]
+- simple-agent-harness-fyx: Wire cycle detection into coordinator scheduling pass [blocked by 9xv]
+- simple-agent-harness-8iq: Exclude cycled beads from critical path estimation [blocked by 9xv]
+- simple-agent-harness-cqf: Surface cycle warnings in CLI status output [blocked by 9xv, fyx, 8iq]
 
 ### Suggested Next Tasks
-- File new beads from the updated SPEC-v3-agents.md (dependency cycle detection feature)
-- Consider filing beads from automated-architecture-and-metadata.md PRD
+- Pick up simple-agent-harness-9xv (core algorithms) — it's the only ready bead
+- After that, fyx and 8iq can be done in parallel
+- Consider filing beads from automated-architecture-and-metadata.md PRD after cycle detection is complete
