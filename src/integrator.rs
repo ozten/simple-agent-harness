@@ -15,6 +15,44 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+/// Information about a tripped circuit breaker, used to escalate to human review.
+#[derive(Debug, Clone)]
+pub struct TrippedFailure {
+    /// Bead ID that exhausted its integration attempts.
+    pub bead_id: String,
+    /// Human-readable error summary from the last failure.
+    pub error_summary: String,
+    /// Path to the preserved worktree for inspection.
+    pub worktree_path: PathBuf,
+    /// Total number of attempts made.
+    pub attempts: u32,
+}
+
+impl TrippedFailure {
+    /// Format the prominent HUMAN REVIEW NEEDED message for terminal display.
+    ///
+    /// Uses ANSI escape codes for red/bold output as specified in the spec.
+    pub fn display_message(&self) -> String {
+        format!(
+            "\x1b[1;31m[ERROR] HUMAN REVIEW NEEDED: {} \x1b[0m\n\
+             \x1b[1;31m        Integration failed after {} attempts.\x1b[0m\n\
+             \x1b[1;31m        Error: {}\x1b[0m\n\
+             \x1b[1;31m        Worktree preserved: {}\x1b[0m\n\
+             \x1b[1;31m        Run `bd show {}` for details.\x1b[0m",
+            self.bead_id,
+            self.attempts,
+            self.error_summary,
+            self.worktree_path.display(),
+            self.bead_id,
+        )
+    }
+
+    /// Notes string suitable for `bd update <id> --notes="..."`.
+    pub fn failure_notes(&self) -> String {
+        format!("Integration failed: {}", self.error_summary)
+    }
+}
+
 /// Maximum number of fix iterations before the circuit breaker trips.
 pub const MAX_INTEGRATION_ATTEMPTS: u32 = 3;
 
@@ -112,6 +150,26 @@ impl CircuitBreaker {
     /// Get attempt count for a bead.
     pub fn attempt_count(&self, bead_id: &str) -> u32 {
         self.attempts.get(bead_id).copied().unwrap_or(0)
+    }
+
+    /// Check if a bead's circuit breaker has tripped and build escalation info.
+    ///
+    /// Returns `Some(TrippedFailure)` if the breaker is tripped, `None` otherwise.
+    pub fn check_tripped(
+        &self,
+        bead_id: &str,
+        error_summary: &str,
+        worktree_path: &Path,
+    ) -> Option<TrippedFailure> {
+        match self.state(bead_id) {
+            CircuitState::Tripped { attempts } => Some(TrippedFailure {
+                bead_id: bead_id.to_string(),
+                error_summary: error_summary.to_string(),
+                worktree_path: worktree_path.to_path_buf(),
+                attempts,
+            }),
+            _ => None,
+        }
     }
 }
 
@@ -909,5 +967,72 @@ mod tests {
         let cb = CircuitBreaker::default();
         assert_eq!(cb.attempt_count("nonexistent"), 0);
         assert_eq!(cb.state("nonexistent"), CircuitState::Closed);
+    }
+
+    #[test]
+    fn test_check_tripped_returns_none_when_not_tripped() {
+        let mut cb = CircuitBreaker::new();
+        cb.record_attempt("beads-abc");
+        let result = cb.check_tripped("beads-abc", "some error", Path::new("/tmp/wt"));
+        assert!(result.is_none(), "should not be tripped after 1 attempt");
+    }
+
+    #[test]
+    fn test_check_tripped_returns_none_when_closed() {
+        let cb = CircuitBreaker::new();
+        let result = cb.check_tripped("beads-abc", "some error", Path::new("/tmp/wt"));
+        assert!(result.is_none(), "should not be tripped when closed");
+    }
+
+    #[test]
+    fn test_check_tripped_returns_some_when_tripped() {
+        let mut cb = CircuitBreaker::new();
+        for _ in 0..MAX_INTEGRATION_ATTEMPTS {
+            cb.record_attempt("beads-abc");
+        }
+        let result = cb.check_tripped(
+            "beads-abc",
+            "type mismatch in foo.rs:42",
+            Path::new("/tmp/wt"),
+        );
+        assert!(result.is_some(), "should be tripped after max attempts");
+
+        let tripped = result.unwrap();
+        assert_eq!(tripped.bead_id, "beads-abc");
+        assert_eq!(tripped.error_summary, "type mismatch in foo.rs:42");
+        assert_eq!(tripped.worktree_path, Path::new("/tmp/wt"));
+        assert_eq!(tripped.attempts, MAX_INTEGRATION_ATTEMPTS);
+    }
+
+    #[test]
+    fn test_tripped_failure_display_message() {
+        let tripped = TrippedFailure {
+            bead_id: "beads-abc".to_string(),
+            error_summary: "type mismatch in src/metrics.rs:42".to_string(),
+            worktree_path: PathBuf::from(".blacksmith/worktrees/worker-0-beads-abc"),
+            attempts: 3,
+        };
+        let msg = tripped.display_message();
+        assert!(msg.contains("HUMAN REVIEW NEEDED"));
+        assert!(msg.contains("beads-abc"));
+        assert!(msg.contains("3 attempts"));
+        assert!(msg.contains("type mismatch in src/metrics.rs:42"));
+        assert!(msg.contains(".blacksmith/worktrees/worker-0-beads-abc"));
+        assert!(msg.contains("bd show beads-abc"));
+        // Should contain ANSI escape codes for red/bold
+        assert!(msg.contains("\x1b[1;31m"));
+        assert!(msg.contains("\x1b[0m"));
+    }
+
+    #[test]
+    fn test_tripped_failure_notes() {
+        let tripped = TrippedFailure {
+            bead_id: "beads-abc".to_string(),
+            error_summary: "merge conflict in main.rs".to_string(),
+            worktree_path: PathBuf::from("/tmp/wt"),
+            attempts: 3,
+        };
+        let notes = tripped.failure_notes();
+        assert_eq!(notes, "Integration failed: merge conflict in main.rs");
     }
 }

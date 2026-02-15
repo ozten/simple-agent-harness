@@ -7,7 +7,7 @@
 use crate::config::HarnessConfig;
 use crate::data_dir::DataDir;
 use crate::db;
-use crate::integrator::IntegrationQueue;
+use crate::integrator::{CircuitBreaker, IntegrationQueue, TrippedFailure};
 use crate::pool::{PoolError, WorkerPool};
 use crate::scheduler::{self, InProgressAssignment, ReadyBead};
 use crate::signals::SignalHandler;
@@ -80,6 +80,7 @@ pub async fn run(
     let mut pool = WorkerPool::new(&config.workers, repo_dir.clone(), worktrees_dir);
     let output_dir = data_dir.sessions_dir();
     let integration_queue = IntegrationQueue::new(repo_dir, config.workers.base_branch.clone());
+    let mut circuit_breaker = CircuitBreaker::new();
 
     // Ensure output directory exists
     if let Err(e) = std::fs::create_dir_all(&output_dir) {
@@ -172,25 +173,44 @@ pub async fn run(
 
                 if result.success {
                     completed_beads += 1;
+                    circuit_breaker.reset(&bead_id);
                     tracing::info!(
                         worker_id,
                         bead_id = %bead_id,
                         commit = ?result.merge_commit,
                         "integration succeeded"
                     );
+                    // Reset the worker back to idle after successful integration
+                    if let Err(e) = pool.reset_worker(worker_id) {
+                        tracing::warn!(error = %e, worker_id, "failed to reset worker after integration");
+                    }
                 } else {
-                    failed_beads += 1;
-                    tracing::warn!(
-                        worker_id,
-                        bead_id = %bead_id,
-                        reason = ?result.failure_reason,
-                        "integration failed"
-                    );
-                }
+                    let error_summary = result.failure_reason.as_deref().unwrap_or("unknown error");
 
-                // Reset the worker back to idle after integration
-                if let Err(e) = pool.reset_worker(worker_id) {
-                    tracing::warn!(error = %e, worker_id, "failed to reset worker after integration");
+                    // Record the attempt and check if the circuit breaker has tripped
+                    circuit_breaker.record_attempt(&bead_id);
+
+                    if let Some(tripped) =
+                        circuit_breaker.check_tripped(&bead_id, error_summary, &worktree_path)
+                    {
+                        // Circuit breaker tripped — escalate to human review
+                        failed_beads += 1;
+                        handle_tripped_failure(&tripped);
+                        // Do NOT reset the worker — worktree is preserved for inspection
+                        // Do NOT clean up the worktree
+                    } else {
+                        tracing::warn!(
+                            worker_id,
+                            bead_id = %bead_id,
+                            reason = ?result.failure_reason,
+                            state = %circuit_breaker.state(&bead_id),
+                            "integration failed, retries remain"
+                        );
+                        // Reset the worker back to idle so it can retry
+                        if let Err(e) = pool.reset_worker(worker_id) {
+                            tracing::warn!(error = %e, worker_id, "failed to reset worker after integration failure");
+                        }
+                    }
                 }
             }
         }
@@ -319,6 +339,57 @@ fn parse_ready_beads_json(json_str: &str) -> Vec<ReadyBead> {
         Err(e) => {
             tracing::debug!(error = %e, "failed to parse bd output as JSON");
             Vec::new()
+        }
+    }
+}
+
+/// Handle a tripped circuit breaker by escalating to human review.
+///
+/// Per the spec (SPEC-v3-agents.md lines 626-644):
+/// 1. Update bead with failure notes
+/// 2. Label for human review
+/// 3. Worktree is preserved (caller must NOT clean up)
+/// 4. Display prominent HUMAN REVIEW NEEDED message
+fn handle_tripped_failure(tripped: &TrippedFailure) {
+    // Print the red/bold HUMAN REVIEW NEEDED message to stderr
+    eprintln!("{}", tripped.display_message());
+
+    tracing::error!(
+        bead_id = %tripped.bead_id,
+        attempts = tripped.attempts,
+        error = %tripped.error_summary,
+        worktree = %tripped.worktree_path.display(),
+        "circuit breaker tripped — human review needed"
+    );
+
+    // Update the bead with failure notes via `bd update`
+    let notes = tripped.failure_notes();
+    match std::process::Command::new("bd")
+        .args([
+            "update",
+            &tripped.bead_id,
+            "--status=needs_review",
+            &format!("--notes={notes}"),
+        ])
+        .output()
+    {
+        Ok(output) if output.status.success() => {
+            tracing::info!(bead_id = %tripped.bead_id, "bead updated with failure notes and needs_review status");
+        }
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            tracing::warn!(
+                bead_id = %tripped.bead_id,
+                stderr = %stderr.trim(),
+                "failed to update bead via bd command"
+            );
+        }
+        Err(e) => {
+            tracing::warn!(
+                bead_id = %tripped.bead_id,
+                error = %e,
+                "failed to run bd update command"
+            );
         }
     }
 }
@@ -496,5 +567,51 @@ mod tests {
         let summary = run(&config, &data_dir, &signals, false).await;
 
         assert_eq!(summary.exit_reason, CoordinatorExitReason::StopFile);
+    }
+
+    #[test]
+    fn test_handle_tripped_failure_does_not_panic() {
+        // Verify handle_tripped_failure doesn't panic even when bd is unavailable
+        let tripped = TrippedFailure {
+            bead_id: "beads-test-abc".to_string(),
+            error_summary: "type mismatch in src/foo.rs:10".to_string(),
+            worktree_path: std::path::PathBuf::from("/tmp/nonexistent-worktree"),
+            attempts: 3,
+        };
+        // Should not panic — bd command will fail gracefully
+        handle_tripped_failure(&tripped);
+    }
+
+    #[test]
+    fn test_circuit_breaker_integration_with_coordinator_logic() {
+        use crate::integrator::{CircuitBreaker, CircuitState, MAX_INTEGRATION_ATTEMPTS};
+
+        let mut cb = CircuitBreaker::new();
+        let bead_id = "beads-xyz";
+        let worktree_path = std::path::Path::new("/tmp/wt-0");
+
+        // Simulate integration failures up to max attempts
+        for i in 1..=MAX_INTEGRATION_ATTEMPTS {
+            cb.record_attempt(bead_id);
+
+            if i < MAX_INTEGRATION_ATTEMPTS {
+                // Not yet tripped
+                assert!(cb.check_tripped(bead_id, "error", worktree_path).is_none());
+                assert!(cb.state(bead_id).can_retry());
+            } else {
+                // Should be tripped now
+                let tripped = cb.check_tripped(bead_id, "final error", worktree_path);
+                assert!(tripped.is_some());
+                let t = tripped.unwrap();
+                assert_eq!(t.bead_id, bead_id);
+                assert_eq!(t.attempts, MAX_INTEGRATION_ATTEMPTS);
+                assert!(!cb.state(bead_id).can_retry());
+            }
+        }
+
+        // After reset, should be back to closed
+        cb.reset(bead_id);
+        assert_eq!(cb.state(bead_id), CircuitState::Closed);
+        assert!(cb.check_tripped(bead_id, "error", worktree_path).is_none());
     }
 }

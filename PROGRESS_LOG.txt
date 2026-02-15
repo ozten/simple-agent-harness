@@ -1433,3 +1433,34 @@
 - **m5l**: Implement integration agent spawning for compiler fixes (P1, now unblocked by t4x)
 - **yg5**: Implement integration circuit breaker and failure handling (P1, now unblocked by t4x)
 - **hxq**: Add agent.coding and agent.integration config sections (P2, blocks m5l)
+
+--- 2026-02-15 17:01:00 | simple-agent-harness-yg5 ---
+## Last Session: Implement integration circuit breaker and failure handling (yg5)
+
+### Completed
+- Added `TrippedFailure` struct to `src/integrator.rs` carrying escalation info: bead_id, error_summary, worktree_path, attempts
+- `TrippedFailure::display_message()` — formats ANSI red/bold HUMAN REVIEW NEEDED message per spec (lines 638-644)
+- `TrippedFailure::failure_notes()` — generates notes string for `bd update`
+- `CircuitBreaker::check_tripped()` — returns `Some(TrippedFailure)` when tripped, `None` otherwise
+- Updated `src/coordinator.rs` integration failure path to use CircuitBreaker:
+  - On success: reset circuit breaker, reset worker (as before)
+  - On failure (retries remain): record attempt, log with retry state, reset worker for retry
+  - On failure (tripped): escalate — print HUMAN REVIEW NEEDED to stderr, run `bd update --status=needs_review --notes=...`, preserve worktree (skip cleanup/reset)
+- Added `handle_tripped_failure()` fn in coordinator: prints ANSI message, logs, calls `bd update`
+- Added 7 new tests (628 total passing):
+  - `test_check_tripped_returns_none_when_not_tripped`
+  - `test_check_tripped_returns_none_when_closed`
+  - `test_check_tripped_returns_some_when_tripped`
+  - `test_tripped_failure_display_message`
+  - `test_tripped_failure_notes`
+  - `test_handle_tripped_failure_does_not_panic`
+  - `test_circuit_breaker_integration_with_coordinator_logic`
+
+### Key Files Modified
+- `src/integrator.rs` — added TrippedFailure struct, check_tripped method, 5 new tests
+- `src/coordinator.rs` — circuit breaker in coordinator loop, handle_tripped_failure fn, 2 new tests
+
+### Suggested Next Tasks
+- **hxq**: Add agent.coding and agent.integration config sections (P2, blocks m5l)
+- **jkn**: Implement blacksmith migrate --consolidate command (P2)
+- **dfe**: Implement git revert rollback with entanglement tracking (P2, was blocked by yg5)
