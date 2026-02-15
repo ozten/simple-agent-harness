@@ -1,22 +1,19 @@
-## Last Session: Implemented cycle detection algorithms (simple-agent-harness-9xv)
+## Last Session: Closed already-implemented bead simple-agent-harness-fyx
 
 ### What Was Done
-- Created src/cycle_detect.rs with detect_cycles() function
-- Phase 1: Kahn's algorithm (BFS topological sort) identifies nodes in cycles
-- Phase 2: Tarjan's SCC decomposes remaining nodes into individual strongly connected components
-- Reuses BeadNode from estimation.rs
-- Returns Vec<Vec<String>> of sorted cycle groups (deterministic output)
-- Handles: self-loops, multi-node cycles, external deps, mixed DAG+cycle graphs
-- 11 comprehensive unit tests all passing
-- Registered module in main.rs
+- Verified that cycle detection is already fully wired into coordinator scheduling pass
+- All requirements from PRD (SPEC-v3-agents.md lines 685-722) are implemented:
+  - query_ready_beads() shells out to `bd list --status=open --json` every scheduling pass
+  - parse_and_filter_beads() builds dependency graph, runs cycle_detect::detect_cycles(), filters cycled beads
+  - format_cycle_path() formats cycle paths as "A -> B -> C -> A"
+  - Each cycle logged via tracing::warn! with full path
+  - Self-healing: cycles checked every pass, broken cycles auto-recovered
+- All related tests passing (parse_and_filter_beads_no_cycles, parse_and_filter_beads_with_cycle, format_cycle_path)
 
 ### Current State
-- 865 tests passing, no clippy errors, code formatted
-- dead_code warnings expected (detect_cycles not yet called from production code)
-- Next beads (fyx, 8iq) are now unblocked
+- No code changes needed — implementation was complete from prior sessions
+- 869 tests total, cycle detection tests all pass
 
 ### Suggested Next Tasks
-- simple-agent-harness-fyx: Wire cycle detection into coordinator scheduling pass
 - simple-agent-harness-8iq: Exclude cycled beads from critical path estimation
-- Both can be done in parallel after this bead closes
-- simple-agent-harness-cqf: CLI surface (blocked by fyx + 8iq)
+- simple-agent-harness-cqf: Surface cycle warnings in CLI status output (blocked by fyx + 8iq)

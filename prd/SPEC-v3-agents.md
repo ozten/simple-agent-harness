@@ -664,6 +664,137 @@ When an integrated task must be undone (post-reconciliation failure, human decis
 - Manifest entries must also be reversed — remove the `pub mod` line, the `Cargo.toml` dep, the re-export.
 - **Entanglement**: If task B was integrated after task A, and task B's code imports from task A's module, you can't revert A without breaking B. The coordinator tracks dependencies created during integration (imports added by the integration agent that cross task boundaries) for safe rollback ordering.
 
+### Dependency Cycle Detection
+
+Beads allows arbitrary dependency graphs. Today, `bd dep add` inserts a dependency row without validating the graph — a cycle can be created silently. Cycled tasks never appear in `bd ready`, are never scheduled, and produce no error. They just disappear from the system's view of available work.
+
+This is tolerable when a human is managing a handful of tasks. It's catastrophic for the multi-agent coordinator, which relies on the dependency DAG for scheduling, critical path estimation, and progress tracking. A cycle means:
+
+- **Silent deadlock.** Cycled tasks are permanently blocked. No error, no warning — work simply stops being scheduled. The coordinator reports "0 ready beads" and idles.
+- **Broken time estimates.** Critical path estimation traverses the DAG. A cycle creates an infinite path, producing nonsense ETAs or crashing the estimator.
+- **Invisible progress stall.** The status line shows "Progress: 18/24 beads" and never changes. The remaining 6 beads are in a cycle, but nothing tells you that.
+
+The fix is detection at schedule time and loud surfacing when found.
+
+#### Out of Scope: Prevention in `bd dep add`
+
+Ideally, `bd dep add A B` would reject the insert if it creates a cycle. However, beads is an external tool (`bd v0.49.x`, installed via Homebrew) — we don't control it. Beads already has `bd dep cycles` for after-the-fact detection and `bd doctor` includes cycle checking, but neither prevents creation.
+
+We should file an upstream issue requesting cycle prevention on `bd dep add` (DFS reachability check before insert). Until that ships, blacksmith must be resilient to cycles in the graph it reads.
+
+#### Detection: Coordinator Scheduling Check
+
+Cycles can exist in the beads graph from:
+- Accidental `bd dep add` (no prevention today)
+- Concurrent `bd dep add` calls (race condition even if prevention is added)
+- Bugs in beads sync/merge
+- Manual JSONL or database edits
+
+The coordinator runs a cycle check on **every scheduling pass** (not just startup — cycles can be created or broken mid-run):
+
+```
+┌─ Coordinator scheduling pass ──────────────────────────────┐
+│                                                             │
+│  1. Read all open beads and their dependencies              │
+│     (already fetched by query_ready_beads)                  │
+│  2. Build in-memory dependency graph                        │
+│  3. Run topological sort (Kahn's algorithm)                 │
+│     - If sort completes: graph is a DAG, proceed            │
+│     - If nodes remain: cycles exist, report and continue    │
+│  4. Filter cycled beads out of scheduling pool              │
+│  5. Pass clean DAG to next_assignable_tasks()               │
+│                                                             │
+└─────────────────────────────────────────────────────────────┘
+```
+
+When cycles are detected:
+
+1. **Log each cycle** with the full path (e.g., `A → B → C → A`).
+2. **Exclude cycled beads** from the scheduling pool. They are treated as if they don't exist — the coordinator schedules everything else.
+3. **Surface prominently** in CLI output:
+
+```
+[WARN] Dependency cycle detected — 3 beads excluded from scheduling:
+       simple-agent-harness-abc → simple-agent-harness-def → simple-agent-harness-abc
+       Run `bd dep cycles` to inspect, `bd dep rm` to break the cycle.
+```
+
+4. **Self-healing.** Since the check runs every scheduling pass, if the human breaks the cycle mid-run (via `bd dep rm`), the next pass picks up the now-unblocked beads automatically. No restart needed.
+
+#### Detection Algorithm
+
+All cycle detection is deterministic graph algorithms — no LLM reasoning, no heuristics. The dependency graph is small (tens to low hundreds of nodes), so even naive implementations are sub-millisecond.
+
+**Data source.** The coordinator already shells out to `bd list --status=open --format=json` (see `query_ready_beads()` in `coordinator.rs`). The JSON includes a `dependencies` array per bead. We build the adjacency list from this — no additional subprocess needed.
+
+**Two-phase approach:**
+
+1. **Kahn's algorithm** (BFS topological sort, ~40 lines) to cheaply determine if cycles exist. Nodes remaining after the sort drains are exactly the nodes involved in cycles. O(V+E).
+
+2. **Tarjan's SCC** (~50 lines, only runs on remaining nodes) to decompose into individual cycles for reporting. This matters when there are multiple independent cycles — the human needs to know which edges to cut.
+
+```rust
+/// Detect dependency cycles in the bead graph.
+///
+/// Returns a list of strongly connected components (cycles), where each
+/// cycle is a list of bead IDs. Returns an empty vec if the graph is a DAG.
+///
+/// Phase 1: Kahn's algorithm identifies nodes involved in cycles.
+/// Phase 2: Tarjan's SCC decomposes them into individual cycles.
+pub fn detect_cycles(beads: &[BeadNode]) -> Vec<Vec<String>> {
+    // Build adjacency list and in-degree map from beads + dependencies
+    // Run Kahn's — drain nodes with in-degree 0
+    // If all nodes drained: no cycles, return empty
+    // Otherwise: run Tarjan's SCC on remaining subgraph
+    // Return SCCs with size > 1 (self-loops are size 1)
+}
+
+/// A bead node in the dependency graph, parsed from bd JSON output.
+pub struct BeadNode {
+    pub id: String,
+    pub depends_on: Vec<String>,  // bead IDs this node depends on
+}
+```
+
+**Implementation sizing:** ~200 lines of Rust total (algorithms + wiring + CLI formatting + tests). Zero external dependencies. Pure `std` library code.
+
+#### Impact on Time Estimation
+
+The parallel time estimator (critical path heuristic) must handle cycles gracefully:
+
+- **Exclude cycled beads** from the DAG before computing the critical path.
+- **Report them separately** in the ETA output:
+
+```
+Progress: 18/24 beads | ETA: ~8m @ 3 workers
+⚠ 3 beads stuck in dependency cycle (not included in estimate)
+```
+
+- If the cycle is broken during the run, the next estimation pass includes the freed beads.
+
+#### CLI Surface
+
+**`blacksmith run` output** (when cycles exist):
+
+```
+[iter 25] worker-0: beads-xyz "Add analytics module" (coding, 2.1m elapsed)
+          worker-1: idle
+          ─────────────────────────────────────────────────
+          Progress: 18/21 schedulable beads | ETA: ~6m @ 2 workers
+          ⚠ 3 beads in dependency cycle — run `bd dep cycles` to fix
+```
+
+**`blacksmith --status` output**:
+
+```
+Status: running (2 workers active)
+Progress: 18/24 beads (75%)
+  Schedulable: 21 beads (3 excluded — dependency cycle)
+  Completed:   18 beads in 54.2m
+  Remaining:   3 beads
+  ⚠ Cycle:    3 beads (run `bd dep cycles`)
+```
+
 ### Coordinator State (SQLite)
 
 The coordinator stores its state in `blacksmith.db` alongside metrics tables. New tables:
@@ -918,6 +1049,19 @@ blacksmith adapter test <file>               # try parsing a file with the confi
 - Single-worker mode (`workers.max = 1`) behaves identically to V2 serial loop
 - Implement session-to-bead attribution (multi-agent: from assignment, single-agent: file metadata + git log)
 - Populate `bead_metrics` table on bead close (wall time, turns, sessions, tokens)
+
+### Milestone 8b: Dependency Cycle Detection (~200 lines, all deterministic)
+
+- Add `BeadNode` struct and `detect_cycles()` function in new `src/cycle_detect.rs` module
+  - Kahn's algorithm (~40 lines) to identify nodes in cycles
+  - Tarjan's SCC (~50 lines) to decompose into individual cycles for reporting
+- Parse dependency edges from `bd list --format=json` output (already fetched by `query_ready_beads`)
+- Wire cycle detection into coordinator scheduling pass (runs every pass, not just startup)
+- Exclude cycled beads from scheduling pool and from `next_assignable_tasks` input
+- Exclude cycled beads from critical path estimation; report separately in ETA
+- Surface cycle warnings in `blacksmith run` status line and `blacksmith --status` output
+- Self-healing: cycles broken mid-run (via `bd dep rm`) are picked up on next pass
+- **Upstream (out of scope):** File issue on beads requesting cycle prevention on `bd dep add`
 
 ### Milestone 9: Integration Loop, Reconciliation & Time Estimation
 

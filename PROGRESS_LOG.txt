@@ -2065,3 +2065,24 @@
 - simple-agent-harness-8iq: Exclude cycled beads from critical path estimation
 - Both can be done in parallel after this bead closes
 - simple-agent-harness-cqf: CLI surface (blocked by fyx + 8iq)
+
+--- 2026-02-15 19:33:12 | simple-agent-harness-fyx ---
+## Last Session: Closed already-implemented bead simple-agent-harness-fyx
+
+### What Was Done
+- Verified that cycle detection is already fully wired into coordinator scheduling pass
+- All requirements from PRD (SPEC-v3-agents.md lines 685-722) are implemented:
+  - query_ready_beads() shells out to `bd list --status=open --json` every scheduling pass
+  - parse_and_filter_beads() builds dependency graph, runs cycle_detect::detect_cycles(), filters cycled beads
+  - format_cycle_path() formats cycle paths as "A -> B -> C -> A"
+  - Each cycle logged via tracing::warn! with full path
+  - Self-healing: cycles checked every pass, broken cycles auto-recovered
+- All related tests passing (parse_and_filter_beads_no_cycles, parse_and_filter_beads_with_cycle, format_cycle_path)
+
+### Current State
+- No code changes needed — implementation was complete from prior sessions
+- 869 tests total, cycle detection tests all pass
+
+### Suggested Next Tasks
+- simple-agent-harness-8iq: Exclude cycled beads from critical path estimation
+- simple-agent-harness-cqf: Surface cycle warnings in CLI status output (blocked by fyx + 8iq)

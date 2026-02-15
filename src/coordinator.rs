@@ -5,13 +5,16 @@
 /// spawns workers in git worktrees, and polls for completions.
 /// Completed workers are queued for sequential integration into main.
 use crate::config::HarnessConfig;
+use crate::cycle_detect;
 use crate::data_dir::DataDir;
 use crate::db;
+use crate::estimation::BeadNode;
 use crate::integrator::{CircuitBreaker, IntegrationQueue, TrippedFailure};
 use crate::pool::{PoolError, WorkerPool};
 use crate::scheduler::{self, InProgressAssignment, ReadyBead};
 use crate::signals::SignalHandler;
 use rusqlite::Connection;
+use std::collections::HashSet;
 use std::path::PathBuf;
 use tokio::time::Duration;
 
@@ -227,8 +230,9 @@ pub async fn run(
             // Gather in-progress assignments for the scheduler
             let in_progress = build_in_progress_list(&pool, &db_conn);
 
-            // Query ready beads (stubbed — reads from `bd ready` equivalent)
-            let ready_beads = query_ready_beads();
+            // Query beads, detect cycles, and filter out cycled beads
+            let bead_query = query_ready_beads();
+            let ready_beads = bead_query.ready;
 
             if ready_beads.is_empty() && pool.active_count() == 0 {
                 consecutive_no_work += 1;
@@ -444,53 +448,143 @@ fn check_and_process_expand_files(pool: &WorkerPool, db_conn: &Connection) {
     }
 }
 
-/// Query ready beads from the beads system.
+/// Result of querying beads: ready beads for scheduling and the full graph for cycle detection.
+struct BeadQuery {
+    /// Beads available for scheduling (after filtering out cycled ones).
+    ready: Vec<ReadyBead>,
+    /// Detected dependency cycles (each cycle is a list of bead IDs).
+    /// Used by CLI status output (simple-agent-harness-cqf) and in tests.
+    #[allow(dead_code)]
+    cycles: Vec<Vec<String>>,
+}
+
+/// Query beads from the beads system, detect cycles, and return schedulable beads.
 ///
-/// This is a stub that returns an empty list. The full implementation will
-/// shell out to `bd ready --json` or read from the beads database directly.
-/// This is sufficient for wiring — the coordinator loop and scheduling logic
-/// are exercised, and the actual bead query will be implemented in a follow-up task.
-fn query_ready_beads() -> Vec<ReadyBead> {
-    // Stub: try running `bd ready --format=json` and parsing the output.
-    // For now, return empty — the coordinator will exit with NoWork.
-    // This keeps the wiring testable without requiring a beads database.
+/// Shells out to `bd list --status=open --json` to get all open beads with dependencies.
+/// Runs cycle detection on every scheduling pass (cycles can be created or broken mid-run).
+/// Cycled beads are filtered out of the scheduling pool.
+fn query_ready_beads() -> BeadQuery {
     match std::process::Command::new("bd")
-        .args(["list", "--status=open", "--format=json"])
+        .args(["list", "--status=open", "--json"])
         .output()
     {
         Ok(output) if output.status.success() => {
-            parse_ready_beads_json(&String::from_utf8_lossy(&output.stdout))
+            parse_and_filter_beads(&String::from_utf8_lossy(&output.stdout))
         }
         _ => {
             tracing::debug!("bd command not available or failed, no beads to schedule");
-            Vec::new()
+            BeadQuery {
+                ready: Vec::new(),
+                cycles: Vec::new(),
+            }
         }
     }
 }
 
-/// Parse the JSON output from `bd list --status=open --format=json` into ReadyBead structs.
-fn parse_ready_beads_json(json_str: &str) -> Vec<ReadyBead> {
-    // Parse as JSON array of objects with id, priority, design fields
+/// Parse JSON bead data, detect cycles, filter out cycled beads, and return schedulable beads.
+fn parse_and_filter_beads(json_str: &str) -> BeadQuery {
+    let (ready_beads, bead_nodes) = parse_ready_beads_json(json_str);
+
+    // Run cycle detection on the dependency graph
+    let cycles = cycle_detect::detect_cycles(&bead_nodes);
+
+    if cycles.is_empty() {
+        return BeadQuery {
+            ready: ready_beads,
+            cycles: Vec::new(),
+        };
+    }
+
+    // Log each detected cycle
+    for cycle in &cycles {
+        let path = format_cycle_path(cycle);
+        tracing::warn!(
+            cycle_size = cycle.len(),
+            "dependency cycle detected — beads excluded from scheduling: {path}"
+        );
+    }
+
+    // Build set of all cycled bead IDs for efficient filtering
+    let cycled_ids: HashSet<&str> = cycles.iter().flat_map(|c| c.iter().map(|s| s.as_str())).collect();
+
+    let filtered: Vec<ReadyBead> = ready_beads
+        .into_iter()
+        .filter(|b| !cycled_ids.contains(b.id.as_str()))
+        .collect();
+
+    let excluded_count = cycled_ids.len();
+    tracing::warn!(
+        excluded = excluded_count,
+        cycles = cycles.len(),
+        remaining = filtered.len(),
+        "dependency cycle detected — {excluded_count} beads excluded from scheduling"
+    );
+
+    BeadQuery {
+        ready: filtered,
+        cycles,
+    }
+}
+
+/// Format a cycle as a readable path: "A -> B -> C -> A"
+fn format_cycle_path(cycle: &[String]) -> String {
+    if cycle.is_empty() {
+        return String::new();
+    }
+    let mut path = cycle.join(" -> ");
+    path.push_str(" -> ");
+    path.push_str(&cycle[0]);
+    path
+}
+
+/// Parse the JSON output from `bd list --status=open --json` into ReadyBead and BeadNode structs.
+///
+/// Returns both the scheduling-ready beads and the dependency graph nodes for cycle detection.
+fn parse_ready_beads_json(json_str: &str) -> (Vec<ReadyBead>, Vec<BeadNode>) {
     let parsed: Result<Vec<serde_json::Value>, _> = serde_json::from_str(json_str);
     match parsed {
-        Ok(beads) => beads
-            .iter()
-            .filter_map(|b| {
-                let id = b.get("id")?.as_str()?.to_string();
+        Ok(beads) => {
+            let mut ready = Vec::new();
+            let mut nodes = Vec::new();
+
+            for b in &beads {
+                let id = match b.get("id").and_then(|v| v.as_str()) {
+                    Some(id) => id.to_string(),
+                    None => continue,
+                };
                 let priority = b.get("priority").and_then(|p| p.as_u64()).unwrap_or(2) as u32;
                 let design = b.get("design").and_then(|d| d.as_str()).unwrap_or("");
                 let affected_globs = scheduler::parse_affected_set(design);
 
-                Some(ReadyBead {
-                    id,
+                // Parse dependencies for cycle detection
+                let depends_on: Vec<String> = b
+                    .get("dependencies")
+                    .and_then(|d| d.as_array())
+                    .map(|deps| {
+                        deps.iter()
+                            .filter_map(|dep| {
+                                dep.get("depends_on_id")
+                                    .and_then(|v| v.as_str())
+                                    .map(|s| s.to_string())
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+
+                ready.push(ReadyBead {
+                    id: id.clone(),
                     priority,
                     affected_globs,
-                })
-            })
-            .collect(),
+                });
+
+                nodes.push(BeadNode { id, depends_on });
+            }
+
+            (ready, nodes)
+        }
         Err(e) => {
             tracing::debug!(error = %e, "failed to parse bd output as JSON");
-            Vec::new()
+            (Vec::new(), Vec::new())
         }
     }
 }
@@ -623,7 +717,7 @@ mod tests {
             {"id": "beads-abc", "priority": 1, "design": "affected: src/db.rs"},
             {"id": "beads-def", "priority": 2, "design": "Some description\naffected: tests/**"}
         ]"#;
-        let beads = parse_ready_beads_json(json);
+        let (beads, nodes) = parse_ready_beads_json(json);
         assert_eq!(beads.len(), 2);
         assert_eq!(beads[0].id, "beads-abc");
         assert_eq!(beads[0].priority, 1);
@@ -631,34 +725,100 @@ mod tests {
         assert_eq!(beads[1].id, "beads-def");
         assert_eq!(beads[1].priority, 2);
         assert_eq!(beads[1].affected_globs, Some(vec!["tests/**".to_string()]));
+        assert_eq!(nodes.len(), 2);
+        assert!(nodes[0].depends_on.is_empty());
+        assert!(nodes[1].depends_on.is_empty());
     }
 
     #[test]
     fn test_parse_ready_beads_json_empty() {
-        let beads = parse_ready_beads_json("[]");
+        let (beads, nodes) = parse_ready_beads_json("[]");
         assert!(beads.is_empty());
+        assert!(nodes.is_empty());
     }
 
     #[test]
     fn test_parse_ready_beads_json_invalid() {
-        let beads = parse_ready_beads_json("not json");
+        let (beads, nodes) = parse_ready_beads_json("not json");
         assert!(beads.is_empty());
+        assert!(nodes.is_empty());
     }
 
     #[test]
     fn test_parse_ready_beads_json_missing_fields() {
         // Missing "id" field should be skipped
         let json = r#"[{"priority": 1}]"#;
-        let beads = parse_ready_beads_json(json);
+        let (beads, _) = parse_ready_beads_json(json);
         assert!(beads.is_empty());
     }
 
     #[test]
     fn test_parse_ready_beads_json_no_design() {
         let json = r#"[{"id": "beads-abc", "priority": 2}]"#;
-        let beads = parse_ready_beads_json(json);
+        let (beads, _) = parse_ready_beads_json(json);
         assert_eq!(beads.len(), 1);
         assert_eq!(beads[0].affected_globs, None); // no design = affects everything
+    }
+
+    #[test]
+    fn test_parse_ready_beads_json_with_dependencies() {
+        let json = r#"[
+            {
+                "id": "beads-abc",
+                "priority": 1,
+                "dependencies": [
+                    {"depends_on_id": "beads-def", "type": "blocks"}
+                ]
+            },
+            {
+                "id": "beads-def",
+                "priority": 2,
+                "dependencies": []
+            }
+        ]"#;
+        let (beads, nodes) = parse_ready_beads_json(json);
+        assert_eq!(beads.len(), 2);
+        assert_eq!(nodes.len(), 2);
+        assert_eq!(nodes[0].id, "beads-abc");
+        assert_eq!(nodes[0].depends_on, vec!["beads-def"]);
+        assert_eq!(nodes[1].id, "beads-def");
+        assert!(nodes[1].depends_on.is_empty());
+    }
+
+    #[test]
+    fn test_parse_and_filter_beads_no_cycles() {
+        let json = r#"[
+            {"id": "a", "priority": 1, "dependencies": [{"depends_on_id": "b", "type": "blocks"}]},
+            {"id": "b", "priority": 2, "dependencies": []}
+        ]"#;
+        let result = parse_and_filter_beads(json);
+        assert_eq!(result.ready.len(), 2);
+        assert!(result.cycles.is_empty());
+    }
+
+    #[test]
+    fn test_parse_and_filter_beads_with_cycle() {
+        let json = r#"[
+            {"id": "a", "priority": 1, "dependencies": [{"depends_on_id": "b", "type": "blocks"}]},
+            {"id": "b", "priority": 2, "dependencies": [{"depends_on_id": "a", "type": "blocks"}]},
+            {"id": "c", "priority": 3, "dependencies": []}
+        ]"#;
+        let result = parse_and_filter_beads(json);
+        // a and b are in a cycle, only c should remain
+        assert_eq!(result.ready.len(), 1);
+        assert_eq!(result.ready[0].id, "c");
+        assert_eq!(result.cycles.len(), 1);
+        assert_eq!(result.cycles[0], vec!["a", "b"]);
+    }
+
+    #[test]
+    fn test_format_cycle_path() {
+        assert_eq!(
+            format_cycle_path(&["a".into(), "b".into(), "c".into()]),
+            "a -> b -> c -> a"
+        );
+        assert_eq!(format_cycle_path(&["x".into()]), "x -> x");
+        assert_eq!(format_cycle_path(&[]), "");
     }
 
     #[test]
