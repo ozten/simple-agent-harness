@@ -1,32 +1,27 @@
-## Last Session: Wire adapter into ingest pipeline replacing hardcoded parsing (9jw)
+## Last Session: Add coordinator SQLite tables for multi-agent state (zl7)
 
 ### Completed
-- Refactored src/ingest.rs to use AgentAdapter trait instead of hardcoded Claude JSONL parsing
-  - Removed: SessionMetrics, SessionText, extract_metrics, extract_metrics_and_text,
-    collect_assistant_text, count_assistant_turn, extract_result, write_events,
-    old apply_rules, build_observation_data_with_rules
-  - Added: IngestResult struct (turns_total, cost_estimate_usd, session_duration_ms)
-  - Added: value_to_event_string, source_str_to_enum, apply_rules_via_adapter,
-    apply_single_rule, new build_observation_data
-  - Updated ingest_session and ingest_session_with_rules to accept &dyn AgentAdapter
-  - Built-in metrics now come from adapter.extract_builtin_metrics()
-  - Configurable extraction rules now use adapter.lines_for_source() with source caching
-- Updated src/runner.rs to create adapter at startup via resolve_adapter_name/create_adapter
-  - Passes adapter.as_ref() to both ingest_session_with_rules calls
-- Updated src/metrics_cmd.rs handle_log to create ClaudeAdapter and pass to ingest_session
-  - Changed field access from metrics.* to result.*
-- Fixed test_run_ingests_jsonl_metrics_to_db: set adapter="claude" since test script
-  auto-detects as "raw" but outputs Claude JSONL format
-- All 433 tests pass, clippy clean, fmt clean
+- Added 4 coordinator tables to db.rs open_or_create migration:
+  - worker_assignments: tracks worker-to-bead assignments with status, affected_globs JSON, timestamps, failure_notes
+  - task_file_changes: records which files each assignment modified (added/modified/deleted)
+  - integration_log: tracks merge history with manifest entries, cross-task imports, reconciliation flag
+  - bead_metrics: per-bead cumulative metrics (sessions, wall_time, turns, tokens, integration_time)
+- Added indexes: worker_assignments(status, bead_id), task_file_changes(assignment_id), integration_log(assignment_id)
+- Added CRUD functions for all 4 tables:
+  - insert_worker_assignment, update_worker_assignment_status, get_worker_assignment, worker_assignments_by_status
+  - insert_task_file_change, file_changes_by_assignment
+  - insert_integration_log, integration_log_by_assignment
+  - upsert_bead_metrics (with ON CONFLICT upsert), get_bead_metrics, all_bead_metrics
+- Added comprehensive tests for all new tables and functions (22 new tests)
+- All 451 tests pass, clippy clean, fmt clean
 
 ### Current State
-- Ingest pipeline is fully adapter-driven; no hardcoded Claude parsing remains
-- apply_single_rule extracted for unit testing without adapter dependency
-- Source caching in apply_rules_via_adapter avoids re-parsing per rule
-- IngestResult is lightweight; detailed metrics live in adapter's Vec<(String, Value)>
+- Coordinator tables are ready for use by worker pool manager (f9m) and session-to-bead attribution (dgh)
+- Schema matches SPEC-v3-agents.md lines 669-713 exactly
+- Dead code warnings expected since no consumers exist yet (blocked tasks f9m, dgh)
 
 ### Suggested Next Tasks
-- **ee2**: Graceful metric degradation when adapter returns partial data (now unblocked)
-- **hhv**: Metrics reingest command (now unblocked)
-- **zl7**: Add coordinator SQLite tables for multi-agent state (independent P1)
+- **f9m**: Implement worker pool manager (now unblocked by zl7)
+- **dgh**: Implement session-to-bead attribution (now unblocked by zl7)
 - **mjx**: Implement affected set parsing and glob overlap detection (independent P1)
+- **1jv**: Implement git worktree lifecycle management (independent P1)

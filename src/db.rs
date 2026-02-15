@@ -48,6 +48,53 @@ pub fn open_or_create(path: &Path) -> Result<Connection> {
             duration  INTEGER,
             outcome   TEXT,
             data      TEXT NOT NULL
+        );
+
+        -- Coordinator tables for multi-agent state
+
+        CREATE TABLE IF NOT EXISTS worker_assignments (
+            id             INTEGER PRIMARY KEY,
+            worker_id      INTEGER NOT NULL,
+            bead_id        TEXT NOT NULL,
+            worktree_path  TEXT NOT NULL,
+            status         TEXT NOT NULL,
+            affected_globs TEXT,
+            started_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+            completed_at   TEXT,
+            failure_notes  TEXT
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_worker_assignments_status ON worker_assignments(status);
+        CREATE INDEX IF NOT EXISTS idx_worker_assignments_bead_id ON worker_assignments(bead_id);
+
+        CREATE TABLE IF NOT EXISTS task_file_changes (
+            assignment_id  INTEGER NOT NULL REFERENCES worker_assignments(id),
+            file_path      TEXT NOT NULL,
+            change_type    TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_task_file_changes_assignment ON task_file_changes(assignment_id);
+
+        CREATE TABLE IF NOT EXISTS integration_log (
+            id                        INTEGER PRIMARY KEY,
+            assignment_id             INTEGER NOT NULL REFERENCES worker_assignments(id),
+            merged_at                 TEXT NOT NULL,
+            merge_commit              TEXT NOT NULL,
+            manifest_entries_applied  TEXT,
+            cross_task_imports        TEXT,
+            reconciliation_run        BOOLEAN DEFAULT 0
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_integration_log_assignment ON integration_log(assignment_id);
+
+        CREATE TABLE IF NOT EXISTS bead_metrics (
+            bead_id               TEXT PRIMARY KEY,
+            sessions              INTEGER NOT NULL DEFAULT 0,
+            wall_time_secs        REAL NOT NULL DEFAULT 0,
+            total_turns           INTEGER NOT NULL DEFAULT 0,
+            total_output_tokens   INTEGER DEFAULT 0,
+            integration_time_secs REAL DEFAULT 0,
+            completed_at          TEXT
         );",
     )?;
 
@@ -500,6 +547,299 @@ pub fn events_by_kind_last(conn: &Connection, kind: &str, last: Option<i64>) -> 
         }
         None => events_by_kind(conn, kind),
     }
+}
+
+// ── Worker Assignments ──────────────────────────────────────────────
+
+/// A row from the worker_assignments table.
+#[derive(Debug)]
+pub struct WorkerAssignment {
+    pub id: i64,
+    pub worker_id: i64,
+    pub bead_id: String,
+    pub worktree_path: String,
+    pub status: String,
+    pub affected_globs: Option<String>,
+    pub started_at: String,
+    pub completed_at: Option<String>,
+    pub failure_notes: Option<String>,
+}
+
+/// Insert a new worker assignment.
+/// Returns the id of the inserted row.
+pub fn insert_worker_assignment(
+    conn: &Connection,
+    worker_id: i64,
+    bead_id: &str,
+    worktree_path: &str,
+    status: &str,
+    affected_globs: Option<&str>,
+) -> Result<i64> {
+    conn.execute(
+        "INSERT INTO worker_assignments (worker_id, bead_id, worktree_path, status, affected_globs) \
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        rusqlite::params![worker_id, bead_id, worktree_path, status, affected_globs],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+/// Update a worker assignment's status and optionally set completed_at/failure_notes.
+pub fn update_worker_assignment_status(
+    conn: &Connection,
+    id: i64,
+    status: &str,
+    failure_notes: Option<&str>,
+) -> Result<bool> {
+    let rows = if status == "completed" || status == "failed" {
+        conn.execute(
+            "UPDATE worker_assignments SET status = ?1, completed_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now'), \
+             failure_notes = ?2 WHERE id = ?3",
+            rusqlite::params![status, failure_notes, id],
+        )?
+    } else {
+        conn.execute(
+            "UPDATE worker_assignments SET status = ?1, failure_notes = ?2 WHERE id = ?3",
+            rusqlite::params![status, failure_notes, id],
+        )?
+    };
+    Ok(rows > 0)
+}
+
+/// Get a worker assignment by id.
+pub fn get_worker_assignment(conn: &Connection, id: i64) -> Result<Option<WorkerAssignment>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, worker_id, bead_id, worktree_path, status, affected_globs, \
+         started_at, completed_at, failure_notes FROM worker_assignments WHERE id = ?1",
+    )?;
+    let mut rows = stmt.query_map(rusqlite::params![id], map_worker_assignment)?;
+    match rows.next() {
+        Some(row) => Ok(Some(row?)),
+        None => Ok(None),
+    }
+}
+
+/// List worker assignments by status.
+pub fn worker_assignments_by_status(
+    conn: &Connection,
+    status: &str,
+) -> Result<Vec<WorkerAssignment>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, worker_id, bead_id, worktree_path, status, affected_globs, \
+         started_at, completed_at, failure_notes FROM worker_assignments WHERE status = ?1 ORDER BY id ASC",
+    )?;
+    let rows = stmt
+        .query_map(rusqlite::params![status], map_worker_assignment)?
+        .collect::<Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+fn map_worker_assignment(row: &rusqlite::Row) -> Result<WorkerAssignment> {
+    Ok(WorkerAssignment {
+        id: row.get(0)?,
+        worker_id: row.get(1)?,
+        bead_id: row.get(2)?,
+        worktree_path: row.get(3)?,
+        status: row.get(4)?,
+        affected_globs: row.get(5)?,
+        started_at: row.get(6)?,
+        completed_at: row.get(7)?,
+        failure_notes: row.get(8)?,
+    })
+}
+
+// ── Task File Changes ──────────────────────────────────────────────
+
+/// A row from the task_file_changes table.
+#[derive(Debug)]
+pub struct TaskFileChange {
+    pub assignment_id: i64,
+    pub file_path: String,
+    pub change_type: String,
+}
+
+/// Insert a file change record for a worker assignment.
+pub fn insert_task_file_change(
+    conn: &Connection,
+    assignment_id: i64,
+    file_path: &str,
+    change_type: &str,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO task_file_changes (assignment_id, file_path, change_type) VALUES (?1, ?2, ?3)",
+        rusqlite::params![assignment_id, file_path, change_type],
+    )?;
+    Ok(())
+}
+
+/// Get all file changes for a worker assignment.
+pub fn file_changes_by_assignment(
+    conn: &Connection,
+    assignment_id: i64,
+) -> Result<Vec<TaskFileChange>> {
+    let mut stmt = conn.prepare(
+        "SELECT assignment_id, file_path, change_type FROM task_file_changes WHERE assignment_id = ?1 ORDER BY file_path ASC",
+    )?;
+    let rows = stmt
+        .query_map(rusqlite::params![assignment_id], |row| {
+            Ok(TaskFileChange {
+                assignment_id: row.get(0)?,
+                file_path: row.get(1)?,
+                change_type: row.get(2)?,
+            })
+        })?
+        .collect::<Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+// ── Integration Log ────────────────────────────────────────────────
+
+/// A row from the integration_log table.
+#[derive(Debug)]
+pub struct IntegrationLogEntry {
+    pub id: i64,
+    pub assignment_id: i64,
+    pub merged_at: String,
+    pub merge_commit: String,
+    pub manifest_entries_applied: Option<String>,
+    pub cross_task_imports: Option<String>,
+    pub reconciliation_run: bool,
+}
+
+/// Insert an integration log entry.
+/// Returns the id of the inserted row.
+pub fn insert_integration_log(
+    conn: &Connection,
+    assignment_id: i64,
+    merged_at: &str,
+    merge_commit: &str,
+    manifest_entries_applied: Option<&str>,
+    cross_task_imports: Option<&str>,
+    reconciliation_run: bool,
+) -> Result<i64> {
+    conn.execute(
+        "INSERT INTO integration_log (assignment_id, merged_at, merge_commit, \
+         manifest_entries_applied, cross_task_imports, reconciliation_run) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        rusqlite::params![
+            assignment_id,
+            merged_at,
+            merge_commit,
+            manifest_entries_applied,
+            cross_task_imports,
+            reconciliation_run
+        ],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+/// Get integration log entries for a worker assignment.
+pub fn integration_log_by_assignment(
+    conn: &Connection,
+    assignment_id: i64,
+) -> Result<Vec<IntegrationLogEntry>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, assignment_id, merged_at, merge_commit, manifest_entries_applied, \
+         cross_task_imports, reconciliation_run FROM integration_log WHERE assignment_id = ?1 ORDER BY id ASC",
+    )?;
+    let rows = stmt
+        .query_map(rusqlite::params![assignment_id], map_integration_log)?
+        .collect::<Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+fn map_integration_log(row: &rusqlite::Row) -> Result<IntegrationLogEntry> {
+    Ok(IntegrationLogEntry {
+        id: row.get(0)?,
+        assignment_id: row.get(1)?,
+        merged_at: row.get(2)?,
+        merge_commit: row.get(3)?,
+        manifest_entries_applied: row.get(4)?,
+        cross_task_imports: row.get(5)?,
+        reconciliation_run: row.get(6)?,
+    })
+}
+
+// ── Bead Metrics ───────────────────────────────────────────────────
+
+/// A row from the bead_metrics table.
+#[derive(Debug)]
+pub struct BeadMetrics {
+    pub bead_id: String,
+    pub sessions: i64,
+    pub wall_time_secs: f64,
+    pub total_turns: i64,
+    pub total_output_tokens: Option<i64>,
+    pub integration_time_secs: Option<f64>,
+    pub completed_at: Option<String>,
+}
+
+/// Upsert bead metrics — inserts or updates cumulative metrics for a bead.
+#[allow(clippy::too_many_arguments)]
+pub fn upsert_bead_metrics(
+    conn: &Connection,
+    bead_id: &str,
+    sessions: i64,
+    wall_time_secs: f64,
+    total_turns: i64,
+    total_output_tokens: Option<i64>,
+    integration_time_secs: Option<f64>,
+    completed_at: Option<&str>,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO bead_metrics (bead_id, sessions, wall_time_secs, total_turns, \
+         total_output_tokens, integration_time_secs, completed_at) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) \
+         ON CONFLICT(bead_id) DO UPDATE SET \
+         sessions = ?2, wall_time_secs = ?3, total_turns = ?4, \
+         total_output_tokens = ?5, integration_time_secs = ?6, completed_at = ?7",
+        rusqlite::params![
+            bead_id,
+            sessions,
+            wall_time_secs,
+            total_turns,
+            total_output_tokens,
+            integration_time_secs,
+            completed_at
+        ],
+    )?;
+    Ok(())
+}
+
+/// Get bead metrics by bead_id.
+pub fn get_bead_metrics(conn: &Connection, bead_id: &str) -> Result<Option<BeadMetrics>> {
+    let mut stmt = conn.prepare(
+        "SELECT bead_id, sessions, wall_time_secs, total_turns, total_output_tokens, \
+         integration_time_secs, completed_at FROM bead_metrics WHERE bead_id = ?1",
+    )?;
+    let mut rows = stmt.query_map(rusqlite::params![bead_id], map_bead_metrics)?;
+    match rows.next() {
+        Some(row) => Ok(Some(row?)),
+        None => Ok(None),
+    }
+}
+
+/// List all bead metrics, ordered by bead_id.
+pub fn all_bead_metrics(conn: &Connection) -> Result<Vec<BeadMetrics>> {
+    let mut stmt = conn.prepare(
+        "SELECT bead_id, sessions, wall_time_secs, total_turns, total_output_tokens, \
+         integration_time_secs, completed_at FROM bead_metrics ORDER BY bead_id ASC",
+    )?;
+    let rows = stmt
+        .query_map([], map_bead_metrics)?
+        .collect::<Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+fn map_bead_metrics(row: &rusqlite::Row) -> Result<BeadMetrics> {
+    Ok(BeadMetrics {
+        bead_id: row.get(0)?,
+        sessions: row.get(1)?,
+        wall_time_secs: row.get(2)?,
+        total_turns: row.get(3)?,
+        total_output_tokens: row.get(4)?,
+        integration_time_secs: row.get(5)?,
+        completed_at: row.get(6)?,
+    })
 }
 
 fn map_observation(row: &rusqlite::Row) -> Result<Observation> {
@@ -1495,5 +1835,320 @@ mod tests {
 
         let obs = get_observation(&conn, 1).unwrap().unwrap();
         assert!(obs.duration.is_none());
+    }
+
+    // ── Coordinator tables tests ────────────────────────────────────────
+
+    #[test]
+    fn coordinator_tables_created() {
+        let (_dir, conn) = test_db();
+
+        let tables: Vec<String> = {
+            let mut stmt = conn
+                .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
+                .unwrap();
+            stmt.query_map([], |row| row.get(0))
+                .unwrap()
+                .collect::<Result<Vec<_>>>()
+                .unwrap()
+        };
+
+        assert!(tables.contains(&"worker_assignments".to_string()));
+        assert!(tables.contains(&"task_file_changes".to_string()));
+        assert!(tables.contains(&"integration_log".to_string()));
+        assert!(tables.contains(&"bead_metrics".to_string()));
+    }
+
+    #[test]
+    fn coordinator_indexes_created() {
+        let (_dir, conn) = test_db();
+
+        let indexes: Vec<String> = {
+            let mut stmt = conn
+                .prepare("SELECT name FROM sqlite_master WHERE type='index' ORDER BY name")
+                .unwrap();
+            stmt.query_map([], |row| row.get(0))
+                .unwrap()
+                .collect::<Result<Vec<_>>>()
+                .unwrap()
+        };
+
+        assert!(indexes.contains(&"idx_worker_assignments_status".to_string()));
+        assert!(indexes.contains(&"idx_worker_assignments_bead_id".to_string()));
+        assert!(indexes.contains(&"idx_task_file_changes_assignment".to_string()));
+        assert!(indexes.contains(&"idx_integration_log_assignment".to_string()));
+    }
+
+    // ── Worker Assignments tests ────────────────────────────────────────
+
+    #[test]
+    fn insert_and_get_worker_assignment() {
+        let (_dir, conn) = test_db();
+
+        let id = insert_worker_assignment(
+            &conn,
+            0,
+            "beads-abc",
+            "/tmp/worktree-0",
+            "coding",
+            Some(r#"["src/db.rs", "src/lib.rs"]"#),
+        )
+        .unwrap();
+        assert!(id > 0);
+
+        let wa = get_worker_assignment(&conn, id).unwrap().unwrap();
+        assert_eq!(wa.worker_id, 0);
+        assert_eq!(wa.bead_id, "beads-abc");
+        assert_eq!(wa.worktree_path, "/tmp/worktree-0");
+        assert_eq!(wa.status, "coding");
+        assert_eq!(
+            wa.affected_globs.as_deref(),
+            Some(r#"["src/db.rs", "src/lib.rs"]"#)
+        );
+        assert!(wa.started_at.contains('T'));
+        assert!(wa.completed_at.is_none());
+        assert!(wa.failure_notes.is_none());
+    }
+
+    #[test]
+    fn update_worker_assignment_to_completed() {
+        let (_dir, conn) = test_db();
+
+        let id =
+            insert_worker_assignment(&conn, 1, "beads-xyz", "/tmp/wt-1", "coding", None).unwrap();
+        let updated = update_worker_assignment_status(&conn, id, "completed", None).unwrap();
+        assert!(updated);
+
+        let wa = get_worker_assignment(&conn, id).unwrap().unwrap();
+        assert_eq!(wa.status, "completed");
+        assert!(wa.completed_at.is_some());
+        assert!(wa.failure_notes.is_none());
+    }
+
+    #[test]
+    fn update_worker_assignment_to_failed() {
+        let (_dir, conn) = test_db();
+
+        let id =
+            insert_worker_assignment(&conn, 2, "beads-fail", "/tmp/wt-2", "coding", None).unwrap();
+        let updated =
+            update_worker_assignment_status(&conn, id, "failed", Some("tests failing")).unwrap();
+        assert!(updated);
+
+        let wa = get_worker_assignment(&conn, id).unwrap().unwrap();
+        assert_eq!(wa.status, "failed");
+        assert!(wa.completed_at.is_some());
+        assert_eq!(wa.failure_notes.as_deref(), Some("tests failing"));
+    }
+
+    #[test]
+    fn update_worker_assignment_nonexistent() {
+        let (_dir, conn) = test_db();
+        let updated = update_worker_assignment_status(&conn, 999, "completed", None).unwrap();
+        assert!(!updated);
+    }
+
+    #[test]
+    fn worker_assignments_by_status_query() {
+        let (_dir, conn) = test_db();
+
+        insert_worker_assignment(&conn, 0, "beads-a", "/tmp/wt-0", "coding", None).unwrap();
+        insert_worker_assignment(&conn, 1, "beads-b", "/tmp/wt-1", "coding", None).unwrap();
+        insert_worker_assignment(&conn, 2, "beads-c", "/tmp/wt-2", "completed", None).unwrap();
+
+        let coding = worker_assignments_by_status(&conn, "coding").unwrap();
+        assert_eq!(coding.len(), 2);
+
+        let completed = worker_assignments_by_status(&conn, "completed").unwrap();
+        assert_eq!(completed.len(), 1);
+        assert_eq!(completed[0].bead_id, "beads-c");
+    }
+
+    #[test]
+    fn get_worker_assignment_nonexistent() {
+        let (_dir, conn) = test_db();
+        let wa = get_worker_assignment(&conn, 999).unwrap();
+        assert!(wa.is_none());
+    }
+
+    // ── Task File Changes tests ─────────────────────────────────────────
+
+    #[test]
+    fn insert_and_query_task_file_changes() {
+        let (_dir, conn) = test_db();
+
+        let id =
+            insert_worker_assignment(&conn, 0, "beads-a", "/tmp/wt-0", "coding", None).unwrap();
+
+        insert_task_file_change(&conn, id, "src/db.rs", "modified").unwrap();
+        insert_task_file_change(&conn, id, "src/new_file.rs", "added").unwrap();
+        insert_task_file_change(&conn, id, "src/old.rs", "deleted").unwrap();
+
+        let changes = file_changes_by_assignment(&conn, id).unwrap();
+        assert_eq!(changes.len(), 3);
+        // Ordered by file_path ASC
+        assert_eq!(changes[0].file_path, "src/db.rs");
+        assert_eq!(changes[0].change_type, "modified");
+        assert_eq!(changes[1].file_path, "src/new_file.rs");
+        assert_eq!(changes[1].change_type, "added");
+        assert_eq!(changes[2].file_path, "src/old.rs");
+        assert_eq!(changes[2].change_type, "deleted");
+    }
+
+    #[test]
+    fn file_changes_empty_for_no_assignment() {
+        let (_dir, conn) = test_db();
+        let changes = file_changes_by_assignment(&conn, 999).unwrap();
+        assert!(changes.is_empty());
+    }
+
+    // ── Integration Log tests ───────────────────────────────────────────
+
+    #[test]
+    fn insert_and_query_integration_log() {
+        let (_dir, conn) = test_db();
+
+        let assign_id =
+            insert_worker_assignment(&conn, 0, "beads-a", "/tmp/wt-0", "completed", None).unwrap();
+
+        let log_id = insert_integration_log(
+            &conn,
+            assign_id,
+            "2026-02-15T12:00:00Z",
+            "abc123def",
+            Some(r#"["entry1", "entry2"]"#),
+            Some(r#"["import_x"]"#),
+            false,
+        )
+        .unwrap();
+        assert!(log_id > 0);
+
+        let entries = integration_log_by_assignment(&conn, assign_id).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].assignment_id, assign_id);
+        assert_eq!(entries[0].merged_at, "2026-02-15T12:00:00Z");
+        assert_eq!(entries[0].merge_commit, "abc123def");
+        assert_eq!(
+            entries[0].manifest_entries_applied.as_deref(),
+            Some(r#"["entry1", "entry2"]"#)
+        );
+        assert_eq!(
+            entries[0].cross_task_imports.as_deref(),
+            Some(r#"["import_x"]"#)
+        );
+        assert!(!entries[0].reconciliation_run);
+    }
+
+    #[test]
+    fn integration_log_with_reconciliation() {
+        let (_dir, conn) = test_db();
+
+        let assign_id =
+            insert_worker_assignment(&conn, 0, "beads-b", "/tmp/wt-0", "completed", None).unwrap();
+
+        insert_integration_log(
+            &conn,
+            assign_id,
+            "2026-02-15T12:00:00Z",
+            "def456",
+            None,
+            None,
+            true,
+        )
+        .unwrap();
+
+        let entries = integration_log_by_assignment(&conn, assign_id).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].reconciliation_run);
+        assert!(entries[0].manifest_entries_applied.is_none());
+        assert!(entries[0].cross_task_imports.is_none());
+    }
+
+    #[test]
+    fn integration_log_empty_for_no_assignment() {
+        let (_dir, conn) = test_db();
+        let entries = integration_log_by_assignment(&conn, 999).unwrap();
+        assert!(entries.is_empty());
+    }
+
+    // ── Bead Metrics tests ──────────────────────────────────────────────
+
+    #[test]
+    fn upsert_and_get_bead_metrics() {
+        let (_dir, conn) = test_db();
+
+        upsert_bead_metrics(
+            &conn,
+            "beads-abc",
+            3,
+            1200.5,
+            150,
+            Some(50000),
+            Some(45.0),
+            Some("2026-02-15T12:00:00Z"),
+        )
+        .unwrap();
+
+        let bm = get_bead_metrics(&conn, "beads-abc").unwrap().unwrap();
+        assert_eq!(bm.bead_id, "beads-abc");
+        assert_eq!(bm.sessions, 3);
+        assert!((bm.wall_time_secs - 1200.5).abs() < f64::EPSILON);
+        assert_eq!(bm.total_turns, 150);
+        assert_eq!(bm.total_output_tokens, Some(50000));
+        assert!((bm.integration_time_secs.unwrap() - 45.0).abs() < f64::EPSILON);
+        assert_eq!(bm.completed_at.as_deref(), Some("2026-02-15T12:00:00Z"));
+    }
+
+    #[test]
+    fn upsert_bead_metrics_updates_existing() {
+        let (_dir, conn) = test_db();
+
+        upsert_bead_metrics(&conn, "beads-abc", 1, 400.0, 50, None, None, None).unwrap();
+        upsert_bead_metrics(&conn, "beads-abc", 2, 800.0, 100, Some(30000), None, None).unwrap();
+
+        let bm = get_bead_metrics(&conn, "beads-abc").unwrap().unwrap();
+        assert_eq!(bm.sessions, 2);
+        assert!((bm.wall_time_secs - 800.0).abs() < f64::EPSILON);
+        assert_eq!(bm.total_turns, 100);
+        assert_eq!(bm.total_output_tokens, Some(30000));
+
+        // Only one row should exist
+        let all = all_bead_metrics(&conn).unwrap();
+        assert_eq!(all.len(), 1);
+    }
+
+    #[test]
+    fn get_bead_metrics_nonexistent() {
+        let (_dir, conn) = test_db();
+        let bm = get_bead_metrics(&conn, "beads-nope").unwrap();
+        assert!(bm.is_none());
+    }
+
+    #[test]
+    fn all_bead_metrics_ordering() {
+        let (_dir, conn) = test_db();
+
+        upsert_bead_metrics(&conn, "beads-zzz", 1, 100.0, 10, None, None, None).unwrap();
+        upsert_bead_metrics(&conn, "beads-aaa", 2, 200.0, 20, None, None, None).unwrap();
+        upsert_bead_metrics(&conn, "beads-mmm", 3, 300.0, 30, None, None, None).unwrap();
+
+        let all = all_bead_metrics(&conn).unwrap();
+        assert_eq!(all.len(), 3);
+        // Ordered by bead_id ASC
+        assert_eq!(all[0].bead_id, "beads-aaa");
+        assert_eq!(all[1].bead_id, "beads-mmm");
+        assert_eq!(all[2].bead_id, "beads-zzz");
+    }
+
+    #[test]
+    fn bead_metrics_nullable_fields() {
+        let (_dir, conn) = test_db();
+
+        upsert_bead_metrics(&conn, "beads-null", 0, 0.0, 0, None, None, None).unwrap();
+
+        let bm = get_bead_metrics(&conn, "beads-null").unwrap().unwrap();
+        assert!(bm.total_output_tokens.is_none());
+        assert!(bm.integration_time_secs.is_none());
+        assert!(bm.completed_at.is_none());
     }
 }
