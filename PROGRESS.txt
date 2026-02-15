@@ -1,33 +1,31 @@
-## Last Session: Implement periodic reconciliation with full test suite (3su)
+## Last Session: Implement session-to-bead attribution (dgh)
 
 ### Completed
-- Added `ReconciliationConfig` to `config.rs` with `every: u32` field (default 3)
-  - Configurable via `[reconciliation]` section in blacksmith.toml
-  - Setting `every = 0` disables reconciliation
-- Added `ReconciliationTracker` to `integrator.rs` that:
-  - Counts successful integrations since last reconciliation
-  - Tracks recently-integrated bead IDs for flagging
-  - Returns `true` from `record_success()` when threshold reached
-  - Resets counter and bead list after reconciliation runs
-- Added `ReconciliationResult` struct with pass/fail status, test output, and flagged beads
-- Added `run_reconciliation()` method to `IntegrationQueue` that:
-  - Runs the full test suite on main (cargo test for Rust, npm test for Node.js)
-  - Returns flagged bead IDs when tests fail, empty list when they pass
-  - Always resets the tracker after running
-- Added `run_test_suite()` helper method (private) for running project tests
-- Updated test configs in coordinator.rs and runner.rs with new `reconciliation` field
-- Added 13 new tests (689 total passing):
-  - Config: reconciliation default, load from TOML, default when unspecified, zero disables
-  - Tracker: new, record below threshold, triggers at threshold, reset, zero never triggers, every-one always triggers
-  - Integration: no build system passes, valid Rust project passes, failing Rust project flags beads
+- Added `bead_id: Option<String>` field to `IngestResult` struct
+- Implemented `attribute_session()` public function in `ingest.rs` with three attribution strategies:
+  1. **Multi-agent mode**: Checks `worker_assignments` table for existing attribution
+  2. **Git commit correlation**: Uses file timestamps (ctime/mtime) to bracket the session time window, runs `git log --after/--before` and extracts bead IDs from commit messages
+  3. **JSONL content fallback**: Scans session output for bead ID mentions in `bd update --status in_progress`, `bd-finish.sh`, `bd close`, and commit message format patterns
+- Implemented `store_attribution()` to write `session.bead_id` event and update `bead_metrics`
+- Implemented `update_bead_metrics()` to accumulate per-bead timing (sessions, wall_time_secs, total_turns, total_output_tokens)
+- Implemented `extract_bead_id_from_text()` with priority ordering: claim commands > close/finish commands > commit messages
+- Implemented `format_system_time()` for ISO 8601 timestamp formatting
+- Attribution is called automatically during `ingest_session_with_rules()` (best-effort, non-fatal)
+- Added 13 new tests (702 total passing):
+  - extract_bead_id_from_bd_update_claim, _equals
+  - extract_bead_id_from_bd_finish, _bd_close, _commit_message
+  - extract_bead_id_none_for_unrelated_text
+  - extract_bead_id_prefers_claim_over_close
+  - attribute_session_from_jsonl_content
+  - attribute_session_updates_bead_metrics
+  - attribute_session_accumulates_bead_metrics
+  - attribute_session_no_bead_id_found
+  - format_system_time_produces_iso8601, _recent
 
 ### Key Files Modified
-- `src/config.rs` — ReconciliationConfig struct, added to HarnessConfig
-- `src/integrator.rs` — ReconciliationTracker, ReconciliationResult, run_reconciliation, run_test_suite
-- `src/coordinator.rs` — test config update
-- `src/runner.rs` — test config update
+- `src/ingest.rs` — All attribution logic and tests
 
 ### Suggested Next Tasks
-- **dgh**: Implement session-to-bead attribution (P2)
 - **7ed**: Implement blacksmith integration log and retry commands (P2)
 - **dfe**: Implement git revert rollback with entanglement tracking (P2)
+- **ml7**: Implement serial and parallel time estimation from bead_metrics (P2, unblocked by this)

@@ -13,6 +13,7 @@ pub struct IngestResult {
     pub turns_total: u64,
     pub cost_estimate_usd: f64,
     pub session_duration_ms: u64,
+    pub bead_id: Option<String>,
 }
 
 /// Ingest a session output file: extract metrics via adapter, write events
@@ -84,6 +85,15 @@ pub fn ingest_session_with_rules(
     db::upsert_observation(conn, session, &ts, Some(duration_secs), None, &data)
         .map_err(IngestError::Db)?;
 
+    // Attribute session to a bead (best-effort, non-fatal)
+    let bead_id = match attribute_session(conn, session, output_path) {
+        Ok(id) => id,
+        Err(e) => {
+            tracing::debug!(session, error = %e, "session-to-bead attribution failed");
+            None
+        }
+    };
+
     // Build summary result
     let result = IngestResult {
         turns_total: builtin_metrics
@@ -97,6 +107,7 @@ pub fn ingest_session_with_rules(
             .and_then(|(_, v)| v.as_f64())
             .unwrap_or(0.0),
         session_duration_ms: duration_ms,
+        bead_id,
     };
 
     Ok(result)
@@ -313,6 +324,268 @@ fn build_observation_data(
     }
 
     Value::Object(map).to_string()
+}
+
+/// Attribute a session to the bead it worked on, using multiple strategies.
+///
+/// Returns the bead ID if attribution succeeds, or None if no bead can be identified.
+///
+/// Strategy order:
+/// 1. Multi-agent: look up worker_assignments table for a matching bead_id
+/// 2. Git commit correlation: find commits within the session time window
+/// 3. Fallback: scan session JSONL for bead ID mentions (bd update, bd-finish.sh)
+///
+/// When a bead_id is found, a `session.bead_id` event is stored and `bead_metrics`
+/// is updated with cumulative timing.
+pub fn attribute_session(
+    conn: &Connection,
+    session: i64,
+    output_path: &Path,
+) -> Result<Option<String>, IngestError> {
+    // Strategy 1: Multi-agent explicit attribution from worker_assignments
+    if let Some(bead_id) = attribute_from_worker_assignments(conn, session)? {
+        store_attribution(conn, session, &bead_id)?;
+        return Ok(Some(bead_id));
+    }
+
+    // Strategy 2: Git commit correlation using file timestamps
+    if let Some(bead_id) = attribute_from_git_commits(output_path) {
+        store_attribution(conn, session, &bead_id)?;
+        return Ok(Some(bead_id));
+    }
+
+    // Strategy 3: Fallback — scan JSONL content for bead ID mentions
+    if let Some(bead_id) = attribute_from_jsonl_content(output_path) {
+        store_attribution(conn, session, &bead_id)?;
+        return Ok(Some(bead_id));
+    }
+
+    Ok(None)
+}
+
+/// Store the attribution event and update bead_metrics.
+fn store_attribution(conn: &Connection, session: i64, bead_id: &str) -> Result<(), IngestError> {
+    let ts = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    db::insert_event_with_ts(conn, &ts, session, "session.bead_id", Some(bead_id), None)
+        .map_err(IngestError::Db)?;
+
+    // Update bead_metrics with cumulative timing from this session
+    update_bead_metrics(conn, session, bead_id)?;
+
+    Ok(())
+}
+
+/// Multi-agent attribution: look up worker_assignments for a session's bead.
+///
+/// In multi-agent mode, the coordinator stores (worker_id, bead_id) in
+/// worker_assignments. The session number corresponds to a worker assignment
+/// that was recorded with that bead_id.
+fn attribute_from_worker_assignments(
+    conn: &Connection,
+    _session: i64,
+) -> Result<Option<String>, IngestError> {
+    // Check if worker_assignments has any rows with matching session info.
+    // The coordinator stores assignment_id keyed by worker_id. We look for
+    // the most recent completed assignment.
+    // Since sessions in single-agent mode are numbered sequentially and
+    // worker_assignments is only populated in multi-agent mode, we check
+    // if there are any assignments at all first.
+    let count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM worker_assignments", [], |row| {
+            row.get(0)
+        })
+        .map_err(IngestError::Db)?;
+
+    if count == 0 {
+        return Ok(None);
+    }
+
+    // In multi-agent mode, look for a session.bead_id event already stored
+    // (the coordinator would have created the attribution at spawn time).
+    // We don't re-attribute if already attributed.
+    let existing: Option<String> = conn
+        .query_row(
+            "SELECT value FROM events WHERE session = ?1 AND kind = 'session.bead_id' LIMIT 1",
+            rusqlite::params![_session],
+            |row| row.get(0),
+        )
+        .ok();
+
+    if let Some(bead_id) = existing {
+        return Ok(Some(bead_id));
+    }
+
+    // Check if there's a worker assignment whose session correlates
+    // In the current architecture, the coordinator records assignment_id
+    // but not the session number directly. For now, skip multi-agent attribution
+    // (it will be handled by the coordinator storing the event at spawn time).
+    Ok(None)
+}
+
+/// Git commit correlation: find commits within the session file's time window
+/// and extract bead IDs from commit messages.
+fn attribute_from_git_commits(output_path: &Path) -> Option<String> {
+    let metadata = std::fs::metadata(output_path).ok()?;
+
+    // Use created time as session start, modified time as session end
+    let created = metadata.created().ok()?;
+    let modified = metadata.modified().ok()?;
+
+    // Add a small buffer (5 seconds) to the time window to account for
+    // filesystem timestamp granularity
+    let start = created - std::time::Duration::from_secs(5);
+    let end = modified + std::time::Duration::from_secs(5);
+
+    // Format as ISO 8601 for git log --after/--before
+    let start_str = format_system_time(start);
+    let end_str = format_system_time(end);
+
+    // Run git log to find commits in the time window
+    let output = std::process::Command::new("git")
+        .args([
+            "log",
+            "--all",
+            &format!("--after={start_str}"),
+            &format!("--before={end_str}"),
+            "--format=%s",
+        ])
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    extract_bead_id_from_text(&stdout)
+}
+
+/// Fallback: scan JSONL content for bead ID mentions in tool commands.
+///
+/// Looks for patterns like `bd update <bead-id> --status` or `bd-finish.sh <bead-id>`
+/// which indicate which bead the session was working on.
+fn attribute_from_jsonl_content(output_path: &Path) -> Option<String> {
+    let content = std::fs::read_to_string(output_path).ok()?;
+    extract_bead_id_from_text(&content)
+}
+
+/// Extract a bead ID from text content.
+///
+/// Looks for common patterns:
+/// - `bd update <project>-<id> --status` (claiming work)
+/// - `bd-finish.sh <project>-<id>` (completing work)
+/// - `bd close <project>-<id>` (closing work)
+/// - `bd show <project>-<id>` (inspecting work)
+///
+/// Returns the first bead ID found in a "claiming" command (bd update --status in_progress),
+/// or falls back to any bead ID found in bd-finish/bd close commands.
+fn extract_bead_id_from_text(text: &str) -> Option<String> {
+    // Bead IDs follow the pattern: word-word-...-shortcode (e.g., simple-agent-harness-abc)
+    // They appear after bd commands. We prioritize "claiming" commands.
+
+    // Pattern: bd update <bead-id> --status[= ]in.?progress
+    let claim_re =
+        regex::Regex::new(r"bd\s+update\s+([\w][\w-]+-\w{2,5})\s+--status[= ]?in.?progress")
+            .ok()?;
+    if let Some(caps) = claim_re.captures(text) {
+        return Some(caps[1].to_string());
+    }
+
+    // Pattern: bd-finish.sh <bead-id> or bd close <bead-id>
+    let finish_re =
+        regex::Regex::new(r"(?:bd-finish\.sh|bd\s+close)\s+([\w][\w-]+-\w{2,5})").ok()?;
+    if let Some(caps) = finish_re.captures(text) {
+        return Some(caps[1].to_string());
+    }
+
+    // Pattern: bead ID in commit message format: "<bead-id>: <description>"
+    let commit_re = regex::Regex::new(r"([\w][\w-]+-\w{3}): ").ok()?;
+    if let Some(caps) = commit_re.captures(text) {
+        return Some(caps[1].to_string());
+    }
+
+    None
+}
+
+/// Format a SystemTime as ISO 8601 string for git log.
+fn format_system_time(t: std::time::SystemTime) -> String {
+    let duration = t.duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+    let secs = duration.as_secs() as i64;
+    let dt = chrono::DateTime::from_timestamp(secs, 0)
+        .unwrap_or_else(|| chrono::DateTime::from_timestamp(0, 0).unwrap());
+    dt.format("%Y-%m-%dT%H:%M:%SZ").to_string()
+}
+
+/// Update the bead_metrics table with cumulative data from the attributed session.
+fn update_bead_metrics(conn: &Connection, session: i64, bead_id: &str) -> Result<(), IngestError> {
+    // Get session duration and turns from events
+    let duration_ms: Option<i64> = conn
+        .query_row(
+            "SELECT value FROM events WHERE session = ?1 AND kind = 'session.duration_ms' LIMIT 1",
+            rusqlite::params![session],
+            |row| {
+                let v: Option<String> = row.get(0)?;
+                Ok(v.and_then(|s| s.parse::<i64>().ok()))
+            },
+        )
+        .unwrap_or(None);
+
+    let turns: Option<i64> = conn
+        .query_row(
+            "SELECT value FROM events WHERE session = ?1 AND kind = 'turns.total' LIMIT 1",
+            rusqlite::params![session],
+            |row| {
+                let v: Option<String> = row.get(0)?;
+                Ok(v.and_then(|s| s.parse::<i64>().ok()))
+            },
+        )
+        .unwrap_or(None);
+
+    let output_tokens: Option<i64> = conn
+        .query_row(
+            "SELECT value FROM events WHERE session = ?1 AND kind = 'cost.output_tokens' LIMIT 1",
+            rusqlite::params![session],
+            |row| {
+                let v: Option<String> = row.get(0)?;
+                Ok(v.and_then(|s| s.parse::<i64>().ok()))
+            },
+        )
+        .unwrap_or(None);
+
+    let wall_secs = duration_ms.unwrap_or(0) as f64 / 1000.0;
+    let session_turns = turns.unwrap_or(0);
+
+    // Get existing metrics to accumulate
+    let existing = db::get_bead_metrics(conn, bead_id).map_err(IngestError::Db)?;
+
+    let (new_sessions, new_wall, new_turns, new_tokens) = match existing {
+        Some(bm) => (
+            bm.sessions + 1,
+            bm.wall_time_secs + wall_secs,
+            bm.total_turns + session_turns,
+            match (bm.total_output_tokens, output_tokens) {
+                (Some(existing), Some(new)) => Some(existing + new),
+                (Some(existing), None) => Some(existing),
+                (None, Some(new)) => Some(new),
+                (None, None) => None,
+            },
+        ),
+        None => (1, wall_secs, session_turns, output_tokens),
+    };
+
+    db::upsert_bead_metrics(
+        conn,
+        bead_id,
+        new_sessions,
+        new_wall,
+        new_turns,
+        new_tokens,
+        None, // integration_time_secs unchanged
+        None, // completed_at unchanged
+    )
+    .map_err(IngestError::Db)?;
+
+    Ok(())
 }
 
 #[derive(Debug)]
@@ -799,5 +1072,181 @@ mod tests {
             value_to_event_string(&Value::String("hello".into())),
             "hello"
         );
+    }
+
+    // --- Session-to-bead attribution tests ---
+
+    #[test]
+    fn extract_bead_id_from_bd_update_claim() {
+        let text = "bd update simple-agent-harness-abc --status in_progress";
+        let result = extract_bead_id_from_text(text);
+        assert_eq!(result, Some("simple-agent-harness-abc".to_string()));
+    }
+
+    #[test]
+    fn extract_bead_id_from_bd_update_equals() {
+        let text = "bd update my-project-xyz --status=in_progress";
+        let result = extract_bead_id_from_text(text);
+        assert_eq!(result, Some("my-project-xyz".to_string()));
+    }
+
+    #[test]
+    fn extract_bead_id_from_bd_finish() {
+        let text = "bd-finish.sh simple-agent-harness-dgh \"Implement feature\"";
+        let result = extract_bead_id_from_text(text);
+        assert_eq!(result, Some("simple-agent-harness-dgh".to_string()));
+    }
+
+    #[test]
+    fn extract_bead_id_from_bd_close() {
+        let text = "bd close my-project-abc";
+        let result = extract_bead_id_from_text(text);
+        assert_eq!(result, Some("my-project-abc".to_string()));
+    }
+
+    #[test]
+    fn extract_bead_id_from_commit_message() {
+        let text = "simple-agent-harness-abc: Implement session attribution";
+        let result = extract_bead_id_from_text(text);
+        assert_eq!(result, Some("simple-agent-harness-abc".to_string()));
+    }
+
+    #[test]
+    fn extract_bead_id_none_for_unrelated_text() {
+        let text = "cargo test --filter something";
+        let result = extract_bead_id_from_text(text);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn extract_bead_id_prefers_claim_over_close() {
+        // When both claim and close are present, claim should win
+        let text = "bd update proj-abc --status in_progress\nbd close proj-xyz";
+        let result = extract_bead_id_from_text(text);
+        assert_eq!(result, Some("proj-abc".to_string()));
+    }
+
+    #[test]
+    fn attribute_session_from_jsonl_content() {
+        let (_db_dir, conn) = test_db();
+        let data_dir = TempDir::new().unwrap();
+
+        // Create a session JSONL with bd update command in tool_use
+        let lines = &[
+            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"bd update simple-agent-harness-dgh --status in_progress"}}]}}"#,
+            r#"{"type":"result","duration_ms":60000,"total_cost_usd":0.5,"modelUsage":{}}"#,
+        ];
+        let path = write_jsonl(data_dir.path(), lines);
+
+        // First ingest the session to populate events
+        let adapter = claude_adapter();
+        ingest_session(&conn, 1, &path, Some(0), &adapter).unwrap();
+
+        // Check that attribution was stored
+        let events = db::events_by_session(&conn, 1).unwrap();
+        let bead_event = events.iter().find(|e| e.kind == "session.bead_id");
+        assert!(bead_event.is_some());
+        assert_eq!(
+            bead_event.unwrap().value.as_deref(),
+            Some("simple-agent-harness-dgh")
+        );
+    }
+
+    #[test]
+    fn attribute_session_updates_bead_metrics() {
+        let (_db_dir, conn) = test_db();
+        let data_dir = TempDir::new().unwrap();
+
+        let lines = &[
+            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"bd update my-proj-abc --status in_progress"}}]}}"#,
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Working on it"}]}}"#,
+            r#"{"type":"result","duration_ms":120000,"total_cost_usd":1.0,"modelUsage":{"opus":{"inputTokens":100,"outputTokens":5000,"cacheReadInputTokens":0,"cacheCreationInputTokens":0}}}"#,
+        ];
+        let path = write_jsonl(data_dir.path(), lines);
+
+        let adapter = claude_adapter();
+        let result = ingest_session(&conn, 1, &path, Some(0), &adapter).unwrap();
+        assert_eq!(result.bead_id.as_deref(), Some("my-proj-abc"));
+
+        // Check bead_metrics was created
+        let bm = db::get_bead_metrics(&conn, "my-proj-abc").unwrap().unwrap();
+        assert_eq!(bm.sessions, 1);
+        assert!((bm.wall_time_secs - 120.0).abs() < 0.1);
+        assert_eq!(bm.total_turns, 2);
+        assert_eq!(bm.total_output_tokens, Some(5000));
+    }
+
+    #[test]
+    fn attribute_session_accumulates_bead_metrics() {
+        let (_db_dir, conn) = test_db();
+        let data_dir = TempDir::new().unwrap();
+
+        // Session 1
+        let lines1 = &[
+            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"bd update my-proj-abc --status in_progress"}}]}}"#,
+            r#"{"type":"result","duration_ms":60000,"total_cost_usd":0.5,"modelUsage":{"opus":{"inputTokens":100,"outputTokens":2000,"cacheReadInputTokens":0,"cacheCreationInputTokens":0}}}"#,
+        ];
+        let path1 = write_jsonl(data_dir.path(), lines1);
+
+        let adapter = claude_adapter();
+        ingest_session(&conn, 1, &path1, Some(0), &adapter).unwrap();
+
+        // Session 2 (same bead, different session file)
+        let path2 = data_dir.path().join("session-2.jsonl");
+        {
+            let mut f = std::fs::File::create(&path2).unwrap();
+            use std::io::Write;
+            for line in &[
+                r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"bd update my-proj-abc --status in_progress"}}]}}"#,
+                r#"{"type":"assistant","message":{"content":[{"type":"text","text":"More work"}]}}"#,
+                r#"{"type":"result","duration_ms":90000,"total_cost_usd":0.7,"modelUsage":{"opus":{"inputTokens":200,"outputTokens":3000,"cacheReadInputTokens":0,"cacheCreationInputTokens":0}}}"#,
+            ] {
+                writeln!(f, "{}", line).unwrap();
+            }
+        }
+        ingest_session(&conn, 2, &path2, Some(0), &adapter).unwrap();
+
+        // Verify cumulative metrics
+        let bm = db::get_bead_metrics(&conn, "my-proj-abc").unwrap().unwrap();
+        assert_eq!(bm.sessions, 2);
+        assert!((bm.wall_time_secs - 150.0).abs() < 0.1); // 60 + 90
+        assert_eq!(bm.total_turns, 3); // 1 + 2
+        assert_eq!(bm.total_output_tokens, Some(5000)); // 2000 + 3000
+    }
+
+    #[test]
+    fn attribute_session_no_bead_id_found() {
+        let (_db_dir, conn) = test_db();
+        let data_dir = TempDir::new().unwrap();
+
+        // Session with no bead references
+        let lines = &[
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Just chatting"}]}}"#,
+            r#"{"type":"result","duration_ms":5000,"total_cost_usd":0.1,"modelUsage":{}}"#,
+        ];
+        let path = write_jsonl(data_dir.path(), lines);
+
+        let adapter = claude_adapter();
+        let result = ingest_session(&conn, 1, &path, Some(0), &adapter).unwrap();
+        assert_eq!(result.bead_id, None);
+
+        // No session.bead_id event should exist
+        let events = db::events_by_session(&conn, 1).unwrap();
+        assert!(events.iter().all(|e| e.kind != "session.bead_id"));
+    }
+
+    #[test]
+    fn format_system_time_produces_iso8601() {
+        let epoch = std::time::UNIX_EPOCH;
+        let result = format_system_time(epoch);
+        assert_eq!(result, "1970-01-01T00:00:00Z");
+    }
+
+    #[test]
+    fn format_system_time_recent() {
+        let t = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        let result = format_system_time(t);
+        assert!(result.starts_with("2023-"));
+        assert!(result.ends_with('Z'));
     }
 }

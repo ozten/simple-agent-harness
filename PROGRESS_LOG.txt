@@ -1705,3 +1705,36 @@
 - **dgh**: Implement session-to-bead attribution (P2)
 - **7ed**: Implement blacksmith integration log and retry commands (P2)
 - **dfe**: Implement git revert rollback with entanglement tracking (P2)
+
+--- 2026-02-15 17:36:23 | simple-agent-harness-dgh ---
+## Last Session: Implement session-to-bead attribution (dgh)
+
+### Completed
+- Added `bead_id: Option<String>` field to `IngestResult` struct
+- Implemented `attribute_session()` public function in `ingest.rs` with three attribution strategies:
+  1. **Multi-agent mode**: Checks `worker_assignments` table for existing attribution
+  2. **Git commit correlation**: Uses file timestamps (ctime/mtime) to bracket the session time window, runs `git log --after/--before` and extracts bead IDs from commit messages
+  3. **JSONL content fallback**: Scans session output for bead ID mentions in `bd update --status in_progress`, `bd-finish.sh`, `bd close`, and commit message format patterns
+- Implemented `store_attribution()` to write `session.bead_id` event and update `bead_metrics`
+- Implemented `update_bead_metrics()` to accumulate per-bead timing (sessions, wall_time_secs, total_turns, total_output_tokens)
+- Implemented `extract_bead_id_from_text()` with priority ordering: claim commands > close/finish commands > commit messages
+- Implemented `format_system_time()` for ISO 8601 timestamp formatting
+- Attribution is called automatically during `ingest_session_with_rules()` (best-effort, non-fatal)
+- Added 13 new tests (702 total passing):
+  - extract_bead_id_from_bd_update_claim, _equals
+  - extract_bead_id_from_bd_finish, _bd_close, _commit_message
+  - extract_bead_id_none_for_unrelated_text
+  - extract_bead_id_prefers_claim_over_close
+  - attribute_session_from_jsonl_content
+  - attribute_session_updates_bead_metrics
+  - attribute_session_accumulates_bead_metrics
+  - attribute_session_no_bead_id_found
+  - format_system_time_produces_iso8601, _recent
+
+### Key Files Modified
+- `src/ingest.rs` — All attribution logic and tests
+
+### Suggested Next Tasks
+- **7ed**: Implement blacksmith integration log and retry commands (P2)
+- **dfe**: Implement git revert rollback with entanglement tracking (P2)
+- **ml7**: Implement serial and parallel time estimation from bead_metrics (P2, unblocked by this)
