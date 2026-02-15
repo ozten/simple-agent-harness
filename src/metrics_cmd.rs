@@ -269,6 +269,167 @@ fn is_metric_available(rule: &crate::config::TargetRule, supported_metrics: &[&s
     true
 }
 
+/// Handle the `metrics reingest` subcommand.
+///
+/// Re-ingests historical session files through the adapter, updating events and
+/// observations. Decompresses `.jsonl.zst` files as needed (to a temp file).
+/// Supports `--last N` (reingest N most recent) and `--all` (reingest everything).
+pub fn handle_reingest(
+    db_path: &Path,
+    sessions_dir: &Path,
+    last: Option<u64>,
+    all: bool,
+    rules: &[crate::config::CompiledRule],
+    adapter: &dyn crate::adapters::AgentAdapter,
+) -> Result<(), String> {
+    if !all && last.is_none() {
+        return Err("Specify --last N or --all".to_string());
+    }
+
+    if !sessions_dir.exists() {
+        return Err(format!(
+            "Sessions directory not found: {}",
+            sessions_dir.display()
+        ));
+    }
+
+    // List all session files (both .jsonl and .jsonl.zst)
+    let mut session_files = list_session_files(sessions_dir);
+    if session_files.is_empty() {
+        println!("No session files found.");
+        return Ok(());
+    }
+
+    // Sort by iteration number ascending
+    session_files.sort_by_key(|(iter, _)| *iter);
+
+    // Apply --last N filter
+    if let Some(n) = last {
+        let n = n as usize;
+        if n < session_files.len() {
+            session_files = session_files.split_off(session_files.len() - n);
+        }
+    }
+
+    let conn = db::open_or_create(db_path).map_err(|e| format!("Failed to open database: {e}"))?;
+
+    let total = session_files.len();
+    let mut success_count = 0u64;
+    let mut error_count = 0u64;
+
+    for (iteration, path) in &session_files {
+        let session = *iteration as i64;
+
+        // Decompress if needed
+        let (jsonl_path, _temp_file) = match decompress_if_needed(path) {
+            Ok(result) => result,
+            Err(e) => {
+                eprintln!("  session {session}: decompress error: {e}");
+                error_count += 1;
+                continue;
+            }
+        };
+
+        // Delete old events for this session
+        if let Err(e) = db::delete_events_by_session(&conn, session) {
+            eprintln!("  session {session}: failed to clear old events: {e}");
+            error_count += 1;
+            continue;
+        }
+
+        // Re-ingest
+        match crate::ingest::ingest_session_with_rules(
+            &conn,
+            session,
+            &jsonl_path,
+            None,
+            rules,
+            adapter,
+        ) {
+            Ok(result) => {
+                success_count += 1;
+                println!(
+                    "  session {session}: turns={} cost=${:.2} duration={}s",
+                    result.turns_total,
+                    result.cost_estimate_usd,
+                    result.session_duration_ms / 1000
+                );
+            }
+            Err(e) => {
+                eprintln!("  session {session}: ingest error: {e}");
+                error_count += 1;
+            }
+        }
+    }
+
+    println!(
+        "\nReingested {success_count}/{total} session(s){}",
+        if error_count > 0 {
+            format!(" ({error_count} error(s))")
+        } else {
+            String::new()
+        }
+    );
+
+    Ok(())
+}
+
+/// List all session files (.jsonl and .jsonl.zst) in the sessions directory.
+/// Returns (iteration_number, path) pairs.
+fn list_session_files(sessions_dir: &Path) -> Vec<(u64, std::path::PathBuf)> {
+    let entries = match std::fs::read_dir(sessions_dir) {
+        Ok(e) => e,
+        Err(_) => return vec![],
+    };
+
+    let mut result = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if let Some(iteration) = parse_session_iteration(&path) {
+            result.push((iteration, path));
+        }
+    }
+    result
+}
+
+/// Extract the iteration number from a session filename like "42.jsonl" or "42.jsonl.zst".
+fn parse_session_iteration(path: &Path) -> Option<u64> {
+    let file_name = path.file_name()?.to_str()?;
+    let stem = file_name
+        .strip_suffix(".jsonl.zst")
+        .or_else(|| file_name.strip_suffix(".jsonl"))?;
+    stem.parse().ok()
+}
+
+/// If the path is a .jsonl.zst file, decompress to a temp file and return its path.
+/// If it's already .jsonl, return the path directly.
+/// Returns (path_to_use, optional_temp_file_to_keep_alive).
+fn decompress_if_needed(
+    path: &Path,
+) -> Result<(std::path::PathBuf, Option<tempfile::NamedTempFile>), String> {
+    let file_name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or_default();
+
+    if file_name.ends_with(".jsonl.zst") {
+        let compressed =
+            std::fs::read(path).map_err(|e| format!("Failed to read {}: {e}", path.display()))?;
+        let decompressed = zstd::decode_all(compressed.as_slice())
+            .map_err(|e| format!("Failed to decompress {}: {e}", path.display()))?;
+
+        let mut temp = tempfile::NamedTempFile::new()
+            .map_err(|e| format!("Failed to create temp file: {e}"))?;
+        std::io::Write::write_all(&mut temp, &decompressed)
+            .map_err(|e| format!("Failed to write temp file: {e}"))?;
+
+        let temp_path = temp.path().to_path_buf();
+        Ok((temp_path, Some(temp)))
+    } else {
+        Ok((path.to_path_buf(), None))
+    }
+}
+
 /// Handle the `metrics rebuild` subcommand.
 ///
 /// Drops all observations and regenerates them from the events table.
@@ -2372,5 +2533,181 @@ label = "Avg turns per session"
             &["turns.narration_only", "turns.total"]
         ));
         assert!(!is_metric_available(&pct_rule, &["turns.narration_only"]));
+    }
+
+    // ── Reingest tests ──────────────────────────────────────────────────
+
+    #[test]
+    fn reingest_requires_last_or_all() {
+        let (_dir, path) = test_db_path();
+        let sessions_dir = TempDir::new().unwrap();
+        let adapter = crate::adapters::claude::ClaudeAdapter::new();
+        let result = handle_reingest(&path, sessions_dir.path(), None, false, &[], &adapter);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("--last N or --all"));
+    }
+
+    #[test]
+    fn reingest_no_sessions_dir() {
+        let (_dir, path) = test_db_path();
+        let adapter = crate::adapters::claude::ClaudeAdapter::new();
+        let result = handle_reingest(
+            &path,
+            Path::new("/nonexistent/sessions"),
+            None,
+            true,
+            &[],
+            &adapter,
+        );
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("not found"));
+    }
+
+    #[test]
+    fn reingest_empty_sessions_dir() {
+        let (_dir, path) = test_db_path();
+        let sessions_dir = TempDir::new().unwrap();
+        let adapter = crate::adapters::claude::ClaudeAdapter::new();
+        handle_reingest(&path, sessions_dir.path(), None, true, &[], &adapter).unwrap();
+    }
+
+    #[test]
+    fn reingest_all_jsonl_files() {
+        let (_dir, path) = test_db_path();
+        let sessions_dir = TempDir::new().unwrap();
+
+        // Create two session files
+        for i in 0..2 {
+            let jsonl = sessions_dir.path().join(format!("{i}.jsonl"));
+            std::fs::write(
+                &jsonl,
+                format!(
+                    r#"{{"type":"assistant","message":{{"content":[{{"type":"text","text":"turn {i}"}}]}}}}
+{{"type":"result","duration_ms":{},"total_cost_usd":{},"modelUsage":{{}}}}"#,
+                    (i + 1) * 1000,
+                    (i + 1) as f64 * 0.1
+                ),
+            )
+            .unwrap();
+        }
+
+        let adapter = crate::adapters::claude::ClaudeAdapter::new();
+        handle_reingest(&path, sessions_dir.path(), None, true, &[], &adapter).unwrap();
+
+        // Verify observations were created for both sessions
+        let conn = db::open_or_create(&path).unwrap();
+        let obs = db::recent_observations(&conn, 10).unwrap();
+        assert_eq!(obs.len(), 2);
+    }
+
+    #[test]
+    fn reingest_last_n_only() {
+        let (_dir, path) = test_db_path();
+        let sessions_dir = TempDir::new().unwrap();
+
+        // Create 5 session files
+        for i in 0..5 {
+            let jsonl = sessions_dir.path().join(format!("{i}.jsonl"));
+            std::fs::write(
+                &jsonl,
+                r#"{"type":"result","duration_ms":1000,"total_cost_usd":0.1,"modelUsage":{}}"#,
+            )
+            .unwrap();
+        }
+
+        let adapter = crate::adapters::claude::ClaudeAdapter::new();
+        handle_reingest(&path, sessions_dir.path(), Some(2), false, &[], &adapter).unwrap();
+
+        // Only last 2 sessions (3, 4) should be ingested
+        let conn = db::open_or_create(&path).unwrap();
+        let obs = db::recent_observations(&conn, 10).unwrap();
+        assert_eq!(obs.len(), 2);
+        let sessions: Vec<i64> = obs.iter().map(|o| o.session).collect();
+        assert!(sessions.contains(&3));
+        assert!(sessions.contains(&4));
+    }
+
+    #[test]
+    fn reingest_clears_old_events() {
+        let (_dir, path) = test_db_path();
+        let sessions_dir = TempDir::new().unwrap();
+
+        // Create one session file
+        let jsonl = sessions_dir.path().join("0.jsonl");
+        std::fs::write(
+            &jsonl,
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"hello"}]}}
+{"type":"result","duration_ms":5000,"total_cost_usd":0.5,"modelUsage":{}}"#,
+        )
+        .unwrap();
+
+        // Pre-populate with fake events for session 0
+        let conn = db::open_or_create(&path).unwrap();
+        db::insert_event_with_ts(
+            &conn,
+            "2026-01-01T00:00:00Z",
+            0,
+            "fake.event",
+            Some("old"),
+            None,
+        )
+        .unwrap();
+        drop(conn);
+
+        let adapter = crate::adapters::claude::ClaudeAdapter::new();
+        handle_reingest(&path, sessions_dir.path(), None, true, &[], &adapter).unwrap();
+
+        // Verify old fake event was removed
+        let conn = db::open_or_create(&path).unwrap();
+        let events = db::events_by_session(&conn, 0).unwrap();
+        assert!(events.iter().all(|e| e.kind != "fake.event"));
+        // But new events exist
+        assert!(events.iter().any(|e| e.kind == "turns.total"));
+    }
+
+    #[test]
+    fn reingest_compressed_zst_file() {
+        let (_dir, path) = test_db_path();
+        let sessions_dir = TempDir::new().unwrap();
+
+        // Create a compressed session file
+        let jsonl_content = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"hi"}]}}
+{"type":"result","duration_ms":3000,"total_cost_usd":0.3,"modelUsage":{}}"#;
+        let compressed = zstd::encode_all(jsonl_content.as_bytes(), 3).unwrap();
+        std::fs::write(sessions_dir.path().join("0.jsonl.zst"), compressed).unwrap();
+
+        let adapter = crate::adapters::claude::ClaudeAdapter::new();
+        handle_reingest(&path, sessions_dir.path(), None, true, &[], &adapter).unwrap();
+
+        // Verify session was ingested from compressed data
+        let conn = db::open_or_create(&path).unwrap();
+        let obs = db::get_observation(&conn, 0).unwrap().unwrap();
+        let data: serde_json::Value = serde_json::from_str(&obs.data).unwrap();
+        assert_eq!(data["turns.total"], 1);
+        assert_eq!(data["session.duration_ms"], 3000);
+    }
+
+    #[test]
+    fn parse_session_iteration_jsonl() {
+        let path = Path::new("/tmp/sessions/42.jsonl");
+        assert_eq!(parse_session_iteration(path), Some(42));
+    }
+
+    #[test]
+    fn parse_session_iteration_zst() {
+        let path = Path::new("/tmp/sessions/100.jsonl.zst");
+        assert_eq!(parse_session_iteration(path), Some(100));
+    }
+
+    #[test]
+    fn parse_session_iteration_non_numeric() {
+        let path = Path::new("/tmp/sessions/notes.jsonl");
+        assert_eq!(parse_session_iteration(path), None);
+    }
+
+    #[test]
+    fn parse_session_iteration_other_ext() {
+        let path = Path::new("/tmp/sessions/42.txt");
+        assert_eq!(parse_session_iteration(path), None);
     }
 }

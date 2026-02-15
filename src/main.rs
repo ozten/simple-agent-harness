@@ -188,6 +188,15 @@ enum MetricsAction {
         #[arg(long)]
         session: Option<i64>,
     },
+    /// Re-ingest historical sessions (after extraction rules change)
+    Reingest {
+        /// Re-ingest the N most recent sessions
+        #[arg(long)]
+        last: Option<u64>,
+        /// Re-ingest all sessions
+        #[arg(long)]
+        all: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -1018,6 +1027,28 @@ async fn main() {
                 aggregate,
             } => metrics_cmd::handle_query(&db_path, kind, *last, aggregate.as_deref()),
             MetricsAction::Events { session } => metrics_cmd::handle_events(&db_path, *session),
+            MetricsAction::Reingest { last, all } => {
+                let adapter_name = adapters::resolve_adapter_name(
+                    config_for_metrics.agent.adapter.as_deref(),
+                    &config_for_metrics.agent.command,
+                );
+                let adapter = adapters::create_adapter(adapter_name);
+                let rules: Vec<_> = config_for_metrics
+                    .metrics
+                    .extract
+                    .rules
+                    .iter()
+                    .filter_map(|r| r.compile().ok())
+                    .collect();
+                metrics_cmd::handle_reingest(
+                    &db_path,
+                    &dd.sessions_dir(),
+                    *last,
+                    *all,
+                    &rules,
+                    adapter.as_ref(),
+                )
+            }
         };
 
         if let Err(e) = result {

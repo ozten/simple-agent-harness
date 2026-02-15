@@ -1,26 +1,25 @@
-## Last Session: Implement aider agent adapter (2su)
+## Last Session: Implement blacksmith metrics reingest command (hhv)
 
 ### Completed
-- Created `src/adapters/aider.rs` — full AiderAdapter implementation
-  - Parses Aider's plain-text chat log format
-  - Extracts turns.total by counting assistant response blocks between user prompts ("> " lines)
-  - Extracts cost.estimate_usd from Aider's cost-reporting lines ("$X.XX session")
-  - Extracts session.output_bytes from file size
-  - Supports session.exit_code and session.duration_secs (declared but come from harness)
-  - Implements lines_for_source for all ExtractionSource variants
-  - Detects /run commands and "Running:" lines as tool_commands
-- Added `pub mod aider` to `src/adapters/mod.rs`
-- Added `"aider"` match arm in `create_adapter()`
-- Added `test_create_adapter_aider` test in mod.rs
-- Added "aider" to adapter list in `handle_adapter_list()` in main.rs
-- 15 new tests in aider.rs, 1 new test in mod.rs
-- All 835 tests passing
+- Added `blacksmith metrics reingest [--last N] [--all]` CLI subcommand
+- Added `handle_reingest()` in `src/metrics_cmd.rs`:
+  - Lists session files (.jsonl and .jsonl.zst) in the sessions directory
+  - Filters by --last N (most recent N sessions) or --all
+  - Decompresses .jsonl.zst files to temp files using zstd
+  - Deletes old events for each session before re-ingesting
+  - Re-runs extraction through the configured adapter with extraction rules
+  - Reports per-session results (turns, cost, duration)
+- Added `Reingest` variant to `MetricsAction` enum in `src/main.rs`
+- Added match arm wiring adapter resolution and rule compilation
+- Added `delete_events_by_session()` to `src/db.rs`
+- Helper functions: `list_session_files`, `parse_session_iteration`, `decompress_if_needed`
+- 11 new tests (8 reingest handler tests, 3 parse_session_iteration tests)
+- All 846 tests passing
 
 ### Key Files Modified
-- `src/adapters/aider.rs` (new) — AiderAdapter implementation with 15 tests
-- `src/adapters/mod.rs` — module declaration, create_adapter match, 1 new test
-- `src/main.rs` — added "aider" to adapter list display
+- `src/metrics_cmd.rs` — handle_reingest + helpers + 11 tests
+- `src/main.rs` — MetricsAction::Reingest variant + match arm
+- `src/db.rs` — delete_events_by_session function
 
 ### Suggested Next Tasks
-- **hhv**: Implement blacksmith metrics reingest command (P3)
 - **c37**: Implement blacksmith metrics beads per-bead timing report (P3)

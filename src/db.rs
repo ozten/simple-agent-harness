@@ -353,6 +353,15 @@ pub fn events_by_session(conn: &Connection, session: i64) -> Result<Vec<Event>> 
     Ok(rows)
 }
 
+/// Delete all events for a specific session. Returns the number of deleted rows.
+pub fn delete_events_by_session(conn: &Connection, session: i64) -> Result<usize> {
+    let count = conn.execute(
+        "DELETE FROM events WHERE session = ?1",
+        rusqlite::params![session],
+    )?;
+    Ok(count)
+}
+
 /// Query events by kind, ordered by id.
 pub fn events_by_kind(conn: &Connection, kind: &str) -> Result<Vec<Event>> {
     let mut stmt = conn.prepare(
