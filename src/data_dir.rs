@@ -45,6 +45,11 @@ impl DataDir {
         self.root.join("worktrees")
     }
 
+    /// Path to the singleton lock file.
+    pub fn lock(&self) -> PathBuf {
+        self.root.join("lock")
+    }
+
     /// Path to a specific session file (e.g. `sessions/42.jsonl`).
     pub fn session_file(&self, iteration: u32) -> PathBuf {
         self.sessions_dir().join(format!("{iteration}.jsonl"))

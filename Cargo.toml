@@ -18,6 +18,7 @@ regex = "1"
 rusqlite = { version = "0.31", features = ["bundled"] }
 tempfile = "3"
 zstd = "0.13"
+fs2 = "0.4"
 
 [profile.dev]
 debug = "line-tables-only"   # Shrink debug info ~60%; backtraces still work

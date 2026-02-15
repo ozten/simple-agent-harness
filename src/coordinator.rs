@@ -505,7 +505,10 @@ fn parse_and_filter_beads(json_str: &str) -> BeadQuery {
     }
 
     // Build set of all cycled bead IDs for efficient filtering
-    let cycled_ids: HashSet<&str> = cycles.iter().flat_map(|c| c.iter().map(|s| s.as_str())).collect();
+    let cycled_ids: HashSet<&str> = cycles
+        .iter()
+        .flat_map(|c| c.iter().map(|s| s.as_str()))
+        .collect();
 
     let filtered: Vec<ReadyBead> = ready_beads
         .into_iter()

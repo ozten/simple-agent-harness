@@ -1,22 +1,18 @@
-## Last Session: Expansion Event Tracking (2026-02-15)
+## Last Session: Singleton Lock Verification (2026-02-15)
 
 ### What Was Done
-- Created src/expansion_event.rs implementing expansion event tracking for affected-set mismatches
-- ExpansionEvent struct: task_id, predicted_modules, actual_modules, expansion_reason, timestamp
-- DB table `expansion_events` with indexes on task_id and timestamp
-- API functions: create_table(), record(), get_by_task(), get_recent(), count_by_module(), count_recent_expansions()
-- count_by_module() identifies modules with poor boundary containment (frequent in actual_modules)
-- count_recent_expansions() counts events within a sliding window of recent tasks (for threshold triggers)
-- Registered module in src/main.rs and table creation in src/db.rs
-- 9 tests covering: record/retrieve, empty results, multiple events same task, get_recent ordering, count_by_module, count_recent_expansions, empty modules, cross-task events
-- Bead simple-agent-harness-74e closed
+- Verified that the singleton lock (bead simple-agent-harness-ckq) is fully implemented and working
+- The reopening note claiming "fs2 crate missing from Cargo.toml, singleton.rs has unresolved imports, DataDir::lock() doesn't exist" was outdated — all three issues were already resolved
+- Implementation verified: src/singleton.rs (try_acquire, PID writing, LockError types, 5 tests)
+- Integration verified: main.rs line 1251 acquires lock before coordinator/runner starts
+- Dependencies verified: fs2 = "0.4" in Cargo.toml, DataDir::lock() at data_dir.rs:49
+- All 5 singleton tests pass, all 9 data_dir tests pass, compilation clean
 
 ### Current State
+- Singleton lock is functional: prevents concurrent blacksmith instances via flock
 - All tests pass (except coordinator test which is a pre-existing known slow test)
-- Clippy clean (only expected dead_code warnings for not-yet-integrated modules)
-- fmt clean
+- No code changes were needed this session — bead was already complete
 
 ### Suggested Next Tasks
-- simple-agent-harness-4wc (P2): Implement historical signal correlator (now unblocked by this)
 - simple-agent-harness-ldy (P2): Add integration loop iteration tracking
 - simple-agent-harness-34d (P3): Add architecture agent configuration knobs
