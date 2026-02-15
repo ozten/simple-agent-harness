@@ -1,29 +1,30 @@
-## Last Session: Implement serial and parallel time estimation from bead_metrics (ml7)
+## Last Session: Add progress and ETA to blacksmith run and --status output (506)
 
 ### Completed
-- Created `src/estimation.rs` module with serial and parallel time estimation:
-  - `estimate()`: main entry point, takes DB connection, open beads, and worker count
-  - Serial estimate: avg_time = sum(wall_time_secs) / count(completed), remaining = count(open) * avg_time
-  - Returns "insufficient data" if < 3 completed beads
-  - Parallel estimate: builds dependency DAG from open beads, finds critical path via Kahn's algorithm
-  - parallel_time = max(critical_path_time, serial_time / N) + integration_overhead
-  - Integration overhead = avg_integration_time * count(open beads)
-  - Cycle detection: beads in dependency cycles are excluded from the DAG and reported
-  - `query_open_beads()`: shells out to `bd list --status=open --json` and parses result
-  - `format_estimate()`: formats estimate for human-readable CLI output
-  - `format_duration()`: converts seconds to "Xs", "Xm", or "Xh Ym" format
-- Added `completed_bead_metrics()` to `src/db.rs` — filters bead_metrics for completed_at IS NOT NULL
-- Wired `blacksmith estimate [--workers N]` CLI subcommand in `src/main.rs`
-- Added 25 new tests (758 total passing):
-  - estimation: format_duration (4 tests), compute_critical_path (7 tests), parse_open_beads_json (4 tests), estimate integration (4 tests), format_estimate (3 tests)
-  - db: completed_bead_metrics (2 tests)
+- Added progress line printing after each productive iteration in `runner.rs`:
+  - Format: `[iter N] completed in Xm (Y turns) | Progress: A/B beads | avg Xm/bead | ETA: ~Zm`
+  - Shows turn count from ingest result when available
+  - Multi-worker mode shows parallel ETA with worker count
+  - Warns about dependency cycles
+  - Helper functions: `print_progress_line()`, `build_progress_string()`, `format_duration_secs()`
+- Enhanced `display_status()` in `status.rs` for `blacksmith --status`:
+  - Now shows worker-aware status label ("2 workers active" vs "PID X")
+  - Bead progress: "Progress: A/B beads (X%)" with completed/remaining counts
+  - Serial and parallel ETA from estimation module
+  - Dependency cycle warnings
+  - Failed beads count (checks `bd list --status=in_progress` for FAILED-ATTEMPT markers)
+  - Helper functions: `display_bead_progress()`, `count_failed_beads()`, `format_duration_f64()`
+- Updated `main.rs` call site to pass DB path and worker count to `display_status()`
+- Added 12 new tests (770 total passing):
+  - runner: format_duration_secs (3), print_progress_line (2), build_progress_string (2)
+  - status: format_duration_f64 (3), display_status_with_db (1), display_status_multi_worker (1)
 
 ### Key Files Modified
-- `src/estimation.rs` — NEW: time estimation module
-- `src/db.rs` — `completed_bead_metrics()` query function
-- `src/main.rs` — `mod estimation`, `Commands::Estimate` CLI subcommand + handler
+- `src/runner.rs` — progress line printing after productive iterations
+- `src/status.rs` — enhanced --status output with bead progress/ETA
+- `src/main.rs` — updated display_status call with db_path and workers
 
 ### Suggested Next Tasks
-- **506**: Add progress and ETA to blacksmith run and --status output (P2, now unblocked by ml7)
 - **ec1**: Implement codex agent adapter (P3)
 - **c37**: Implement blacksmith metrics beads per-bead timing report (P3)
+- **zb5**: Implement blacksmith adapter info/list/test commands (P3)

@@ -8,6 +8,7 @@ use crate::compress;
 use crate::config::HarnessConfig;
 use crate::data_dir::DataDir;
 use crate::db;
+use crate::estimation;
 use crate::hooks::{HookEnv, HookRunner};
 use crate::ingest;
 use crate::metrics::{EventLog, SessionEvent};
@@ -308,6 +309,7 @@ pub async fn run(
                 }
 
                 // Ingest JSONL metrics into database
+                let mut ingest_result: Option<ingest::IngestResult> = None;
                 if let Some(ref conn) = metrics_db {
                     match ingest::ingest_session_with_rules(
                         conn,
@@ -324,6 +326,7 @@ pub async fn run(
                                 cost_usd = format!("{:.4}", m.cost_estimate_usd),
                                 "JSONL metrics ingested"
                             );
+                            ingest_result = Some(m);
                         }
                         Err(e) => {
                             tracing::warn!(
@@ -421,6 +424,15 @@ pub async fn run(
                 status.set_last_completed(global_iteration - 1);
                 status.set_last_committed(committed);
                 status.update(HarnessState::Idle);
+
+                // Print progress line after productive iteration
+                print_progress_line(
+                    global_iteration - 1,
+                    &result,
+                    ingest_result.as_ref(),
+                    metrics_db.as_ref(),
+                    config.workers.max,
+                );
 
                 tracing::info!(
                     productive = productive,
@@ -554,6 +566,111 @@ pub async fn run(
         productive_iterations: productive,
         global_iteration,
         exit_reason,
+    }
+}
+
+/// Print a progress line after each productive iteration.
+///
+/// Format: `[iter N] completed in Xm (Y turns) | Progress: A/B beads | avg Xm/bead | ETA: ~Zm`
+fn print_progress_line(
+    iteration: u64,
+    result: &SessionResult,
+    ingest_result: Option<&ingest::IngestResult>,
+    conn: Option<&rusqlite::Connection>,
+    workers: u32,
+) {
+    let duration_secs = result.duration.as_secs();
+    let duration_str = format_duration_secs(duration_secs);
+
+    let turns_str = ingest_result
+        .map(|m| format!("{} turns", m.turns_total))
+        .unwrap_or_default();
+
+    // Build the session summary part
+    let session_part = if turns_str.is_empty() {
+        format!("[iter {}] completed in {}", iteration, duration_str)
+    } else {
+        format!(
+            "[iter {}] completed in {} ({})",
+            iteration, duration_str, turns_str
+        )
+    };
+
+    // Build the progress + ETA part from bead metrics
+    let progress_part = conn
+        .and_then(|c| build_progress_string(c, workers))
+        .unwrap_or_default();
+
+    if progress_part.is_empty() {
+        println!("{}", session_part);
+    } else {
+        println!("{} | {}", session_part, progress_part);
+    }
+}
+
+/// Build the "Progress: A/B beads | avg Xm/bead | ETA: ~Zm" string from DB metrics.
+fn build_progress_string(conn: &rusqlite::Connection, workers: u32) -> Option<String> {
+    let all_metrics = db::all_bead_metrics(conn).ok()?;
+    let completed = all_metrics
+        .iter()
+        .filter(|m| m.completed_at.is_some())
+        .count();
+    let total = all_metrics.len();
+
+    if total == 0 {
+        return None;
+    }
+
+    let open_beads = estimation::query_open_beads();
+    let est = estimation::estimate(conn, &open_beads, workers);
+
+    let mut parts = Vec::new();
+    parts.push(format!(
+        "Progress: {}/{} beads",
+        completed,
+        completed + est.open_count
+    ));
+
+    if let Some(avg) = est.avg_time_per_bead {
+        parts.push(format!("avg {}/bead", format_duration_secs(avg as u64)));
+    }
+
+    if workers > 1 {
+        if let Some(parallel) = est.parallel_secs {
+            parts.push(format!(
+                "ETA: ~{} @ {} workers",
+                format_duration_secs(parallel as u64),
+                workers
+            ));
+        }
+    } else if let Some(serial) = est.serial_secs {
+        parts.push(format!("ETA: ~{}", format_duration_secs(serial as u64)));
+    }
+
+    if !est.cycled_beads.is_empty() {
+        parts.push(format!(
+            "\u{26a0} {} in dependency cycle",
+            est.cycled_beads.len()
+        ));
+    }
+
+    Some(parts.join(" | "))
+}
+
+/// Format seconds as a compact human-readable duration (e.g., "45s", "5m", "1h 30m").
+fn format_duration_secs(secs: u64) -> String {
+    if secs < 60 {
+        format!("{}s", secs)
+    } else if secs < 3600 {
+        format!("{}m", secs / 60)
+    } else {
+        let hours = secs / 3600;
+        let mins = (secs % 3600) / 60;
+        if mins > 0 {
+            format!("{}h {}m", hours, mins)
+        } else {
+            format!("{}h", hours)
+        }
     }
 }
 
@@ -1571,5 +1688,101 @@ printf '{"type":"result","duration_ms":5000,"total_cost_usd":0.42,"num_turns":2,
         // Quiet mode should still complete normally
         assert_eq!(summary.productive_iterations, 1);
         assert_eq!(summary.exit_reason, ExitReason::MaxIterations);
+    }
+
+    // ── format_duration_secs tests ──
+
+    #[test]
+    fn test_format_duration_secs_seconds() {
+        assert_eq!(format_duration_secs(0), "0s");
+        assert_eq!(format_duration_secs(45), "45s");
+        assert_eq!(format_duration_secs(59), "59s");
+    }
+
+    #[test]
+    fn test_format_duration_secs_minutes() {
+        assert_eq!(format_duration_secs(60), "1m");
+        assert_eq!(format_duration_secs(300), "5m");
+        assert_eq!(format_duration_secs(3599), "59m");
+    }
+
+    #[test]
+    fn test_format_duration_secs_hours() {
+        assert_eq!(format_duration_secs(3600), "1h");
+        assert_eq!(format_duration_secs(5400), "1h 30m");
+        assert_eq!(format_duration_secs(7200), "2h");
+    }
+
+    // ── print_progress_line tests ──
+
+    #[test]
+    fn test_print_progress_line_no_db() {
+        let result = SessionResult {
+            exit_code: Some(0),
+            output_bytes: 1000,
+            duration: std::time::Duration::from_secs(300),
+            output_file: PathBuf::from("test.jsonl"),
+            pid: 1,
+        };
+        // Should print without panicking even with no DB
+        print_progress_line(42, &result, None, None, 1);
+    }
+
+    #[test]
+    fn test_print_progress_line_with_ingest() {
+        let result = SessionResult {
+            exit_code: Some(0),
+            output_bytes: 1000,
+            duration: std::time::Duration::from_secs(300),
+            output_file: PathBuf::from("test.jsonl"),
+            pid: 1,
+        };
+        let ingest = crate::ingest::IngestResult {
+            turns_total: 65,
+            cost_estimate_usd: 1.85,
+            session_duration_ms: 300000,
+            bead_id: None,
+        };
+        // Should include turns in output
+        print_progress_line(42, &result, Some(&ingest), None, 1);
+    }
+
+    #[test]
+    fn test_build_progress_string_empty_db() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let conn = crate::db::open_or_create(&db_path).unwrap();
+        // Empty DB — no bead_metrics
+        let result = build_progress_string(&conn, 1);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_build_progress_string_with_completed() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let conn = crate::db::open_or_create(&db_path).unwrap();
+
+        // Add 3 completed beads
+        for i in 0..3 {
+            crate::db::upsert_bead_metrics(
+                &conn,
+                &format!("bead-{}", i),
+                1,
+                300.0,
+                50,
+                None,
+                None,
+                Some("2026-01-01T00:00:00Z"),
+            )
+            .unwrap();
+        }
+
+        let result = build_progress_string(&conn, 1);
+        // Should produce a progress string (exact content depends on `bd list` availability)
+        // In test env, `bd` may not be available, so open_beads will be empty
+        assert!(result.is_some());
+        let s = result.unwrap();
+        assert!(s.contains("Progress:"));
     }
 }

@@ -245,7 +245,11 @@ impl HarnessState {
 /// Display the status of a running harness.
 /// Reads the status file and prints formatted output to stdout.
 /// Returns Ok(true) if status was displayed, Ok(false) if no harness is running.
-pub fn display_status(status_path: &Path) -> Result<bool, StatusError> {
+pub fn display_status(
+    status_path: &Path,
+    db_path: Option<&Path>,
+    workers: u32,
+) -> Result<bool, StatusError> {
     let file = StatusFile::new(status_path.to_path_buf());
     let data = match file.read()? {
         Some(data) => data,
@@ -261,7 +265,13 @@ pub fn display_status(status_path: &Path) -> Result<bool, StatusError> {
         "not running (stale status file)"
     };
 
-    println!("Loop state: {} (PID {})", state_label, data.pid);
+    let worker_label = if workers > 1 {
+        format!("{} workers active", workers)
+    } else {
+        format!("PID {}", data.pid)
+    };
+
+    println!("Status: {} ({})", state_label, worker_label);
     println!(
         "Current iteration: {}/{} (global: {})",
         data.iteration, data.max_iterations, data.global_iteration
@@ -281,6 +291,11 @@ pub fn display_status(status_path: &Path) -> Result<bool, StatusError> {
         println!("Uptime: {}", format_uptime(uptime));
     }
 
+    // Bead progress and ETA
+    if let Some(db_path) = db_path {
+        display_bead_progress(db_path, workers);
+    }
+
     // Last completed iteration
     if let Some(last) = data.last_completed_iteration {
         let commit_info = if data.last_committed {
@@ -297,6 +312,165 @@ pub fn display_status(status_path: &Path) -> Result<bool, StatusError> {
     }
 
     Ok(true)
+}
+
+/// Display bead progress, ETA, and failed beads count.
+fn display_bead_progress(db_path: &Path, workers: u32) {
+    use crate::db;
+    use crate::estimation;
+
+    let conn = match db::open_or_create(db_path) {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+
+    let all_metrics = match db::all_bead_metrics(&conn) {
+        Ok(m) => m,
+        Err(_) => return,
+    };
+
+    if all_metrics.is_empty() {
+        return;
+    }
+
+    let completed = all_metrics
+        .iter()
+        .filter(|m| m.completed_at.is_some())
+        .count();
+
+    let open_beads = estimation::query_open_beads();
+    let total_schedulable = completed + open_beads.len();
+
+    if total_schedulable == 0 {
+        return;
+    }
+
+    let pct = if total_schedulable > 0 {
+        (completed as f64 / total_schedulable as f64 * 100.0) as u32
+    } else {
+        0
+    };
+
+    let est = estimation::estimate(&conn, &open_beads, workers);
+
+    // Count failed beads (bead_metrics entries with no completed_at, indicating in-progress/failed)
+    let failed_count = count_failed_beads();
+
+    println!(
+        "Progress: {}/{} beads ({}%)",
+        completed, total_schedulable, pct
+    );
+
+    if est.open_count > 0 {
+        let schedulable_label = if !est.cycled_beads.is_empty() {
+            format!(
+                "  Schedulable: {} beads ({} excluded — dependency cycle)",
+                total_schedulable - est.cycled_beads.len(),
+                est.cycled_beads.len()
+            )
+        } else {
+            String::new()
+        };
+
+        if !schedulable_label.is_empty() {
+            println!("{}", schedulable_label);
+        }
+
+        if let Some(avg) = est.avg_time_per_bead {
+            let total_completed_time: f64 = all_metrics
+                .iter()
+                .filter(|m| m.completed_at.is_some())
+                .map(|m| m.wall_time_secs)
+                .sum();
+            println!(
+                "  Completed:   {} beads in {}",
+                completed,
+                format_duration_f64(total_completed_time)
+            );
+            println!("  Remaining:   {} beads", est.open_count);
+
+            if workers > 1 {
+                if let Some(serial) = est.serial_secs {
+                    println!("  Serial ETA:    ~{}", format_duration_f64(serial));
+                }
+                if let Some(parallel) = est.parallel_secs {
+                    println!(
+                        "  Parallel ETA:  ~{} @ {} workers",
+                        format_duration_f64(parallel),
+                        workers
+                    );
+                }
+            } else if let Some(serial) = est.serial_secs {
+                println!(
+                    "  ETA: ~{} (avg {}/bead)",
+                    format_duration_f64(serial),
+                    format_duration_f64(avg)
+                );
+            }
+        }
+
+        if !est.cycled_beads.is_empty() {
+            println!(
+                "  \u{26a0} Cycle:    {} beads (run `bd dep cycles`)",
+                est.cycled_beads.len()
+            );
+        }
+    }
+
+    if failed_count > 0 {
+        println!("  Failed: {} beads", failed_count);
+    }
+}
+
+/// Count beads with failed status from `bd list`.
+fn count_failed_beads() -> usize {
+    match std::process::Command::new("bd")
+        .args(["list", "--status=in_progress", "--json"])
+        .output()
+    {
+        Ok(output) if output.status.success() => {
+            // Count beads that have [FAILED-ATTEMPT] in notes
+            let json_str = String::from_utf8_lossy(&output.stdout);
+            let parsed: Result<Vec<serde_json::Value>, _> = serde_json::from_str(&json_str);
+            match parsed {
+                Ok(beads) => beads
+                    .iter()
+                    .filter(|b| {
+                        b.get("notes")
+                            .and_then(|n| n.as_str())
+                            .map(|n| n.contains("[FAILED-ATTEMPT]"))
+                            .unwrap_or(false)
+                    })
+                    .count(),
+                Err(_) => 0,
+            }
+        }
+        _ => 0,
+    }
+}
+
+/// Format seconds (f64) as a compact human-readable duration.
+fn format_duration_f64(secs: f64) -> String {
+    let total_secs = secs as u64;
+    if total_secs < 60 {
+        format!("{}s", total_secs)
+    } else if total_secs < 3600 {
+        let mins = total_secs / 60;
+        let remaining = total_secs % 60;
+        if remaining > 0 {
+            format!("{}.{}m", mins, remaining * 10 / 60)
+        } else {
+            format!("{}m", mins)
+        }
+    } else {
+        let hours = total_secs / 3600;
+        let mins = (total_secs % 3600) / 60;
+        if mins > 0 {
+            format!("{}h {}m", hours, mins)
+        } else {
+            format!("{}h", hours)
+        }
+    }
 }
 
 /// Errors from status file operations.
@@ -676,7 +850,7 @@ mod tests {
     fn test_display_status_no_file() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("blacksmith.status");
-        let result = display_status(&path).unwrap();
+        let result = display_status(&path, None, 1).unwrap();
         assert!(!result);
     }
 
@@ -703,7 +877,7 @@ mod tests {
         };
 
         sf.write(&data).unwrap();
-        let result = display_status(&path).unwrap();
+        let result = display_status(&path, None, 1).unwrap();
         assert!(result);
     }
 
@@ -725,5 +899,98 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("failed to read status file"));
         assert!(msg.contains("denied"));
+    }
+
+    // ── format_duration_f64 tests ──
+
+    #[test]
+    fn test_format_duration_f64_seconds() {
+        assert_eq!(format_duration_f64(0.0), "0s");
+        assert_eq!(format_duration_f64(45.0), "45s");
+        assert_eq!(format_duration_f64(59.0), "59s");
+    }
+
+    #[test]
+    fn test_format_duration_f64_minutes() {
+        assert_eq!(format_duration_f64(60.0), "1m");
+        assert_eq!(format_duration_f64(300.0), "5m");
+        assert_eq!(format_duration_f64(90.0), "1.5m");
+    }
+
+    #[test]
+    fn test_format_duration_f64_hours() {
+        assert_eq!(format_duration_f64(3600.0), "1h");
+        assert_eq!(format_duration_f64(5400.0), "1h 30m");
+    }
+
+    #[test]
+    fn test_display_status_with_db() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("blacksmith.status");
+        let db_path = dir.path().join("test.db");
+        let sf = StatusFile::new(path.clone());
+
+        // Create a DB with some bead_metrics
+        let conn = crate::db::open_or_create(&db_path).unwrap();
+        for i in 0..3 {
+            crate::db::upsert_bead_metrics(
+                &conn,
+                &format!("bead-{}", i),
+                1,
+                300.0,
+                50,
+                None,
+                None,
+                Some("2026-01-01T00:00:00Z"),
+            )
+            .unwrap();
+        }
+        drop(conn);
+
+        let data = StatusData {
+            pid: std::process::id(),
+            state: HarnessState::SessionRunning,
+            iteration: 3,
+            max_iterations: 25,
+            global_iteration: 103,
+            output_file: "claude-iteration-103.jsonl".to_string(),
+            output_bytes: 49331,
+            session_start: Some(Utc::now()),
+            last_update: Utc::now(),
+            last_completed_iteration: Some(102),
+            last_committed: true,
+            consecutive_rate_limits: 0,
+        };
+
+        sf.write(&data).unwrap();
+        let result = display_status(&path, Some(&db_path), 2).unwrap();
+        assert!(result);
+    }
+
+    #[test]
+    fn test_display_status_multi_worker_label() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("blacksmith.status");
+        let sf = StatusFile::new(path.clone());
+
+        let data = StatusData {
+            pid: std::process::id(),
+            state: HarnessState::SessionRunning,
+            iteration: 0,
+            max_iterations: 10,
+            global_iteration: 0,
+            output_file: String::new(),
+            output_bytes: 0,
+            session_start: None,
+            last_update: Utc::now(),
+            last_completed_iteration: None,
+            last_committed: false,
+            consecutive_rate_limits: 0,
+        };
+
+        sf.write(&data).unwrap();
+        // With workers > 1, label should indicate worker count
+        let result = display_status(&path, None, 3).unwrap();
+        assert!(result);
     }
 }

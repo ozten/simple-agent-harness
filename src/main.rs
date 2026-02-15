@@ -1073,7 +1073,8 @@ async fn main() {
 
     if cli.status {
         let status_path = data_dir.status();
-        match status::display_status(&status_path) {
+        let db_path = data_dir.db();
+        match status::display_status(&status_path, Some(&db_path), config.workers.max) {
             Ok(true) => {}
             Ok(false) => {
                 println!("No running blacksmith detected.");

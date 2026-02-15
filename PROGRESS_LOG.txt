@@ -1829,3 +1829,35 @@
 - **506**: Add progress and ETA to blacksmith run and --status output (P2, now unblocked by ml7)
 - **ec1**: Implement codex agent adapter (P3)
 - **c37**: Implement blacksmith metrics beads per-bead timing report (P3)
+
+--- 2026-02-15 17:57:05 | simple-agent-harness-506 ---
+## Last Session: Add progress and ETA to blacksmith run and --status output (506)
+
+### Completed
+- Added progress line printing after each productive iteration in `runner.rs`:
+  - Format: `[iter N] completed in Xm (Y turns) | Progress: A/B beads | avg Xm/bead | ETA: ~Zm`
+  - Shows turn count from ingest result when available
+  - Multi-worker mode shows parallel ETA with worker count
+  - Warns about dependency cycles
+  - Helper functions: `print_progress_line()`, `build_progress_string()`, `format_duration_secs()`
+- Enhanced `display_status()` in `status.rs` for `blacksmith --status`:
+  - Now shows worker-aware status label ("2 workers active" vs "PID X")
+  - Bead progress: "Progress: A/B beads (X%)" with completed/remaining counts
+  - Serial and parallel ETA from estimation module
+  - Dependency cycle warnings
+  - Failed beads count (checks `bd list --status=in_progress` for FAILED-ATTEMPT markers)
+  - Helper functions: `display_bead_progress()`, `count_failed_beads()`, `format_duration_f64()`
+- Updated `main.rs` call site to pass DB path and worker count to `display_status()`
+- Added 12 new tests (770 total passing):
+  - runner: format_duration_secs (3), print_progress_line (2), build_progress_string (2)
+  - status: format_duration_f64 (3), display_status_with_db (1), display_status_multi_worker (1)
+
+### Key Files Modified
+- `src/runner.rs` — progress line printing after productive iterations
+- `src/status.rs` — enhanced --status output with bead progress/ETA
+- `src/main.rs` — updated display_status call with db_path and workers
+
+### Suggested Next Tasks
+- **ec1**: Implement codex agent adapter (P3)
+- **c37**: Implement blacksmith metrics beads per-bead timing report (P3)
+- **zb5**: Implement blacksmith adapter info/list/test commands (P3)
