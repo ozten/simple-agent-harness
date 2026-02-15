@@ -19,6 +19,7 @@ pub struct HarnessConfig {
     pub commit_detection: CommitDetectionConfig,
     pub metrics: MetricsConfig,
     pub storage: StorageConfig,
+    pub workers: WorkersConfig,
 }
 
 impl HarnessConfig {
@@ -228,6 +229,27 @@ impl Default for StorageConfig {
     fn default() -> Self {
         Self {
             data_dir: PathBuf::from(".blacksmith"),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Clone)]
+#[serde(default)]
+pub struct WorkersConfig {
+    /// Maximum number of concurrent worker sessions.
+    pub max: u32,
+    /// Base branch to create worktrees from.
+    pub base_branch: String,
+    /// Directory under storage.data_dir for worktrees.
+    pub worktrees_dir: String,
+}
+
+impl Default for WorkersConfig {
+    fn default() -> Self {
+        Self {
+            max: 1,
+            base_branch: "main".to_string(),
+            worktrees_dir: "worktrees".to_string(),
         }
     }
 }

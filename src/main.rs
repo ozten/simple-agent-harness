@@ -9,6 +9,7 @@ mod improve;
 mod ingest;
 mod metrics;
 mod metrics_cmd;
+mod pool;
 mod prompt;
 mod ratelimit;
 mod retry;

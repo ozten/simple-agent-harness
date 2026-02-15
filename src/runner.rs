@@ -774,6 +774,7 @@ mod tests {
             commit_detection: CommitDetectionConfig::default(),
             metrics: MetricsConfig::default(),
             storage: StorageConfig::default(),
+            workers: WorkersConfig::default(),
         }
     }
 

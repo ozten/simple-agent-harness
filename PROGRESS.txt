@@ -1,28 +1,33 @@
-## Last Session: Implement git worktree lifecycle management (1jv)
+## Last Session: Implement worker pool manager (f9m)
 
 ### Completed
-- Created src/worktree.rs with full git worktree lifecycle management
-- worktree_name(): builds "worker-{N}-{bead-id}" directory name
-- worktree_path(): builds full path under worktrees directory
-- branch_exists(): checks if a git branch exists in a repo
-- create(): creates a detached-HEAD worktree from a base branch
-  - Validates branch exists before creating
-  - Returns AlreadyExists error if path already on disk
-- remove(): removes a worktree with --force, no-ops if already gone
-- list(): lists all worktrees (excluding main) using porcelain format
-- prune(): runs git worktree prune to clean stale metadata
-- cleanup_orphans(): removes worktrees not in active_paths set, then prunes
-- WorktreeError enum: AlreadyExists, BranchNotFound, GitError, Io
-- 14 new tests covering all functions and edge cases
-- Registered module in main.rs
-- All 498 tests pass, clippy clean (only pre-existing dead_code warnings), fmt clean
+- Created src/pool.rs with full worker pool manager implementation
+- WorkerState enum: Idle, Coding, Completed, Failed with as_str/from_str
+- Worker struct tracks: id, state, assignment_id, bead_id, worktree_path, child_handle
+- SessionOutcome struct: worker_id, exit_code, duration, output_bytes
+- WorkerPool manages up to workers.max concurrent agent sessions:
+  - new(): initializes pool with N idle worker slots
+  - capacity()/idle_count()/active_count(): pool status queries
+  - snapshot(): returns all worker states for monitoring
+  - spawn_worker(): assigns bead to idle worker, creates worktree, spawns agent, records in DB
+  - poll_completed(): async poll for finished workers (non-blocking via is_finished check)
+  - record_outcome(): updates DB assignment status on completion/failure
+  - completed_workers(): lists workers ready for integration
+  - reset_worker(): cleans up worktree and returns worker to idle
+  - active_worktree_paths(): for orphan cleanup
+- spawn_agent_in_worktree(): spawns agent process in worktree dir with process_group(0)
+- PoolError enum: NoIdleWorker, InvalidWorker, Worktree, Db, Spawn
+- Added WorkersConfig to config.rs: max (default 1), base_branch, worktrees_dir
+- Registered pool module in main.rs
+- 11 new tests covering all functions and edge cases
+- All 509 tests pass, clippy clean, fmt clean
 
 ### Current State
-- worktree.rs is ready for use by the worker pool manager (f9m)
-- Functions are pub for cross-module access
-- No external dependencies added (uses std::process::Command for git)
+- pool.rs is ready for use by the scheduler (1ky) and coordinator
+- WorkersConfig added to HarnessConfig with serde deserialization support
+- DB integration uses existing worker_assignments table from db.rs
 
 ### Suggested Next Tasks
 - **v6v**: Implement task_manifest.toml parsing (independent P1)
-- **f9m**: Implement worker pool manager (now unblocked by both 1jv and scheduler)
+- **1ky**: Implement scheduler for assigning beads to idle workers (now unblocked by f9m)
 - **x1a**: Implement session compression with zstd (independent P2)
