@@ -13,6 +13,7 @@ use crate::ingest;
 use crate::metrics::{EventLog, SessionEvent};
 use crate::prompt;
 use crate::ratelimit;
+use crate::retention;
 use crate::retry::{RetryDecision, RetryPolicy};
 use crate::session::{self, SessionResult};
 use crate::signals::SignalHandler;
@@ -158,7 +159,10 @@ pub async fn run(
             break;
         }
 
-        // 2. Assemble prompt (read file + run prepend_commands + brief injection)
+        // 2. Cleanup stale sessions (retention policy enforcement)
+        retention::enforce_retention(&data_dir.sessions_dir(), &config.storage.retention);
+
+        // 3. Assemble prompt (read file + run prepend_commands + brief injection)
         let prompt =
             match prompt::assemble(&config.prompt, &config.session.prompt_file, &data_dir.db()) {
                 Ok(p) => p,
@@ -328,12 +332,17 @@ pub async fn run(
                     }
                 }
 
-                // Compress old session files after ingestion
-                compress::compress_old_sessions(
-                    &data_dir.sessions_dir(),
-                    global_iteration,
-                    config.storage.compress_after,
-                );
+                // After-ingest retention: delete immediately, skip compression
+                if config.storage.retention == crate::config::RetentionPolicy::AfterIngest {
+                    retention::delete_after_ingest(&output_path);
+                } else {
+                    // Compress old session files after ingestion
+                    compress::compress_old_sessions(
+                        &data_dir.sessions_dir(),
+                        global_iteration,
+                        config.storage.compress_after,
+                    );
+                }
 
                 // Run post-session hooks
                 if !config.hooks.post_session.is_empty() {

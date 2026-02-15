@@ -226,6 +226,10 @@ pub struct StorageConfig {
     /// Number of iterations to keep uncompressed. Sessions older than
     /// `current - compress_after` are compressed with zstd. Default: 5.
     pub compress_after: u32,
+    /// Retention policy controlling when session files are deleted.
+    /// Accepts: "last-N", "Nd", "all", "after-ingest". Default: "last-50".
+    #[serde(deserialize_with = "deserialize_retention")]
+    pub retention: RetentionPolicy,
 }
 
 impl Default for StorageConfig {
@@ -233,8 +237,75 @@ impl Default for StorageConfig {
         Self {
             data_dir: PathBuf::from(".blacksmith"),
             compress_after: 5,
+            retention: RetentionPolicy::LastN(50),
         }
     }
+}
+
+/// Controls when compressed/ingested session files are deleted.
+#[derive(Debug, Clone, PartialEq)]
+pub enum RetentionPolicy {
+    /// Keep the N most recent sessions (compressed or not). Delete older ones.
+    LastN(u64),
+    /// Keep sessions from the last N days based on file modification time.
+    Days(u64),
+    /// Never delete. Files still get compressed per `compress_after`.
+    All,
+    /// Delete the JSONL immediately after successful ingestion. No compression stage.
+    AfterIngest,
+}
+
+impl std::fmt::Display for RetentionPolicy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RetentionPolicy::LastN(n) => write!(f, "last-{n}"),
+            RetentionPolicy::Days(n) => write!(f, "{n}d"),
+            RetentionPolicy::All => write!(f, "all"),
+            RetentionPolicy::AfterIngest => write!(f, "after-ingest"),
+        }
+    }
+}
+
+impl RetentionPolicy {
+    /// Parse a retention policy from a string value.
+    pub fn parse(s: &str) -> Result<Self, String> {
+        let s = s.trim();
+        if s == "all" {
+            return Ok(RetentionPolicy::All);
+        }
+        if s == "after-ingest" {
+            return Ok(RetentionPolicy::AfterIngest);
+        }
+        if let Some(n_str) = s.strip_prefix("last-") {
+            let n: u64 = n_str
+                .parse()
+                .map_err(|_| format!("invalid retention 'last-N': '{n_str}' is not a number"))?;
+            if n == 0 {
+                return Err("retention 'last-N' requires N > 0".to_string());
+            }
+            return Ok(RetentionPolicy::LastN(n));
+        }
+        if let Some(n_str) = s.strip_suffix('d') {
+            let n: u64 = n_str
+                .parse()
+                .map_err(|_| format!("invalid retention 'Nd': '{n_str}' is not a number"))?;
+            if n == 0 {
+                return Err("retention 'Nd' requires N > 0".to_string());
+            }
+            return Ok(RetentionPolicy::Days(n));
+        }
+        Err(format!(
+            "invalid retention policy '{s}': expected 'last-N', 'Nd', 'all', or 'after-ingest'"
+        ))
+    }
+}
+
+fn deserialize_retention<'de, D>(deserializer: D) -> Result<RetentionPolicy, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let s = String::deserialize(deserializer)?;
+    RetentionPolicy::parse(&s).map_err(serde::de::Error::custom)
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -1028,6 +1099,7 @@ label = "Avg turns"
         let config = HarnessConfig::default();
         assert_eq!(config.storage.data_dir, PathBuf::from(".blacksmith"));
         assert_eq!(config.storage.compress_after, 5);
+        assert_eq!(config.storage.retention, RetentionPolicy::LastN(50));
     }
 
     #[test]
@@ -1304,5 +1376,167 @@ args = ["-p", "{prompt}"]
     #[test]
     fn test_command_in_path_missing_binary() {
         assert!(!command_in_path("nonexistent_binary_xyz_12345"));
+    }
+
+    // --- Retention policy tests ---
+
+    #[test]
+    fn test_retention_parse_last_n() {
+        assert_eq!(
+            RetentionPolicy::parse("last-50").unwrap(),
+            RetentionPolicy::LastN(50)
+        );
+        assert_eq!(
+            RetentionPolicy::parse("last-1").unwrap(),
+            RetentionPolicy::LastN(1)
+        );
+        assert_eq!(
+            RetentionPolicy::parse("last-1000").unwrap(),
+            RetentionPolicy::LastN(1000)
+        );
+    }
+
+    #[test]
+    fn test_retention_parse_days() {
+        assert_eq!(
+            RetentionPolicy::parse("30d").unwrap(),
+            RetentionPolicy::Days(30)
+        );
+        assert_eq!(
+            RetentionPolicy::parse("7d").unwrap(),
+            RetentionPolicy::Days(7)
+        );
+        assert_eq!(
+            RetentionPolicy::parse("1d").unwrap(),
+            RetentionPolicy::Days(1)
+        );
+    }
+
+    #[test]
+    fn test_retention_parse_all() {
+        assert_eq!(RetentionPolicy::parse("all").unwrap(), RetentionPolicy::All);
+    }
+
+    #[test]
+    fn test_retention_parse_after_ingest() {
+        assert_eq!(
+            RetentionPolicy::parse("after-ingest").unwrap(),
+            RetentionPolicy::AfterIngest
+        );
+    }
+
+    #[test]
+    fn test_retention_parse_invalid() {
+        assert!(RetentionPolicy::parse("").is_err());
+        assert!(RetentionPolicy::parse("keep-forever").is_err());
+        assert!(RetentionPolicy::parse("last-").is_err());
+        assert!(RetentionPolicy::parse("last-0").is_err());
+        assert!(RetentionPolicy::parse("0d").is_err());
+        assert!(RetentionPolicy::parse("d").is_err());
+        assert!(RetentionPolicy::parse("last-abc").is_err());
+    }
+
+    #[test]
+    fn test_retention_display() {
+        assert_eq!(RetentionPolicy::LastN(50).to_string(), "last-50");
+        assert_eq!(RetentionPolicy::Days(30).to_string(), "30d");
+        assert_eq!(RetentionPolicy::All.to_string(), "all");
+        assert_eq!(RetentionPolicy::AfterIngest.to_string(), "after-ingest");
+    }
+
+    #[test]
+    fn test_load_retention_from_toml() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("blacksmith.toml");
+        std::fs::write(
+            &path,
+            r#"
+[storage]
+retention = "last-100"
+"#,
+        )
+        .unwrap();
+        let config = HarnessConfig::load(&path).unwrap();
+        assert_eq!(config.storage.retention, RetentionPolicy::LastN(100));
+    }
+
+    #[test]
+    fn test_load_retention_days_from_toml() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("blacksmith.toml");
+        std::fs::write(
+            &path,
+            r#"
+[storage]
+retention = "14d"
+"#,
+        )
+        .unwrap();
+        let config = HarnessConfig::load(&path).unwrap();
+        assert_eq!(config.storage.retention, RetentionPolicy::Days(14));
+    }
+
+    #[test]
+    fn test_load_retention_all_from_toml() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("blacksmith.toml");
+        std::fs::write(
+            &path,
+            r#"
+[storage]
+retention = "all"
+"#,
+        )
+        .unwrap();
+        let config = HarnessConfig::load(&path).unwrap();
+        assert_eq!(config.storage.retention, RetentionPolicy::All);
+    }
+
+    #[test]
+    fn test_load_retention_after_ingest_from_toml() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("blacksmith.toml");
+        std::fs::write(
+            &path,
+            r#"
+[storage]
+retention = "after-ingest"
+"#,
+        )
+        .unwrap();
+        let config = HarnessConfig::load(&path).unwrap();
+        assert_eq!(config.storage.retention, RetentionPolicy::AfterIngest);
+    }
+
+    #[test]
+    fn test_load_invalid_retention_from_toml() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("blacksmith.toml");
+        std::fs::write(
+            &path,
+            r#"
+[storage]
+retention = "invalid-policy"
+"#,
+        )
+        .unwrap();
+        let err = HarnessConfig::load(&path).unwrap_err();
+        assert!(matches!(err, ConfigError::Parse { .. }));
+    }
+
+    #[test]
+    fn test_default_retention_when_not_specified() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("blacksmith.toml");
+        std::fs::write(
+            &path,
+            r#"
+[storage]
+data_dir = ".my-data"
+"#,
+        )
+        .unwrap();
+        let config = HarnessConfig::load(&path).unwrap();
+        assert_eq!(config.storage.retention, RetentionPolicy::LastN(50));
     }
 }

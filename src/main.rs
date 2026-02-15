@@ -15,6 +15,7 @@ mod metrics_cmd;
 mod pool;
 mod prompt;
 mod ratelimit;
+mod retention;
 mod retry;
 mod runner;
 mod scheduler;
@@ -426,6 +427,11 @@ async fn main() {
             config.session.prompt_file.display()
         );
         println!("  storage.data_dir = {}", config.storage.data_dir.display());
+        println!("  storage.retention = {}", config.storage.retention);
+        println!(
+            "  storage.compress_after = {}",
+            config.storage.compress_after
+        );
         println!("  data_dir.db = {}", data_dir.db().display());
         println!(
             "  data_dir.sessions = {}",

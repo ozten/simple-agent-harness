@@ -1315,3 +1315,34 @@
 - **503**: Implement retention policy enforcement (P2)
 - **tzx**: Implement prompt_via config with arg/stdin/file delivery modes (P2)
 - **hxq**: Add agent.coding and agent.integration config sections (P2)
+
+--- 2026-02-15 16:11:58 | simple-agent-harness-503 ---
+## Last Session: Implement retention policy enforcement (503)
+
+### Completed
+- Added `RetentionPolicy` enum to `config.rs` with variants: `LastN(u64)`, `Days(u64)`, `All`, `AfterIngest`
+- Implemented custom serde deserializer for parsing retention strings: "last-N", "Nd", "all", "after-ingest"
+- Default retention is `last-50` (keeping the 50 most recent sessions)
+- Created `src/retention.rs` module with:
+  - `enforce_retention()` — runs at loop start (step 2) to delete files beyond retention window
+  - `delete_after_ingest()` — deletes session file immediately after successful ingestion
+  - `enforce_last_n()` — keeps N most recent sessions by iteration number
+  - `enforce_days()` — keeps sessions with mtime within last N days
+  - Helper functions for listing/parsing session files (.jsonl and .jsonl.zst)
+- Wired retention into `runner.rs`:
+  - Step 2: calls `enforce_retention()` before prompt assembly
+  - After ingestion: `after-ingest` policy deletes file immediately, skipping compression
+- Added `filetime` dev dependency for mtime-based test
+- Added dry-run display for `storage.retention` and `storage.compress_after`
+- All 594 tests pass, clippy clean, fmt clean
+
+### Key Files Modified
+- `src/config.rs` — RetentionPolicy enum, parsing, Display, serde, tests
+- `src/retention.rs` — New module with enforcement logic and tests
+- `src/runner.rs` — Wired retention at loop step 2 and after-ingest
+- `src/main.rs` — Module declaration, dry-run display
+
+### Suggested Next Tasks
+- **tzx**: Implement prompt_via config with arg/stdin/file delivery modes (P2)
+- **hxq**: Add agent.coding and agent.integration config sections (P2)
+- **wck**: Implement blacksmith gc command (was blocked by 503, now unblocked)
