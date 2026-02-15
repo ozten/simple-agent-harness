@@ -850,3 +850,27 @@
 - Start with ib1 (storage config) — it unblocks 4 downstream beads (1u6, x1a, jkn, 1jv)
 - wi2 (AgentAdapter trait) can be done in parallel — it unblocks 7 downstream beads
 - zl7 (coordinator tables) can also start in parallel — it unblocks f9m, dgh
+
+--- 2026-02-15 15:01:15 | simple-agent-harness-ib1 ---
+## Last Session: Add storage config and .blacksmith/ directory initialization (ib1)
+
+### Completed
+- Added `StorageConfig` struct with `data_dir` field (default `.blacksmith/`) to `config.rs`
+- Created `src/data_dir.rs` with `DataDir` struct managing directory layout:
+  - Accessors: root, db, status, counter, sessions_dir, worktrees_dir, session_file
+  - `init()` creates full directory structure (root, sessions/, worktrees/)
+  - `ensure_initialized()` creates dirs + appends to .gitignore if present
+- Added `blacksmith init` CLI subcommand
+- Auto-init on every `blacksmith run` (before dry_run/status checks)
+- Added `storage.data_dir` to dry-run output
+- 9 tests in data_dir.rs, 2 new tests in config.rs (402 total, all passing)
+
+### Current State
+- `storage.data_dir` config field is loaded from TOML `[storage]` section
+- `DataDir` struct provides path accessors that downstream beads will use
+- Downstream beads (1u6, x1a, jkn, 1jv) are now unblocked
+
+### Suggested Next Tasks
+- **1u6**: Migrate file path construction to use storage.data_dir (session output, counter, db, status paths)
+- **wi2**: Define AgentAdapter trait and extract Claude adapter (independent, high unblock value)
+- **zl7**: Add coordinator SQLite tables (independent)

@@ -1,6 +1,7 @@
 mod brief;
 mod commit;
 mod config;
+mod data_dir;
 mod db;
 mod hooks;
 mod improve;
@@ -73,6 +74,8 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
+    /// Initialize the .blacksmith/ data directory
+    Init,
     /// Generate performance brief for prompt injection
     Brief,
     /// Manage improvement records (institutional memory)
@@ -255,6 +258,24 @@ async fn main() {
     tracing::debug!(?cli, "parsed CLI arguments");
 
     // Handle subcommands that don't need the full config
+    if let Some(Commands::Init) = &cli.command {
+        let config = HarnessConfig::load(&cli.config).unwrap_or_default();
+        let dd = data_dir::DataDir::new(&config.storage.data_dir);
+        match dd.ensure_initialized() {
+            Ok(()) => {
+                println!(
+                    "Initialized data directory: {}",
+                    config.storage.data_dir.display()
+                );
+            }
+            Err(e) => {
+                eprintln!("Error initializing data directory: {e}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
     if let Some(Commands::Brief) = &cli.command {
         let output_dir = cli
             .output_dir
@@ -385,6 +406,13 @@ async fn main() {
         std::process::exit(1);
     }
 
+    // Auto-initialize data directory on first run
+    let data_dir = data_dir::DataDir::new(&config.storage.data_dir);
+    if let Err(e) = data_dir.ensure_initialized() {
+        tracing::error!(error = %e, "failed to initialize data directory");
+        std::process::exit(1);
+    }
+
     if cli.dry_run {
         println!("blacksmith v{}", env!("CARGO_PKG_VERSION"));
         println!("Config file: {}", cli.config.display());
@@ -499,6 +527,7 @@ async fn main() {
             "  metrics.targets.streak_threshold = {}",
             config.metrics.targets.streak_threshold
         );
+        println!("  storage.data_dir = {}", config.storage.data_dir.display());
         println!();
         println!("Dry run mode — config validated, not running.");
         return;

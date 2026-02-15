@@ -18,6 +18,7 @@ pub struct HarnessConfig {
     pub output: OutputConfig,
     pub commit_detection: CommitDetectionConfig,
     pub metrics: MetricsConfig,
+    pub storage: StorageConfig,
 }
 
 impl HarnessConfig {
@@ -212,6 +213,20 @@ impl Default for CommitDetectionConfig {
     fn default() -> Self {
         Self {
             patterns: crate::commit::default_patterns(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Clone)]
+#[serde(default)]
+pub struct StorageConfig {
+    pub data_dir: PathBuf,
+}
+
+impl Default for StorageConfig {
+    fn default() -> Self {
+        Self {
+            data_dir: PathBuf::from(".blacksmith"),
         }
     }
 }
@@ -573,6 +588,7 @@ mod tests {
         assert!(config.prompt.prepend_commands.is_empty());
         assert!(config.output.event_log.is_none());
         assert_eq!(config.commit_detection.patterns.len(), 3);
+        assert_eq!(config.storage.data_dir, PathBuf::from(".blacksmith"));
     }
 
     #[test]
@@ -961,6 +977,28 @@ label = "Avg turns"
         let config = HarnessConfig::load(&path).unwrap();
         assert_eq!(config.metrics.targets.streak_threshold, 5);
         assert_eq!(config.metrics.targets.rules.len(), 1);
+    }
+
+    #[test]
+    fn test_default_storage_data_dir() {
+        let config = HarnessConfig::default();
+        assert_eq!(config.storage.data_dir, PathBuf::from(".blacksmith"));
+    }
+
+    #[test]
+    fn test_load_storage_data_dir_from_toml() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("blacksmith.toml");
+        std::fs::write(
+            &path,
+            r#"
+[storage]
+data_dir = ".my-data"
+"#,
+        )
+        .unwrap();
+        let config = HarnessConfig::load(&path).unwrap();
+        assert_eq!(config.storage.data_dir, PathBuf::from(".my-data"));
     }
 
     // --- Validation tests ---

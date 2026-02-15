@@ -759,6 +759,7 @@ mod tests {
             output: OutputConfig::default(),
             commit_detection: CommitDetectionConfig::default(),
             metrics: MetricsConfig::default(),
+            storage: StorageConfig::default(),
         }
     }
 

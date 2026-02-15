@@ -1,25 +1,22 @@
-## Last Session: PRD-to-beads decomposition of SPEC-v3-agents.md
+## Last Session: Add storage config and .blacksmith/ directory initialization (ib1)
 
 ### Completed
-- Decomposed SPEC-v3-agents.md (Milestones 5-9) into 37 beads with full dependency graph
-- Milestone 5 (Data Directory & Lifecycle): 6 beads (ib1, 1u6, x1a, 503, wck, jkn)
-- Milestone 6 (Agent Adapters): 6 beads (wi2, e2l, 6hk, 9jw, ee2, zb5)
-- Milestone 7 (Prompt Delivery & Additional Adapters): 6 beads (tzx, hxq, ec1, y74, 2su, hhv)
-- Milestone 8 (Multi-Agent Coordinator & Worktrees): 9 beads (zl7, mjx, 1jv, f9m, 1ky, d2q, wdo, 3mu, dgh)
-- Milestone 9 (Integration Loop, Reconciliation & Time Estimation): 10 beads (3pa, v6v, m5l, yg5, 3su, 7ed, dfe, ml7, 506, c37)
-- All dependencies wired: 30 blocked, 7 ready to work
+- Added `StorageConfig` struct with `data_dir` field (default `.blacksmith/`) to `config.rs`
+- Created `src/data_dir.rs` with `DataDir` struct managing directory layout:
+  - Accessors: root, db, status, counter, sessions_dir, worktrees_dir, session_file
+  - `init()` creates full directory structure (root, sessions/, worktrees/)
+  - `ensure_initialized()` creates dirs + appends to .gitignore if present
+- Added `blacksmith init` CLI subcommand
+- Auto-init on every `blacksmith run` (before dry_run/status checks)
+- Added `storage.data_dir` to dry-run output
+- 9 tests in data_dir.rs, 2 new tests in config.rs (402 total, all passing)
 
 ### Current State
-- 37 open beads, 7 ready (no blockers):
-  1. [P1] ib1: Add storage config and .blacksmith/ directory initialization
-  2. [P1] wi2: Define AgentAdapter trait and extract Claude adapter
-  3. [P1] zl7: Add coordinator SQLite tables for multi-agent state
-  4. [P1] mjx: Implement affected set parsing and glob overlap detection
-  5. [P1] v6v: Implement task_manifest.toml parsing and manifest application
-  6. [P2] tzx: Implement prompt_via config with arg/stdin/file delivery modes
-  7. [P2] hxq: Add agent.coding and agent.integration config sections
+- `storage.data_dir` config field is loaded from TOML `[storage]` section
+- `DataDir` struct provides path accessors that downstream beads will use
+- Downstream beads (1u6, x1a, jkn, 1jv) are now unblocked
 
 ### Suggested Next Tasks
-- Start with ib1 (storage config) — it unblocks 4 downstream beads (1u6, x1a, jkn, 1jv)
-- wi2 (AgentAdapter trait) can be done in parallel — it unblocks 7 downstream beads
-- zl7 (coordinator tables) can also start in parallel — it unblocks f9m, dgh
+- **1u6**: Migrate file path construction to use storage.data_dir (session output, counter, db, status paths)
+- **wi2**: Define AgentAdapter trait and extract Claude adapter (independent, high unblock value)
+- **zl7**: Add coordinator SQLite tables (independent)
