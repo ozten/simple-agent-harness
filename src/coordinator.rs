@@ -163,17 +163,19 @@ pub async fn run(
 
                 tracing::info!(worker_id, bead_id = %bead_id, "starting integration");
 
+                let resolved_integration = config.agent.resolved_integration();
                 let result = integration_queue.integrate(
                     worker_id,
                     assignment_id,
                     &bead_id,
                     &worktree_path,
                     &db_conn,
+                    Some(&resolved_integration),
+                    &mut circuit_breaker,
                 );
 
                 if result.success {
                     completed_beads += 1;
-                    circuit_breaker.reset(&bead_id);
                     tracing::info!(
                         worker_id,
                         bead_id = %bead_id,
@@ -187,9 +189,7 @@ pub async fn run(
                 } else {
                     let error_summary = result.failure_reason.as_deref().unwrap_or("unknown error");
 
-                    // Record the attempt and check if the circuit breaker has tripped
-                    circuit_breaker.record_attempt(&bead_id);
-
+                    // Check if the circuit breaker has tripped (integrate() already recorded attempts)
                     if let Some(tripped) =
                         circuit_breaker.check_tripped(&bead_id, error_summary, &worktree_path)
                     {

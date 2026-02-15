@@ -2,13 +2,17 @@
 ///
 /// After a coding agent finishes successfully in a worktree, the integrator:
 /// 1. Merges main into the branch (pull main into branch, NOT push branch to main)
-/// 2. If merge conflicts or errors occur, marks the integration as failed
-/// 3. On success, fast-forwards main to the branch tip
-/// 4. Records the integration in the database
+/// 2. Applies manifest entries from task_manifest.toml
+/// 3. Runs compiler checks (cargo check / tsc --noEmit)
+/// 4. If errors, spawns integration agent to fix them (up to 3 retries)
+/// 5. On success, fast-forwards main to the branch tip
+/// 6. Records the integration in the database
 ///
 /// Only one integration runs at a time to keep main's history linear.
 /// Workers continue coding while one task integrates.
+use crate::config::ResolvedAgentConfig;
 use crate::db;
+use crate::task_manifest;
 use crate::worktree;
 use rusqlite::Connection;
 use std::collections::HashMap;
@@ -245,11 +249,14 @@ impl IntegrationQueue {
     /// Integrate a single completed worktree into main.
     ///
     /// Steps:
-    /// 1. Fetch latest main into the worktree
-    /// 2. Merge main into the worktree's branch
-    /// 3. If merge succeeds, fast-forward main to the worktree's HEAD
-    /// 4. Record integration in the database
-    /// 5. Clean up the worktree
+    /// 1. Merge main into the worktree's branch
+    /// 2. Apply manifest entries from task_manifest.toml
+    /// 3. Run compiler check (cargo check / tsc --noEmit)
+    /// 4. If errors, spawn integration agent to fix; retry up to MAX_INTEGRATION_ATTEMPTS
+    /// 5. Fast-forward main to the worktree's HEAD
+    /// 6. Record integration in the database
+    /// 7. Clean up the worktree
+    #[allow(clippy::too_many_arguments)]
     pub fn integrate(
         &self,
         worker_id: u32,
@@ -257,6 +264,8 @@ impl IntegrationQueue {
         bead_id: &str,
         worktree_path: &Path,
         db_conn: &Connection,
+        integration_agent: Option<&ResolvedAgentConfig>,
+        circuit_breaker: &mut CircuitBreaker,
     ) -> IntegrationResult {
         tracing::info!(
             worker_id,
@@ -291,7 +300,132 @@ impl IntegrationQueue {
             }
         }
 
-        // Step 2: Get the HEAD commit of the worktree (the merge result)
+        // Step 2: Apply manifest entries from task_manifest.toml (if present)
+        let manifest_path = worktree_path.join("task_manifest.toml");
+        let manifest_entries = if manifest_path.exists() {
+            match task_manifest::parse(&manifest_path) {
+                Ok(manifest) => match task_manifest::apply(&manifest, worktree_path) {
+                    Ok(count) => {
+                        tracing::info!(worker_id, bead_id, count, "applied manifest entries");
+                        // Stage and commit manifest changes
+                        if count > 0 {
+                            let _ = self.git_add_and_commit(
+                                worktree_path,
+                                &format!("integration: apply task manifest for {bead_id}"),
+                            );
+                        }
+                        Some(count as i64)
+                    }
+                    Err(e) => {
+                        tracing::warn!(worker_id, bead_id, error = %e, "failed to apply manifest");
+                        None
+                    }
+                },
+                Err(e) => {
+                    tracing::warn!(worker_id, bead_id, error = %e, "failed to parse task manifest");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        // Step 3-4: Compiler check + integration agent fix loop
+        let mut integration_agent_used = false;
+        if let Some(agent_config) = integration_agent {
+            loop {
+                // Check if circuit breaker allows retry
+                if !circuit_breaker.state(bead_id).can_retry() {
+                    let reason = "circuit breaker tripped during compiler fix loop".to_string();
+                    self.record_failure(assignment_id, db_conn, &reason);
+                    return IntegrationResult {
+                        worker_id,
+                        assignment_id,
+                        bead_id: bead_id.to_string(),
+                        success: false,
+                        merge_commit: None,
+                        failure_reason: Some(reason),
+                    };
+                }
+
+                // Run compiler check
+                match self.run_compiler_check(worktree_path) {
+                    Ok(()) => {
+                        tracing::info!(worker_id, bead_id, "compiler check passed");
+                        break; // All good, proceed to fast-forward
+                    }
+                    Err(compiler_errors) => {
+                        tracing::warn!(
+                            worker_id,
+                            bead_id,
+                            state = %circuit_breaker.state(bead_id),
+                            "compiler check failed, spawning integration agent"
+                        );
+
+                        // Record the attempt
+                        let state = circuit_breaker.record_attempt(bead_id);
+                        if state.is_tripped() {
+                            let reason = format!(
+                                "compiler fix failed after {} attempts: {}",
+                                state.attempt_count(),
+                                compiler_errors
+                            );
+                            self.record_failure(assignment_id, db_conn, &reason);
+                            return IntegrationResult {
+                                worker_id,
+                                assignment_id,
+                                bead_id: bead_id.to_string(),
+                                success: false,
+                                merge_commit: None,
+                                failure_reason: Some(reason),
+                            };
+                        }
+
+                        // Spawn integration agent to fix
+                        let fix_prompt = format!(
+                            "Fix the following compiler errors in this codebase. \
+                             Apply minimal, surgical fixes (add missing imports, resolve name collisions, fix type mismatches). \
+                             Do NOT refactor or change logic.\n\nCompiler output:\n{}",
+                            compiler_errors
+                        );
+
+                        match self.spawn_integration_agent_sync(
+                            agent_config,
+                            worktree_path,
+                            &fix_prompt,
+                        ) {
+                            Ok(exit_code) => {
+                                integration_agent_used = true;
+                                if exit_code != Some(0) {
+                                    tracing::warn!(
+                                        worker_id,
+                                        bead_id,
+                                        exit_code = ?exit_code,
+                                        "integration agent exited with non-zero status"
+                                    );
+                                }
+                                // Loop back to re-check compiler
+                            }
+                            Err(e) => {
+                                let reason = format!("failed to spawn integration agent: {e}");
+                                tracing::error!(worker_id, bead_id, error = %e, "integration agent spawn failed");
+                                self.record_failure(assignment_id, db_conn, &reason);
+                                return IntegrationResult {
+                                    worker_id,
+                                    assignment_id,
+                                    bead_id: bead_id.to_string(),
+                                    success: false,
+                                    merge_commit: None,
+                                    failure_reason: Some(reason),
+                                };
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Step 5: Get the HEAD commit of the worktree (the merge/fix result)
         let worktree_head = match self.get_head_commit(worktree_path) {
             Ok(head) => head,
             Err(e) => {
@@ -309,7 +443,7 @@ impl IntegrationQueue {
             }
         };
 
-        // Step 3: Fast-forward main to the worktree's HEAD
+        // Step 6: Fast-forward main to the worktree's HEAD
         match self.fast_forward_main(&worktree_head) {
             Ok(()) => {
                 tracing::info!(
@@ -334,16 +468,25 @@ impl IntegrationQueue {
             }
         }
 
-        // Step 4: Record integration in DB
+        // Step 7: Record integration in DB
         let merged_at = chrono_now_utc();
+        let manifest_str = manifest_entries.map(|n| format!("{n} entries applied"));
+        let cross_task_str = if integration_agent_used {
+            Some(format!(
+                "{} fix attempts",
+                circuit_breaker.attempt_count(bead_id)
+            ))
+        } else {
+            None
+        };
         if let Err(e) = db::insert_integration_log(
             db_conn,
             assignment_id,
             &merged_at,
             &worktree_head,
-            None, // manifest_entries_applied (future: from task_manifest)
-            None, // cross_task_imports (future: from integration agent)
-            false,
+            manifest_str.as_deref(),
+            cross_task_str.as_deref(),
+            integration_agent_used,
         ) {
             tracing::warn!(error = %e, "failed to record integration log");
         }
@@ -355,7 +498,10 @@ impl IntegrationQueue {
             tracing::warn!(error = %e, "failed to update assignment status to integrated");
         }
 
-        // Step 5: Clean up the worktree
+        // Reset circuit breaker on success
+        circuit_breaker.reset(bead_id);
+
+        // Step 8: Clean up the worktree
         if let Err(e) = worktree::remove(&self.repo_dir, worktree_path) {
             tracing::warn!(
                 worker_id,
@@ -459,6 +605,126 @@ impl IntegrationQueue {
                 "git update-ref failed: {}",
                 stderr.trim()
             )));
+        }
+
+        Ok(())
+    }
+
+    /// Run a compiler check in the worktree.
+    ///
+    /// Tries `cargo check` first (for Rust projects), then `tsc --noEmit` (for TypeScript).
+    /// Returns `Ok(())` if the check passes, or `Err(error_output)` with compiler diagnostics.
+    fn run_compiler_check(&self, worktree_path: &Path) -> Result<(), String> {
+        // Try cargo check first (Rust projects)
+        let cargo_toml = worktree_path.join("Cargo.toml");
+        if cargo_toml.exists() {
+            let output = Command::new("cargo")
+                .args(["check", "--message-format=short"])
+                .current_dir(worktree_path)
+                .output()
+                .map_err(|e| format!("failed to run cargo check: {e}"))?;
+
+            if output.status.success() {
+                return Ok(());
+            }
+
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(stderr.trim().to_string());
+        }
+
+        // Try tsc --noEmit (TypeScript projects)
+        let tsconfig = worktree_path.join("tsconfig.json");
+        if tsconfig.exists() {
+            let output = Command::new("npx")
+                .args(["tsc", "--noEmit"])
+                .current_dir(worktree_path)
+                .output()
+                .map_err(|e| format!("failed to run tsc --noEmit: {e}"))?;
+
+            if output.status.success() {
+                return Ok(());
+            }
+
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            return Err(stdout.trim().to_string());
+        }
+
+        // No recognized build system — skip check, assume success
+        tracing::debug!("no Cargo.toml or tsconfig.json found, skipping compiler check");
+        Ok(())
+    }
+
+    /// Spawn an integration agent synchronously in the worktree.
+    ///
+    /// The integration agent runs with the given prompt (containing compiler errors)
+    /// and is expected to apply surgical fixes. Runs in the same worktree to
+    /// preserve build artifacts.
+    ///
+    /// Returns the agent's exit code.
+    fn spawn_integration_agent_sync(
+        &self,
+        agent_config: &ResolvedAgentConfig,
+        worktree_path: &Path,
+        prompt: &str,
+    ) -> Result<Option<i32>, IntegrationError> {
+        let args: Vec<String> = agent_config
+            .args
+            .iter()
+            .map(|arg| arg.replace("{prompt}", prompt))
+            .collect();
+
+        tracing::info!(
+            command = %agent_config.command,
+            worktree = %worktree_path.display(),
+            "spawning integration agent"
+        );
+
+        let output = Command::new(&agent_config.command)
+            .args(&args)
+            .current_dir(worktree_path)
+            .output()
+            .map_err(|e| {
+                IntegrationError::Git(format!("failed to spawn integration agent: {e}"))
+            })?;
+
+        Ok(output.status.code())
+    }
+
+    /// Stage all changes and commit in the worktree.
+    fn git_add_and_commit(
+        &self,
+        worktree_path: &Path,
+        message: &str,
+    ) -> Result<(), IntegrationError> {
+        let add_output = Command::new("git")
+            .args(["add", "-A"])
+            .current_dir(worktree_path)
+            .output()
+            .map_err(|e| IntegrationError::Git(format!("git add failed: {e}")))?;
+
+        if !add_output.status.success() {
+            let stderr = String::from_utf8_lossy(&add_output.stderr);
+            return Err(IntegrationError::Git(format!(
+                "git add failed: {}",
+                stderr.trim()
+            )));
+        }
+
+        let commit_output = Command::new("git")
+            .args(["commit", "-m", message, "--allow-empty"])
+            .current_dir(worktree_path)
+            .output()
+            .map_err(|e| IntegrationError::Git(format!("git commit failed: {e}")))?;
+
+        if !commit_output.status.success() {
+            let stderr = String::from_utf8_lossy(&commit_output.stderr);
+            // "nothing to commit" is OK
+            if !stderr.contains("nothing to commit") {
+                return Err(IntegrationError::Git(format!(
+                    "git commit failed: {}",
+                    stderr.trim()
+                )));
+            }
         }
 
         Ok(())
@@ -665,7 +931,16 @@ mod tests {
             .to_string();
 
         let queue = IntegrationQueue::new(repo_dir.to_path_buf(), "main".to_string());
-        let result = queue.integrate(0, assignment_id, "beads-abc", &wt_path, &conn);
+        let mut cb = CircuitBreaker::new();
+        let result = queue.integrate(
+            0,
+            assignment_id,
+            "beads-abc",
+            &wt_path,
+            &conn,
+            None,
+            &mut cb,
+        );
 
         assert!(
             result.success,
@@ -753,7 +1028,16 @@ mod tests {
             .unwrap();
 
         let queue = IntegrationQueue::new(repo_dir.to_path_buf(), "main".to_string());
-        let result = queue.integrate(0, assignment_id, "beads-conflict", &wt_path, &conn);
+        let mut cb = CircuitBreaker::new();
+        let result = queue.integrate(
+            0,
+            assignment_id,
+            "beads-conflict",
+            &wt_path,
+            &conn,
+            None,
+            &mut cb,
+        );
 
         assert!(!result.success, "integration should fail due to conflict");
         assert!(result.merge_commit.is_none());
@@ -791,7 +1075,16 @@ mod tests {
         let wt_path = create_worktree_with_commit(repo_dir, &wt_dir, 0, "beads-noop");
 
         let queue = IntegrationQueue::new(repo_dir.to_path_buf(), "main".to_string());
-        let result = queue.integrate(0, assignment_id, "beads-noop", &wt_path, &conn);
+        let mut cb = CircuitBreaker::new();
+        let result = queue.integrate(
+            0,
+            assignment_id,
+            "beads-noop",
+            &wt_path,
+            &conn,
+            None,
+            &mut cb,
+        );
 
         assert!(
             result.success,
@@ -1034,5 +1327,227 @@ mod tests {
         };
         let notes = tripped.failure_notes();
         assert_eq!(notes, "Integration failed: merge conflict in main.rs");
+    }
+
+    #[test]
+    fn test_compiler_check_no_build_system_passes() {
+        // When no Cargo.toml or tsconfig.json exists, compiler check should pass
+        let dir = TempDir::new().unwrap();
+        let queue = IntegrationQueue::new(dir.path().to_path_buf(), "main".to_string());
+        let result = queue.run_compiler_check(dir.path());
+        assert!(result.is_ok(), "should pass when no build system detected");
+    }
+
+    #[test]
+    fn test_compiler_check_valid_rust_project() {
+        // Create a minimal valid Rust project
+        let dir = TempDir::new().unwrap();
+        let root = dir.path();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            r#"[package]
+name = "test-project"
+version = "0.1.0"
+edition = "2021"
+"#,
+        )
+        .unwrap();
+        let src = root.join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(
+            src.join("lib.rs"),
+            "pub fn hello() -> &'static str { \"hello\" }\n",
+        )
+        .unwrap();
+
+        let queue = IntegrationQueue::new(root.to_path_buf(), "main".to_string());
+        let result = queue.run_compiler_check(root);
+        assert!(
+            result.is_ok(),
+            "valid Rust project should pass: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_compiler_check_invalid_rust_project() {
+        // Create a Rust project with a compile error
+        let dir = TempDir::new().unwrap();
+        let root = dir.path();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            r#"[package]
+name = "test-bad"
+version = "0.1.0"
+edition = "2021"
+"#,
+        )
+        .unwrap();
+        let src = root.join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("lib.rs"), "fn hello() -> i32 { \"not an int\" }\n").unwrap();
+
+        let queue = IntegrationQueue::new(root.to_path_buf(), "main".to_string());
+        let result = queue.run_compiler_check(root);
+        assert!(result.is_err(), "should fail with compile error");
+        let errors = result.unwrap_err();
+        assert!(
+            errors.contains("mismatched types") || errors.contains("error"),
+            "error output should contain compiler diagnostics: {errors}"
+        );
+    }
+
+    #[test]
+    fn test_git_add_and_commit() {
+        let dir = init_test_repo();
+        let repo_dir = dir.path();
+
+        let queue = IntegrationQueue::new(repo_dir.to_path_buf(), "main".to_string());
+
+        // Add a new file
+        std::fs::write(repo_dir.join("newfile.txt"), "content").unwrap();
+
+        // Stage and commit
+        let result = queue.git_add_and_commit(repo_dir, "test commit");
+        assert!(
+            result.is_ok(),
+            "git add and commit should succeed: {:?}",
+            result
+        );
+
+        // Verify the commit was made
+        let log = StdCommand::new("git")
+            .args(["log", "--oneline", "-1"])
+            .current_dir(repo_dir)
+            .output()
+            .unwrap();
+        let log_output = String::from_utf8_lossy(&log.stdout);
+        assert!(log_output.contains("test commit"));
+    }
+
+    #[test]
+    fn test_spawn_integration_agent_sync() {
+        let dir = init_test_repo();
+        let repo_dir = dir.path();
+
+        let queue = IntegrationQueue::new(repo_dir.to_path_buf(), "main".to_string());
+        let agent = crate::config::ResolvedAgentConfig {
+            command: "echo".to_string(),
+            args: vec!["fixing: {prompt}".to_string()],
+            adapter: None,
+            prompt_via: crate::config::PromptVia::Arg,
+        };
+
+        let result = queue.spawn_integration_agent_sync(&agent, repo_dir, "test errors");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), Some(0));
+    }
+
+    #[test]
+    fn test_spawn_integration_agent_nonexistent_command() {
+        let dir = init_test_repo();
+        let repo_dir = dir.path();
+
+        let queue = IntegrationQueue::new(repo_dir.to_path_buf(), "main".to_string());
+        let agent = crate::config::ResolvedAgentConfig {
+            command: "nonexistent-agent-xyz-12345".to_string(),
+            args: vec![],
+            adapter: None,
+            prompt_via: crate::config::PromptVia::Arg,
+        };
+
+        let result = queue.spawn_integration_agent_sync(&agent, repo_dir, "test");
+        assert!(result.is_err(), "should fail with nonexistent command");
+    }
+
+    #[test]
+    fn test_integration_with_manifest_application() {
+        let dir = init_test_repo();
+        let repo_dir = dir.path();
+        let wt_dir = repo_dir.join("worktrees");
+        std::fs::create_dir_all(&wt_dir).unwrap();
+
+        let db_path = repo_dir.join("test.db");
+        let conn = db::open_or_create(&db_path).unwrap();
+
+        let assignment_id = db::insert_worker_assignment(
+            &conn,
+            0,
+            "beads-manifest",
+            "/tmp/wt-0",
+            "completed",
+            None,
+        )
+        .unwrap();
+
+        let wt_path = create_worktree_with_commit(repo_dir, &wt_dir, 0, "beads-manifest");
+
+        // Create a task_manifest.toml in the worktree (but no lib.rs so it won't modify anything)
+        std::fs::write(wt_path.join("task_manifest.toml"), "").unwrap();
+
+        let queue = IntegrationQueue::new(repo_dir.to_path_buf(), "main".to_string());
+        let mut cb = CircuitBreaker::new();
+        let result = queue.integrate(
+            0,
+            assignment_id,
+            "beads-manifest",
+            &wt_path,
+            &conn,
+            None,
+            &mut cb,
+        );
+
+        assert!(
+            result.success,
+            "integration with empty manifest should succeed: {:?}",
+            result.failure_reason
+        );
+    }
+
+    #[test]
+    fn test_integration_with_compiler_check_no_build_system() {
+        // When there's no build system, compiler check is skipped and integration succeeds
+        let dir = init_test_repo();
+        let repo_dir = dir.path();
+        let wt_dir = repo_dir.join("worktrees");
+        std::fs::create_dir_all(&wt_dir).unwrap();
+
+        let db_path = repo_dir.join("test.db");
+        let conn = db::open_or_create(&db_path).unwrap();
+
+        let assignment_id =
+            db::insert_worker_assignment(&conn, 0, "beads-nocheck", "/tmp/wt-0", "completed", None)
+                .unwrap();
+
+        let wt_path = create_worktree_with_commit(repo_dir, &wt_dir, 0, "beads-nocheck");
+
+        // Provide an integration agent config — but since there's no Cargo.toml/tsconfig,
+        // the compiler check should be skipped
+        let agent = crate::config::ResolvedAgentConfig {
+            command: "echo".to_string(),
+            args: vec!["should-not-run".to_string()],
+            adapter: None,
+            prompt_via: crate::config::PromptVia::Arg,
+        };
+
+        let queue = IntegrationQueue::new(repo_dir.to_path_buf(), "main".to_string());
+        let mut cb = CircuitBreaker::new();
+        let result = queue.integrate(
+            0,
+            assignment_id,
+            "beads-nocheck",
+            &wt_path,
+            &conn,
+            Some(&agent),
+            &mut cb,
+        );
+
+        assert!(
+            result.success,
+            "integration should succeed when no build system: {:?}",
+            result.failure_reason
+        );
+        // Circuit breaker should not have been triggered
+        assert_eq!(cb.attempt_count("beads-nocheck"), 0);
     }
 }
