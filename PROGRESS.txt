@@ -1,25 +1,21 @@
-## Last Session: Implement improve show/update/promote/dismiss/search commands (simple-agent-harness-v25)
+## Last Session: Add quantitative metrics summary to brief command output (simple-agent-harness-pcb)
 
 ### Completed
-- Added `db::get_improvement(conn, ref_id)` — fetch single improvement by ref
-- Added `db::get_improvement_meta(conn, ref_id)` — fetch meta JSON field by ref
-- Added `db::update_improvement(conn, ref_id, status, body, context, meta)` — dynamic field updates with auto-resolved timestamp on promote/dismiss
-- Added `db::search_improvements(conn, query)` — case-insensitive LIKE search across title, body, context
-- Added 5 new CLI handlers in `improve.rs`:
-  - `handle_show(db_path, ref_id)` — display all fields for a single improvement
-  - `handle_update(db_path, ref_id, status, body, context)` — modify fields by ref
-  - `handle_promote(db_path, ref_id)` — shorthand for status=promoted with resolved timestamp
-  - `handle_dismiss(db_path, ref_id, reason)` — shorthand for status=dismissed with reason in meta JSON
-  - `handle_search(db_path, query)` — full-text search with tabular output
-- Wired 5 new `ImproveAction` variants (Show, Update, Promote, Dismiss, Search) in main.rs
-- 33 new tests across db.rs and improve.rs (270 total tests pass)
+- Extended `generate_brief()` in `brief.rs` to include a `## PERFORMANCE FEEDBACK (auto-generated)` section
+- Queries the most recent observation from the database via `db::recent_observations(conn, 1)`
+- Parses the observation's JSON data field and formats metrics: turns, narration %, parallel %, cost, duration
+- Performance feedback section appears before the OPEN IMPROVEMENTS section
+- Output matches PRD format: "Last session #N:" followed by metric lines
+- Brief still works correctly when only improvements exist (no observations) or only observations (no improvements)
+- Added 8 new tests for performance feedback (277 total tests pass)
 - Clippy clean, fmt applied
 
 ### Current State
-- CLI now supports all 7 improve subcommands: add, list, show, update, promote, dismiss, search
-- Pre-existing dead_code warnings remain for functions consumed by future features (events, observations, etc.)
+- Brief command now outputs both performance feedback and improvements
+- Target comparison (OK/MISS) not yet implemented — depends on configurable targets (obm bead)
+- Pre-existing dead_code warnings remain for functions consumed by future features
 
 ### Suggested Next Tasks
-- Add quantitative metrics summary to brief command output (pcb) — P2, ready
 - Implement configurable extraction rules from TOML config (i9s) — P2, ready
 - Implement configurable target thresholds and metrics targets command (obm) — P2, ready
+- Add target miss warnings and streak detection to brief output (h97) — P2, blocked by obm
