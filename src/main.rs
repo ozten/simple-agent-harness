@@ -202,6 +202,14 @@ enum IntegrationAction {
         /// Bead ID to retry (e.g. beads-abc)
         bead_id: String,
     },
+    /// Rollback an integrated task (git revert + manifest reversal)
+    Rollback {
+        /// Bead ID to rollback (e.g. beads-abc)
+        bead_id: String,
+        /// Force rollback even if other tasks depend on this one (entangled)
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -408,6 +416,67 @@ fn handle_integration_retry(
             "Integration retry failed for '{bead_id}': {}",
             result.failure_reason.as_deref().unwrap_or("unknown error")
         );
+        std::process::exit(1);
+    }
+
+    Ok(())
+}
+
+/// Handle `blacksmith integration rollback <bead-id>` — rollback an integrated task.
+fn handle_integration_rollback(
+    db_path: &std::path::Path,
+    config: &HarnessConfig,
+    bead_id: &str,
+    force: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let conn = db::open_or_create(db_path)?;
+
+    // Find the integration log entry for this bead
+    let entry = db::find_integration_by_bead(&conn, bead_id)?;
+    let entry = match entry {
+        Some(e) => e,
+        None => {
+            eprintln!("No integration found for bead '{bead_id}'.");
+            eprintln!("Use `blacksmith integration log` to see integration history.");
+            std::process::exit(1);
+        }
+    };
+
+    if entry.status == "rolled_back" {
+        eprintln!("Bead '{bead_id}' has already been rolled back.");
+        std::process::exit(1);
+    }
+
+    let repo_dir = std::env::current_dir()?;
+    let base_branch = config.workers.base_branch.clone();
+
+    let queue = integrator::IntegrationQueue::new(repo_dir, base_branch);
+    let result = queue.rollback(
+        bead_id,
+        &entry.merge_commit,
+        entry.assignment_id,
+        entry.manifest_entries_applied.as_deref(),
+        &conn,
+        force,
+    )?;
+
+    if result.success {
+        println!(
+            "Rollback succeeded for '{bead_id}' (revert commit: {}).",
+            result.reverted_commit.as_deref().unwrap_or("unknown")
+        );
+        if result.manifest_entries_reversed > 0 {
+            println!(
+                "  {} manifest entries reversed.",
+                result.manifest_entries_reversed
+            );
+        }
+    } else {
+        eprintln!("Rollback blocked for '{bead_id}': entangled with other tasks.");
+        for blocked_id in &result.blocked_by {
+            eprintln!("  - {blocked_id} imports from this bead's module");
+        }
+        eprintln!("\nUse --force to rollback anyway (may break dependent tasks).");
         std::process::exit(1);
     }
 
@@ -711,6 +780,9 @@ async fn main() {
             IntegrationAction::Log { last } => handle_integration_log(&db_path, *last),
             IntegrationAction::Retry { bead_id } => {
                 handle_integration_retry(&db_path, &config_for_integration, bead_id)
+            }
+            IntegrationAction::Rollback { bead_id, force } => {
+                handle_integration_rollback(&db_path, &config_for_integration, bead_id, *force)
             }
         };
 
@@ -1182,5 +1254,48 @@ mod tests {
         let conn2 = db::open_or_create(&db_path).unwrap();
         let result = db::find_failed_assignment_by_bead(&conn2, "beads-ok").unwrap();
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_integration_rollback_no_integration_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let conn = db::open_or_create(&db_path).unwrap();
+        // Insert assignment but no integration log entry
+        db::insert_worker_assignment(&conn, 0, "beads-noint", "/tmp/wt-0", "completed", None)
+            .unwrap();
+        drop(conn);
+
+        // Test the DB function directly since the handler calls process::exit
+        let conn2 = db::open_or_create(&db_path).unwrap();
+        let result = db::find_integration_by_bead(&conn2, "beads-noint").unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_integration_rollback_already_rolled_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let conn = db::open_or_create(&db_path).unwrap();
+
+        let aid =
+            db::insert_worker_assignment(&conn, 0, "beads-rb", "/tmp/wt-0", "rolled_back", None)
+                .unwrap();
+        db::insert_integration_log(
+            &conn,
+            aid,
+            "2026-02-15T12:00:00Z",
+            "abc123",
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+
+        // The handler would check status == "rolled_back" and exit.
+        // Test the DB query to verify it returns the rolled_back entry.
+        let result = db::find_integration_by_bead(&conn, "beads-rb").unwrap();
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().status, "rolled_back");
     }
 }

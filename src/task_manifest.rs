@@ -260,6 +260,129 @@ fn apply_cargo_toml_additions(
     Ok(count)
 }
 
+/// Reverse all manifest entries — remove lines that were added by `apply`.
+/// Returns the number of entries reversed.
+pub fn reverse(manifest: &TaskManifest, root: &Path) -> Result<usize, ManifestError> {
+    let mut count = 0;
+
+    // Reverse lib.rs additions
+    if !manifest.lib_rs_additions.is_empty() {
+        let lib_rs = root.join("src/lib.rs");
+        let main_rs = root.join("src/main.rs");
+        let target = if lib_rs.exists() { lib_rs } else { main_rs };
+        count += reverse_lines_from_file(
+            &target,
+            &manifest
+                .lib_rs_additions
+                .iter()
+                .map(|a| a.content.as_str())
+                .collect::<Vec<_>>(),
+        )?;
+    }
+
+    // Reverse mod.rs additions
+    for addition in &manifest.mod_rs_additions {
+        let target = root.join(&addition.target);
+        count += reverse_lines_from_file(&target, &[&addition.content])?;
+    }
+
+    // Reverse Cargo.toml additions
+    if !manifest.cargo_toml_additions.is_empty() {
+        let cargo_toml = root.join("Cargo.toml");
+        count += reverse_cargo_toml_additions(&cargo_toml, &manifest.cargo_toml_additions)?;
+    }
+
+    // Reverse TypeScript index.ts additions
+    for addition in &manifest.ts_index_additions {
+        let target = root.join(&addition.target);
+        count += reverse_lines_from_file(&target, &[&addition.content])?;
+    }
+
+    Ok(count)
+}
+
+/// Remove specific lines from a file. Returns the number of lines removed.
+fn reverse_lines_from_file(path: &Path, lines: &[&str]) -> Result<usize, ManifestError> {
+    if !path.exists() {
+        return Ok(0);
+    }
+
+    let content = fs::read_to_string(path)?;
+    let mut count = 0;
+    let mut new_lines: Vec<&str> = Vec::new();
+
+    for file_line in content.lines() {
+        let trimmed = file_line.trim();
+        if lines.iter().any(|l| l.trim() == trimmed) {
+            count += 1; // skip this line
+        } else {
+            new_lines.push(file_line);
+        }
+    }
+
+    if count > 0 {
+        let mut result = new_lines.join("\n");
+        if !result.is_empty() {
+            result.push('\n');
+        }
+        fs::write(path, result)?;
+    }
+
+    Ok(count)
+}
+
+/// Remove Cargo.toml dependencies that were added by the manifest.
+fn reverse_cargo_toml_additions(
+    path: &Path,
+    additions: &[CargoTomlAddition],
+) -> Result<usize, ManifestError> {
+    if !path.exists() {
+        return Ok(0);
+    }
+
+    let content = fs::read_to_string(path)?;
+    let mut doc: toml::Value = toml::from_str(&content)
+        .map_err(|e| ManifestError::CargoTomlParse(format!("failed to parse Cargo.toml: {e}")))?;
+
+    let mut count = 0;
+
+    for addition in additions {
+        let section_key = match addition.kind {
+            CargoTomlKind::Dependency => "dependencies",
+            CargoTomlKind::DevDependency => "dev-dependencies",
+        };
+
+        // Parse the addition content to get dep names
+        let dep_entry: BTreeMap<String, toml::Value> =
+            toml::from_str(&addition.content).map_err(|e| {
+                ManifestError::CargoTomlParse(format!(
+                    "failed to parse dependency '{}': {e}",
+                    addition.content
+                ))
+            })?;
+
+        if let Some(section) = doc
+            .as_table_mut()
+            .and_then(|t| t.get_mut(section_key))
+            .and_then(|v| v.as_table_mut())
+        {
+            for name in dep_entry.keys() {
+                if section.remove(name).is_some() {
+                    count += 1;
+                }
+            }
+        }
+    }
+
+    if count > 0 {
+        let serialized = toml::to_string_pretty(&doc)
+            .map_err(|e| ManifestError::CargoTomlParse(format!("failed to serialize: {e}")))?;
+        fs::write(path, serialized)?;
+    }
+
+    Ok(count)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -609,5 +732,187 @@ content = "pub mod foo;"
 
         let result = apply(&manifest, dir.path());
         assert!(result.is_err());
+    }
+
+    // ── reverse tests ────────────────────────────────────────────────────
+
+    #[test]
+    fn test_reverse_lib_rs_additions() {
+        let dir = TempDir::new().unwrap();
+        let src = dir.path().join("src");
+        fs::create_dir_all(&src).unwrap();
+        fs::write(
+            src.join("lib.rs"),
+            "mod existing;\npub mod analytics;\npub use analytics::Engine;\n",
+        )
+        .unwrap();
+
+        let manifest = TaskManifest {
+            lib_rs_additions: vec![
+                LibRsAddition {
+                    kind: LibRsKind::ModDeclaration,
+                    content: "pub mod analytics;".into(),
+                },
+                LibRsAddition {
+                    kind: LibRsKind::Reexport,
+                    content: "pub use analytics::Engine;".into(),
+                },
+            ],
+            ..Default::default()
+        };
+
+        let count = reverse(&manifest, dir.path()).unwrap();
+        assert_eq!(count, 2);
+
+        let content = fs::read_to_string(src.join("lib.rs")).unwrap();
+        assert!(content.contains("mod existing;"));
+        assert!(!content.contains("pub mod analytics;"));
+        assert!(!content.contains("pub use analytics::Engine;"));
+    }
+
+    #[test]
+    fn test_reverse_cargo_toml_dependency() {
+        let dir = TempDir::new().unwrap();
+        fs::write(
+            dir.path().join("Cargo.toml"),
+            r#"[package]
+name = "test"
+version = "0.1.0"
+
+[dependencies]
+serde = "1"
+tokio = "1"
+"#,
+        )
+        .unwrap();
+
+        let manifest = TaskManifest {
+            cargo_toml_additions: vec![CargoTomlAddition {
+                kind: CargoTomlKind::Dependency,
+                content: r#"tokio = "1""#.into(),
+            }],
+            ..Default::default()
+        };
+
+        let count = reverse(&manifest, dir.path()).unwrap();
+        assert_eq!(count, 1);
+
+        let content = fs::read_to_string(dir.path().join("Cargo.toml")).unwrap();
+        assert!(content.contains("serde"));
+        assert!(!content.contains("tokio"));
+    }
+
+    #[test]
+    fn test_reverse_mod_rs_addition() {
+        let dir = TempDir::new().unwrap();
+        let adapters = dir.path().join("src/adapters");
+        fs::create_dir_all(&adapters).unwrap();
+        fs::write(
+            adapters.join("mod.rs"),
+            "pub mod claude;\npub mod newadapter;\n",
+        )
+        .unwrap();
+
+        let manifest = TaskManifest {
+            mod_rs_additions: vec![ModRsAddition {
+                target: "src/adapters/mod.rs".into(),
+                content: "pub mod newadapter;".into(),
+            }],
+            ..Default::default()
+        };
+
+        let count = reverse(&manifest, dir.path()).unwrap();
+        assert_eq!(count, 1);
+
+        let content = fs::read_to_string(adapters.join("mod.rs")).unwrap();
+        assert!(content.contains("pub mod claude;"));
+        assert!(!content.contains("pub mod newadapter;"));
+    }
+
+    #[test]
+    fn test_reverse_nonexistent_file() {
+        let dir = TempDir::new().unwrap();
+        let manifest = TaskManifest {
+            mod_rs_additions: vec![ModRsAddition {
+                target: "src/nonexistent/mod.rs".into(),
+                content: "pub mod foo;".into(),
+            }],
+            ..Default::default()
+        };
+
+        let count = reverse(&manifest, dir.path()).unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn test_reverse_already_absent() {
+        let dir = TempDir::new().unwrap();
+        let src = dir.path().join("src");
+        fs::create_dir_all(&src).unwrap();
+        fs::write(src.join("lib.rs"), "mod existing;\n").unwrap();
+
+        let manifest = TaskManifest {
+            lib_rs_additions: vec![LibRsAddition {
+                kind: LibRsKind::ModDeclaration,
+                content: "pub mod absent;".into(),
+            }],
+            ..Default::default()
+        };
+
+        let count = reverse(&manifest, dir.path()).unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn test_apply_then_reverse_roundtrip() {
+        let dir = TempDir::new().unwrap();
+        let src = dir.path().join("src");
+        fs::create_dir_all(&src).unwrap();
+        fs::write(src.join("lib.rs"), "mod existing;\n").unwrap();
+        fs::write(
+            dir.path().join("Cargo.toml"),
+            r#"[package]
+name = "test"
+version = "0.1.0"
+
+[dependencies]
+serde = "1"
+"#,
+        )
+        .unwrap();
+
+        let manifest = TaskManifest {
+            lib_rs_additions: vec![LibRsAddition {
+                kind: LibRsKind::ModDeclaration,
+                content: "pub mod analytics;".into(),
+            }],
+            cargo_toml_additions: vec![CargoTomlAddition {
+                kind: CargoTomlKind::Dependency,
+                content: r#"tokio = "1""#.into(),
+            }],
+            ..Default::default()
+        };
+
+        // Apply
+        let applied = apply(&manifest, dir.path()).unwrap();
+        assert_eq!(applied, 2);
+
+        // Verify applied
+        let lib_content = fs::read_to_string(src.join("lib.rs")).unwrap();
+        assert!(lib_content.contains("pub mod analytics;"));
+        let cargo_content = fs::read_to_string(dir.path().join("Cargo.toml")).unwrap();
+        assert!(cargo_content.contains("tokio"));
+
+        // Reverse
+        let reversed = reverse(&manifest, dir.path()).unwrap();
+        assert_eq!(reversed, 2);
+
+        // Verify reversed
+        let lib_content = fs::read_to_string(src.join("lib.rs")).unwrap();
+        assert!(!lib_content.contains("pub mod analytics;"));
+        assert!(lib_content.contains("mod existing;"));
+        let cargo_content = fs::read_to_string(dir.path().join("Cargo.toml")).unwrap();
+        assert!(!cargo_content.contains("tokio"));
+        assert!(cargo_content.contains("serde"));
     }
 }

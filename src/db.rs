@@ -856,6 +856,49 @@ fn map_integration_log_view(row: &rusqlite::Row) -> Result<IntegrationLogView> {
     })
 }
 
+/// Find the most recent successful integration log entry for a bead_id.
+/// Joins with worker_assignments to find entries by bead_id.
+pub fn find_integration_by_bead(
+    conn: &Connection,
+    bead_id: &str,
+) -> Result<Option<IntegrationLogView>> {
+    let mut stmt = conn.prepare(
+        "SELECT il.id, il.assignment_id, wa.bead_id, il.merged_at, il.merge_commit, \
+         il.manifest_entries_applied, il.cross_task_imports, il.reconciliation_run, wa.status \
+         FROM integration_log il \
+         JOIN worker_assignments wa ON il.assignment_id = wa.id \
+         WHERE wa.bead_id = ?1 \
+         ORDER BY il.id DESC LIMIT 1",
+    )?;
+    let mut rows = stmt.query_map(rusqlite::params![bead_id], map_integration_log_view)?;
+    match rows.next() {
+        Some(row) => Ok(Some(row?)),
+        None => Ok(None),
+    }
+}
+
+/// Find beads that are entangled with the given bead — i.e., other beads
+/// whose cross_task_imports reference this bead's modules.
+/// Returns a list of (bead_id, cross_task_imports) for entangled beads.
+pub fn find_entangled_beads(conn: &Connection, bead_id: &str) -> Result<Vec<(String, String)>> {
+    let pattern = format!("%{bead_id}%");
+    let mut stmt = conn.prepare(
+        "SELECT wa.bead_id, il.cross_task_imports \
+         FROM integration_log il \
+         JOIN worker_assignments wa ON il.assignment_id = wa.id \
+         WHERE il.cross_task_imports LIKE ?1 \
+         AND wa.bead_id != ?2 \
+         AND wa.status = 'integrated' \
+         ORDER BY il.id DESC",
+    )?;
+    let rows = stmt
+        .query_map(rusqlite::params![pattern, bead_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
 fn map_integration_log(row: &rusqlite::Row) -> Result<IntegrationLogEntry> {
     Ok(IntegrationLogEntry {
         id: row.get(0)?,
@@ -2456,5 +2499,180 @@ mod tests {
         // Should return the most recent (highest id)
         assert_eq!(wa.id, aid2);
         assert_ne!(wa.id, aid1);
+    }
+
+    // ── Find Integration by Bead tests ──────────────────────────────────
+
+    #[test]
+    fn find_integration_by_bead_none() {
+        let (_dir, conn) = test_db();
+        let result = find_integration_by_bead(&conn, "beads-nope").unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn find_integration_by_bead_found() {
+        let (_dir, conn) = test_db();
+
+        let aid = insert_worker_assignment(&conn, 0, "beads-abc", "/tmp/wt-0", "integrated", None)
+            .unwrap();
+        insert_integration_log(
+            &conn,
+            aid,
+            "2026-02-15T12:00:00Z",
+            "abc123def",
+            Some("2 entries"),
+            Some("beads-xyz"),
+            false,
+        )
+        .unwrap();
+
+        let result = find_integration_by_bead(&conn, "beads-abc").unwrap();
+        assert!(result.is_some());
+        let entry = result.unwrap();
+        assert_eq!(entry.bead_id, "beads-abc");
+        assert_eq!(entry.merge_commit, "abc123def");
+        assert_eq!(entry.assignment_id, aid);
+        assert_eq!(entry.status, "integrated");
+    }
+
+    #[test]
+    fn find_integration_by_bead_returns_most_recent() {
+        let (_dir, conn) = test_db();
+
+        let aid1 = insert_worker_assignment(&conn, 0, "beads-abc", "/tmp/wt-0", "integrated", None)
+            .unwrap();
+        insert_integration_log(
+            &conn,
+            aid1,
+            "2026-02-15T10:00:00Z",
+            "old_commit",
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+
+        let aid2 = insert_worker_assignment(&conn, 1, "beads-abc", "/tmp/wt-1", "integrated", None)
+            .unwrap();
+        insert_integration_log(
+            &conn,
+            aid2,
+            "2026-02-15T12:00:00Z",
+            "new_commit",
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+
+        let result = find_integration_by_bead(&conn, "beads-abc").unwrap();
+        let entry = result.unwrap();
+        assert_eq!(entry.merge_commit, "new_commit");
+        assert_eq!(entry.assignment_id, aid2);
+    }
+
+    // ── Find Entangled Beads tests ──────────────────────────────────────
+
+    #[test]
+    fn find_entangled_beads_empty() {
+        let (_dir, conn) = test_db();
+        let result = find_entangled_beads(&conn, "beads-abc").unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn find_entangled_beads_finds_dependents() {
+        let (_dir, conn) = test_db();
+
+        // beads-abc was integrated first
+        let aid1 = insert_worker_assignment(&conn, 0, "beads-abc", "/tmp/wt-0", "integrated", None)
+            .unwrap();
+        insert_integration_log(
+            &conn,
+            aid1,
+            "2026-02-15T10:00:00Z",
+            "commit_a",
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+
+        // beads-def depends on beads-abc (imports from it)
+        let aid2 = insert_worker_assignment(&conn, 1, "beads-def", "/tmp/wt-1", "integrated", None)
+            .unwrap();
+        insert_integration_log(
+            &conn,
+            aid2,
+            "2026-02-15T11:00:00Z",
+            "commit_b",
+            None,
+            Some("imports from beads-abc::module"),
+            false,
+        )
+        .unwrap();
+
+        let result = find_entangled_beads(&conn, "beads-abc").unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].0, "beads-def");
+        assert!(result[0].1.contains("beads-abc"));
+    }
+
+    #[test]
+    fn find_entangled_beads_excludes_self() {
+        let (_dir, conn) = test_db();
+
+        let aid = insert_worker_assignment(&conn, 0, "beads-abc", "/tmp/wt-0", "integrated", None)
+            .unwrap();
+        insert_integration_log(
+            &conn,
+            aid,
+            "2026-02-15T10:00:00Z",
+            "commit_a",
+            None,
+            Some("references beads-abc self-import"),
+            false,
+        )
+        .unwrap();
+
+        let result = find_entangled_beads(&conn, "beads-abc").unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn find_entangled_beads_excludes_non_integrated() {
+        let (_dir, conn) = test_db();
+
+        let aid1 = insert_worker_assignment(&conn, 0, "beads-abc", "/tmp/wt-0", "integrated", None)
+            .unwrap();
+        insert_integration_log(
+            &conn,
+            aid1,
+            "2026-02-15T10:00:00Z",
+            "commit_a",
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+
+        // beads-def depends on beads-abc but is already rolled_back
+        let aid2 =
+            insert_worker_assignment(&conn, 1, "beads-def", "/tmp/wt-1", "rolled_back", None)
+                .unwrap();
+        insert_integration_log(
+            &conn,
+            aid2,
+            "2026-02-15T11:00:00Z",
+            "commit_b",
+            None,
+            Some("imports from beads-abc"),
+            false,
+        )
+        .unwrap();
+
+        let result = find_entangled_beads(&conn, "beads-abc").unwrap();
+        assert!(result.is_empty());
     }
 }

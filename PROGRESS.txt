@@ -1,22 +1,34 @@
-## Last Session: Implement blacksmith integration log and retry commands (7ed)
+## Last Session: Implement git revert rollback with entanglement tracking (dfe)
 
 ### Completed
-- Added `Integration` subcommand to CLI with `Log` and `Retry` actions
-- `blacksmith integration log [--last N]`: Shows integration history table with assignment ID, bead ID, merge commit (truncated), merged_at timestamp, manifest entries applied, status, and reconciliation indicator
-- `blacksmith integration retry <bead-id>`: Finds the most recent failed/integration_failed assignment for the given bead, resets it to "completed" status, and re-runs the full integration pipeline (merge, manifest, compiler check, integration agent, fast-forward)
-- Added `IntegrationLogView` struct in db.rs for the joined query
-- Added `recent_integration_log()` DB function: queries integration_log joined with worker_assignments, supports optional LIMIT, returns entries in DESC order
-- Added `find_failed_assignment_by_bead()` DB function: finds the most recent failed/integration_failed worker assignment for a given bead_id
-- Added 12 new tests (714 total passing):
-  - DB: recent_integration_log_empty, _returns_entries, _with_limit
-  - DB: find_failed_assignment_none, _finds_integration_failed, _finds_failed_status, _ignores_completed, _returns_most_recent
-  - main: test_integration_log_empty, _with_entries, _with_last, _retry_no_failed_assignment
+- Added `blacksmith integration rollback <bead-id> [--force]` CLI command
+- Implemented `IntegrationQueue::rollback()` in integrator.rs:
+  - Checks entanglement via cross_task_imports in integration_log
+  - Blocks rollback if other integrated tasks depend on this bead (unless --force)
+  - Syncs working tree (git reset --hard HEAD) before reverting
+  - Runs `git revert --no-edit <merge_commit>` to undo code changes
+  - Updates assignment status to "rolled_back"
+- Added `RollbackResult` struct with success, reverted_commit, manifest_entries_reversed, blocked_by
+- Added `task_manifest::reverse()` function — inverse of apply():
+  - Removes lines from lib.rs/mod.rs/index.ts that were added
+  - Removes Cargo.toml dependencies that were added
+  - Handles all manifest entry types (lib_rs, mod_rs, cargo_toml, ts_index)
+- Added DB functions in db.rs:
+  - `find_integration_by_bead()`: finds most recent integration log entry by bead_id
+  - `find_entangled_beads()`: finds beads whose cross_task_imports reference a given bead
+- Added 19 new tests (733 total passing):
+  - DB: find_integration_by_bead (none, found, most_recent)
+  - DB: find_entangled_beads (empty, finds_dependents, excludes_self, excludes_non_integrated)
+  - Integrator: rollback_successful, rollback_blocked_by_entanglement, rollback_forced_despite_entanglement, rollback_result_fields
+  - Task manifest: reverse_lib_rs, reverse_cargo_toml, reverse_mod_rs, reverse_nonexistent, reverse_already_absent, apply_then_reverse_roundtrip
+  - Main: rollback_no_integration_found, rollback_already_rolled_back
 
 ### Key Files Modified
-- `src/main.rs` — CLI subcommand definition and handler functions
-- `src/db.rs` — New query functions and structs for integration log views
+- `src/main.rs` — CLI `Rollback` subcommand + handler
+- `src/integrator.rs` — `rollback()` method + `RollbackResult` struct
+- `src/db.rs` — `find_integration_by_bead()` + `find_entangled_beads()` query functions
+- `src/task_manifest.rs` — `reverse()` + `reverse_lines_from_file()` + `reverse_cargo_toml_additions()`
 
 ### Suggested Next Tasks
-- **dfe**: Implement git revert rollback with entanglement tracking (P2)
 - **ml7**: Implement serial and parallel time estimation from bead_metrics (P2)
 - **ec1**: Implement codex agent adapter (P3)
