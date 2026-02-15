@@ -254,6 +254,7 @@ mod tests {
             command: "claude".to_string(),
             args: vec![],
             adapter: Some("raw".to_string()),
+            ..Default::default()
         };
         let name = resolve_adapter_name(config.adapter.as_deref(), &config.command);
         let adapter = create_adapter(name);

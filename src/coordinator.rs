@@ -354,7 +354,7 @@ mod tests {
             agent: AgentConfig {
                 command: "echo".to_string(),
                 args: vec!["hello from worker".to_string()],
-                adapter: None,
+                ..Default::default()
             },
             watchdog: WatchdogConfig {
                 check_interval_secs: 60,

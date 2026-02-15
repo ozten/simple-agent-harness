@@ -441,6 +441,7 @@ async fn main() {
         println!("  data_dir.status = {}", data_dir.status().display());
         println!("  agent.command = {}", config.agent.command);
         println!("  agent.args = {:?}", config.agent.args);
+        println!("  agent.prompt_via = {}", config.agent.prompt_via);
         println!(
             "  watchdog.check_interval_secs = {}",
             config.watchdog.check_interval_secs

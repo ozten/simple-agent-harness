@@ -1,29 +1,30 @@
-## Last Session: Implement retention policy enforcement (503)
+## Last Session: Implement prompt_via config (tzx)
 
 ### Completed
-- Added `RetentionPolicy` enum to `config.rs` with variants: `LastN(u64)`, `Days(u64)`, `All`, `AfterIngest`
-- Implemented custom serde deserializer for parsing retention strings: "last-N", "Nd", "all", "after-ingest"
-- Default retention is `last-50` (keeping the 50 most recent sessions)
-- Created `src/retention.rs` module with:
-  - `enforce_retention()` — runs at loop start (step 2) to delete files beyond retention window
-  - `delete_after_ingest()` — deletes session file immediately after successful ingestion
-  - `enforce_last_n()` — keeps N most recent sessions by iteration number
-  - `enforce_days()` — keeps sessions with mtime within last N days
-  - Helper functions for listing/parsing session files (.jsonl and .jsonl.zst)
-- Wired retention into `runner.rs`:
-  - Step 2: calls `enforce_retention()` before prompt assembly
-  - After ingestion: `after-ingest` policy deletes file immediately, skipping compression
-- Added `filetime` dev dependency for mtime-based test
-- Added dry-run display for `storage.retention` and `storage.compress_after`
-- All 594 tests pass, clippy clean, fmt clean
+- Added `PromptVia` enum to `config.rs` with variants: `Arg` (default), `Stdin`, `File`
+- Custom serde deserializer validates "arg", "stdin", "file" string values
+- Added `prompt_via` field to `AgentConfig` struct with `#[serde(default)]`
+- Updated `session.rs`:
+  - `build_args()` now accepts optional `prompt_file` path and substitutes `{prompt_file}` placeholder
+  - `run_session()` supports all three modes:
+    - `Arg`: existing behavior, substitutes `{prompt}` in args
+    - `Stdin`: pipes prompt to child stdin via `Stdio::piped()` + `AsyncWriteExt::write_all`
+    - `File`: writes prompt to `tempfile::NamedTempFile`, substitutes `{prompt_file}` in args, auto-cleans on drop
+- Updated `runner.rs` `run_session_with_watchdog()` with same three-mode support
+- Moved `tempfile` from dev-dependencies to regular dependencies (needed at runtime for file mode)
+- Added dry-run display for `agent.prompt_via`
+- Added 10 new tests: config parsing (5), build_args with prompt_file (1), stdin mode (1), file mode (1), display (1), invalid value (1)
+- All 604 tests pass, clippy clean, fmt clean
 
 ### Key Files Modified
-- `src/config.rs` — RetentionPolicy enum, parsing, Display, serde, tests
-- `src/retention.rs` — New module with enforcement logic and tests
-- `src/runner.rs` — Wired retention at loop step 2 and after-ingest
-- `src/main.rs` — Module declaration, dry-run display
+- `Cargo.toml` — moved tempfile to regular deps
+- `src/config.rs` — PromptVia enum, serde, Display, AgentConfig field, tests
+- `src/session.rs` — build_args with prompt_file, run_session multi-mode, tests
+- `src/runner.rs` — run_session_with_watchdog multi-mode support
+- `src/main.rs` — dry-run display for prompt_via
+- `src/pool.rs`, `src/adapters/mod.rs`, `src/coordinator.rs` — updated AgentConfig test structs
 
 ### Suggested Next Tasks
-- **tzx**: Implement prompt_via config with arg/stdin/file delivery modes (P2)
+- **wck**: Implement blacksmith gc command (P2)
 - **hxq**: Add agent.coding and agent.integration config sections (P2)
-- **wck**: Implement blacksmith gc command (was blocked by 503, now unblocked)
+- **jkn**: Implement blacksmith migrate --consolidate command (P2)

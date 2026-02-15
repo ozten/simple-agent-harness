@@ -151,6 +151,52 @@ pub struct AgentConfig {
     /// Which adapter to use for parsing session output.
     /// If omitted, auto-detected from command name.
     pub adapter: Option<String>,
+    /// How to deliver the assembled prompt to the agent process.
+    /// - "arg" (default): substitute `{prompt}` in args
+    /// - "stdin": write prompt to the agent's stdin
+    /// - "file": write prompt to a temp file, substitute `{prompt_file}` in args
+    #[serde(default)]
+    pub prompt_via: PromptVia,
+}
+
+/// How the assembled prompt is delivered to the agent subprocess.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub enum PromptVia {
+    /// Substitute `{prompt}` placeholders in the agent args (default, existing behavior).
+    #[default]
+    Arg,
+    /// Write the prompt to the agent's stdin.
+    Stdin,
+    /// Write the prompt to a temp file and substitute `{prompt_file}` in args.
+    File,
+}
+
+impl std::fmt::Display for PromptVia {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PromptVia::Arg => write!(f, "arg"),
+            PromptVia::Stdin => write!(f, "stdin"),
+            PromptVia::File => write!(f, "file"),
+        }
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for PromptVia {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        match s.as_str() {
+            "arg" => Ok(PromptVia::Arg),
+            "stdin" => Ok(PromptVia::Stdin),
+            "file" => Ok(PromptVia::File),
+            other => Err(serde::de::Error::custom(format!(
+                "invalid prompt_via '{}': expected 'arg', 'stdin', or 'file'",
+                other
+            ))),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -629,6 +675,7 @@ impl Default for AgentConfig {
                 "stream-json".to_string(),
             ],
             adapter: None,
+            prompt_via: PromptVia::default(),
         }
     }
 }
@@ -1538,5 +1585,108 @@ data_dir = ".my-data"
         .unwrap();
         let config = HarnessConfig::load(&path).unwrap();
         assert_eq!(config.storage.retention, RetentionPolicy::LastN(50));
+    }
+
+    // --- prompt_via tests ---
+
+    #[test]
+    fn test_default_prompt_via_is_arg() {
+        let config = HarnessConfig::default();
+        assert_eq!(config.agent.prompt_via, PromptVia::Arg);
+    }
+
+    #[test]
+    fn test_prompt_via_display() {
+        assert_eq!(PromptVia::Arg.to_string(), "arg");
+        assert_eq!(PromptVia::Stdin.to_string(), "stdin");
+        assert_eq!(PromptVia::File.to_string(), "file");
+    }
+
+    #[test]
+    fn test_load_prompt_via_stdin_from_toml() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("blacksmith.toml");
+        std::fs::write(
+            &path,
+            r#"
+[agent]
+command = "opencode"
+args = ["--non-interactive"]
+prompt_via = "stdin"
+"#,
+        )
+        .unwrap();
+        let config = HarnessConfig::load(&path).unwrap();
+        assert_eq!(config.agent.prompt_via, PromptVia::Stdin);
+    }
+
+    #[test]
+    fn test_load_prompt_via_file_from_toml() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("blacksmith.toml");
+        std::fs::write(
+            &path,
+            r#"
+[agent]
+command = "aider"
+args = ["--message-file", "{prompt_file}"]
+prompt_via = "file"
+"#,
+        )
+        .unwrap();
+        let config = HarnessConfig::load(&path).unwrap();
+        assert_eq!(config.agent.prompt_via, PromptVia::File);
+    }
+
+    #[test]
+    fn test_load_prompt_via_arg_from_toml() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("blacksmith.toml");
+        std::fs::write(
+            &path,
+            r#"
+[agent]
+command = "claude"
+args = ["-p", "{prompt}"]
+prompt_via = "arg"
+"#,
+        )
+        .unwrap();
+        let config = HarnessConfig::load(&path).unwrap();
+        assert_eq!(config.agent.prompt_via, PromptVia::Arg);
+    }
+
+    #[test]
+    fn test_load_prompt_via_default_when_not_specified() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("blacksmith.toml");
+        std::fs::write(
+            &path,
+            r#"
+[agent]
+command = "claude"
+args = ["-p", "{prompt}"]
+"#,
+        )
+        .unwrap();
+        let config = HarnessConfig::load(&path).unwrap();
+        assert_eq!(config.agent.prompt_via, PromptVia::Arg);
+    }
+
+    #[test]
+    fn test_load_invalid_prompt_via_from_toml() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("blacksmith.toml");
+        std::fs::write(
+            &path,
+            r#"
+[agent]
+command = "claude"
+prompt_via = "invalid"
+"#,
+        )
+        .unwrap();
+        let err = HarnessConfig::load(&path).unwrap_err();
+        assert!(matches!(err, ConfigError::Parse { .. }));
     }
 }

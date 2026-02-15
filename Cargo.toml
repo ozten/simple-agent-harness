@@ -16,8 +16,8 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 regex = "1"
 rusqlite = { version = "0.31", features = ["bundled"] }
+tempfile = "3"
 zstd = "0.13"
 
 [dev-dependencies]
 filetime = "0.2.27"
-tempfile = "3"

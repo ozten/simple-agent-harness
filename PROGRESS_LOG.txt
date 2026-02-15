@@ -1346,3 +1346,35 @@
 - **tzx**: Implement prompt_via config with arg/stdin/file delivery modes (P2)
 - **hxq**: Add agent.coding and agent.integration config sections (P2)
 - **wck**: Implement blacksmith gc command (was blocked by 503, now unblocked)
+
+--- 2026-02-15 16:17:37 | simple-agent-harness-tzx ---
+## Last Session: Implement prompt_via config (tzx)
+
+### Completed
+- Added `PromptVia` enum to `config.rs` with variants: `Arg` (default), `Stdin`, `File`
+- Custom serde deserializer validates "arg", "stdin", "file" string values
+- Added `prompt_via` field to `AgentConfig` struct with `#[serde(default)]`
+- Updated `session.rs`:
+  - `build_args()` now accepts optional `prompt_file` path and substitutes `{prompt_file}` placeholder
+  - `run_session()` supports all three modes:
+    - `Arg`: existing behavior, substitutes `{prompt}` in args
+    - `Stdin`: pipes prompt to child stdin via `Stdio::piped()` + `AsyncWriteExt::write_all`
+    - `File`: writes prompt to `tempfile::NamedTempFile`, substitutes `{prompt_file}` in args, auto-cleans on drop
+- Updated `runner.rs` `run_session_with_watchdog()` with same three-mode support
+- Moved `tempfile` from dev-dependencies to regular dependencies (needed at runtime for file mode)
+- Added dry-run display for `agent.prompt_via`
+- Added 10 new tests: config parsing (5), build_args with prompt_file (1), stdin mode (1), file mode (1), display (1), invalid value (1)
+- All 604 tests pass, clippy clean, fmt clean
+
+### Key Files Modified
+- `Cargo.toml` — moved tempfile to regular deps
+- `src/config.rs` — PromptVia enum, serde, Display, AgentConfig field, tests
+- `src/session.rs` — build_args with prompt_file, run_session multi-mode, tests
+- `src/runner.rs` — run_session_with_watchdog multi-mode support
+- `src/main.rs` — dry-run display for prompt_via
+- `src/pool.rs`, `src/adapters/mod.rs`, `src/coordinator.rs` — updated AgentConfig test structs
+
+### Suggested Next Tasks
+- **wck**: Implement blacksmith gc command (P2)
+- **hxq**: Add agent.coding and agent.integration config sections (P2)
+- **jkn**: Implement blacksmith migrate --consolidate command (P2)

@@ -1,9 +1,10 @@
 /// Single session lifecycle: spawn agent subprocess, capture output to file,
 /// report results (exit code, output bytes, duration).
-use crate::config::{AgentConfig, SessionConfig};
+use crate::config::{AgentConfig, PromptVia, SessionConfig};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Instant;
+use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
 /// Result of a completed session.
@@ -79,12 +80,22 @@ pub fn output_file_path(session_config: &SessionConfig, global_iteration: u64) -
     session_config.output_dir.join(filename)
 }
 
-/// Build the command arguments, replacing `{prompt}` placeholders with actual prompt content.
-fn build_args(agent_config: &AgentConfig, prompt: &str) -> Vec<String> {
+/// Build the command arguments, replacing `{prompt}` and `{prompt_file}` placeholders.
+///
+/// - `{prompt}` is replaced with the inline prompt text (used with `prompt_via = "arg"`)
+/// - `{prompt_file}` is replaced with the path to a temp file containing the prompt
+///   (used with `prompt_via = "file"`)
+fn build_args(agent_config: &AgentConfig, prompt: &str, prompt_file: Option<&Path>) -> Vec<String> {
     agent_config
         .args
         .iter()
-        .map(|arg| arg.replace("{prompt}", prompt))
+        .map(|arg| {
+            let mut result = arg.replace("{prompt}", prompt);
+            if let Some(pf) = prompt_file {
+                result = result.replace("{prompt_file}", &pf.display().to_string());
+            }
+            result
+        })
         .collect()
 }
 
@@ -92,6 +103,11 @@ fn build_args(agent_config: &AgentConfig, prompt: &str) -> Vec<String> {
 ///
 /// The subprocess is spawned in its own process group (via `process_group(0)`)
 /// so the watchdog can later kill the entire group if needed.
+///
+/// Prompt delivery depends on `agent_config.prompt_via`:
+/// - `Arg`: substitute `{prompt}` in args (default, existing behavior)
+/// - `Stdin`: write prompt to the agent's stdin
+/// - `File`: write prompt to a temp file, substitute `{prompt_file}` in args
 pub async fn run_session(
     agent_config: &AgentConfig,
     output_path: &Path,
@@ -110,10 +126,28 @@ pub async fn run_session(
             source: e,
         })?;
 
-    let args = build_args(agent_config, prompt);
+    // For file mode: write prompt to a temp file
+    let prompt_file = if agent_config.prompt_via == PromptVia::File {
+        let tmp = tempfile::NamedTempFile::new().map_err(|e| SessionError::Io { source: e })?;
+        std::fs::write(tmp.path(), prompt).map_err(|e| SessionError::Io { source: e })?;
+        Some(tmp)
+    } else {
+        None
+    };
+
+    let args = build_args(agent_config, prompt, prompt_file.as_ref().map(|f| f.path()));
+
+    // For stdin mode, don't pipe stdin from null
+    let stdin_mode = if agent_config.prompt_via == PromptVia::Stdin {
+        Stdio::piped()
+    } else {
+        Stdio::null()
+    };
+
     tracing::info!(
         command = %agent_config.command,
         args = ?args,
+        prompt_via = %agent_config.prompt_via,
         output = %output_path.display(),
         "spawning agent session"
     );
@@ -122,11 +156,23 @@ pub async fn run_session(
 
     let mut child = Command::new(&agent_config.command)
         .args(&args)
+        .stdin(stdin_mode)
         .stdout(Stdio::from(output_file))
         .stderr(Stdio::from(output_file_stderr))
         .process_group(0) // New process group for clean kill
         .spawn()
         .map_err(|e| SessionError::Spawn { source: e })?;
+
+    // For stdin mode: write the prompt to the child's stdin, then close it
+    if agent_config.prompt_via == PromptVia::Stdin {
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin
+                .write_all(prompt.as_bytes())
+                .await
+                .map_err(|e| SessionError::Io { source: e })?;
+            // Dropping stdin closes the pipe, signaling EOF to the child
+        }
+    }
 
     let pid = child.id().unwrap_or(0);
     tracing::info!(pid, "agent subprocess started");
@@ -138,6 +184,9 @@ pub async fn run_session(
         .map_err(|e| SessionError::Io { source: e })?;
 
     let duration = start.elapsed();
+
+    // Clean up temp file (NamedTempFile auto-deletes on drop, but be explicit)
+    drop(prompt_file);
 
     // Read the output file size
     let output_bytes = std::fs::metadata(output_path).map(|m| m.len()).unwrap_or(0);
@@ -191,9 +240,9 @@ mod tests {
                 "{prompt}".to_string(),
                 "--verbose".to_string(),
             ],
-            adapter: None,
+            ..Default::default()
         };
-        let args = build_args(&agent, "hello world");
+        let args = build_args(&agent, "hello world", None);
         assert_eq!(args, vec!["-p", "hello world", "--verbose"]);
     }
 
@@ -202,9 +251,9 @@ mod tests {
         let agent = AgentConfig {
             command: "echo".to_string(),
             args: vec!["hello".to_string()],
-            adapter: None,
+            ..Default::default()
         };
-        let args = build_args(&agent, "anything");
+        let args = build_args(&agent, "anything", None);
         assert_eq!(args, vec!["hello"]);
     }
 
@@ -217,10 +266,21 @@ mod tests {
                 "mid".to_string(),
                 "{prompt}".to_string(),
             ],
-            adapter: None,
+            ..Default::default()
         };
-        let args = build_args(&agent, "X");
+        let args = build_args(&agent, "X", None);
         assert_eq!(args, vec!["X", "mid", "X"]);
+    }
+
+    #[test]
+    fn test_build_args_prompt_file_placeholder() {
+        let agent = AgentConfig {
+            command: "aider".to_string(),
+            args: vec!["--message-file".to_string(), "{prompt_file}".to_string()],
+            ..Default::default()
+        };
+        let args = build_args(&agent, "unused", Some(Path::new("/tmp/prompt.txt")));
+        assert_eq!(args, vec!["--message-file", "/tmp/prompt.txt"]);
     }
 
     #[tokio::test]
@@ -231,7 +291,7 @@ mod tests {
         let agent = AgentConfig {
             command: "echo".to_string(),
             args: vec!["hello".to_string(), "{prompt}".to_string()],
-            adapter: None,
+            ..Default::default()
         };
 
         let result = run_session(&agent, &output_path, "world").await.unwrap();
@@ -257,7 +317,7 @@ mod tests {
                 "-c".to_string(),
                 "echo stdout-line; echo stderr-line >&2".to_string(),
             ],
-            adapter: None,
+            ..Default::default()
         };
 
         let result = run_session(&agent, &output_path, "unused").await.unwrap();
@@ -276,7 +336,7 @@ mod tests {
         let agent = AgentConfig {
             command: "sh".to_string(),
             args: vec!["-c".to_string(), "exit 42".to_string()],
-            adapter: None,
+            ..Default::default()
         };
 
         let result = run_session(&agent, &output_path, "unused").await.unwrap();
@@ -291,7 +351,7 @@ mod tests {
         let agent = AgentConfig {
             command: "nonexistent-binary-xyz".to_string(),
             args: vec![],
-            adapter: None,
+            ..Default::default()
         };
 
         let err = run_session(&agent, &output_path, "unused")
@@ -310,7 +370,7 @@ mod tests {
         let agent = AgentConfig {
             command: "printf".to_string(),
             args: vec!["ABCDE".to_string()],
-            adapter: None,
+            ..Default::default()
         };
 
         let result = run_session(&agent, &output_path, "unused").await.unwrap();
@@ -325,7 +385,7 @@ mod tests {
         let agent = AgentConfig {
             command: "sleep".to_string(),
             args: vec!["0.1".to_string()],
-            adapter: None,
+            ..Default::default()
         };
 
         let result = run_session(&agent, &output_path, "unused").await.unwrap();
@@ -340,7 +400,7 @@ mod tests {
         let agent = AgentConfig {
             command: "echo".to_string(),
             args: vec!["hello".to_string()],
-            adapter: None,
+            ..Default::default()
         };
 
         let err = run_session(
@@ -351,5 +411,47 @@ mod tests {
         .await
         .unwrap_err();
         assert!(matches!(err, SessionError::OutputFile { .. }));
+    }
+
+    #[tokio::test]
+    async fn test_run_session_prompt_via_stdin() {
+        let dir = tempfile::tempdir().unwrap();
+        let output_path = dir.path().join("stdin-test.jsonl");
+
+        let agent = AgentConfig {
+            command: "cat".to_string(),
+            args: vec![],
+            prompt_via: PromptVia::Stdin,
+            ..Default::default()
+        };
+
+        let result = run_session(&agent, &output_path, "hello from stdin")
+            .await
+            .unwrap();
+
+        assert_eq!(result.exit_code, Some(0));
+        let contents = std::fs::read_to_string(&output_path).unwrap();
+        assert_eq!(contents, "hello from stdin");
+    }
+
+    #[tokio::test]
+    async fn test_run_session_prompt_via_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let output_path = dir.path().join("file-test.jsonl");
+
+        let agent = AgentConfig {
+            command: "sh".to_string(),
+            args: vec!["-c".to_string(), "cat {prompt_file}".to_string()],
+            prompt_via: PromptVia::File,
+            ..Default::default()
+        };
+
+        let result = run_session(&agent, &output_path, "hello from file")
+            .await
+            .unwrap();
+
+        assert_eq!(result.exit_code, Some(0));
+        let contents = std::fs::read_to_string(&output_path).unwrap();
+        assert_eq!(contents, "hello from file");
     }
 }

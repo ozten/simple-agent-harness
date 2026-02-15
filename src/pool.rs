@@ -525,7 +525,7 @@ mod tests {
         AgentConfig {
             command: "echo".to_string(),
             args: vec!["hello from worker".to_string()],
-            adapter: None,
+            ..Default::default()
         }
     }
 
@@ -659,7 +659,7 @@ mod tests {
         let agent = AgentConfig {
             command: "sh".to_string(),
             args: vec!["-c".to_string(), "exit 1".to_string()],
-            adapter: None,
+            ..Default::default()
         };
 
         let (worker_id, assignment_id) = pool
@@ -736,7 +736,7 @@ mod tests {
         let agent = AgentConfig {
             command: "sleep".to_string(),
             args: vec!["10".to_string()],
-            adapter: None,
+            ..Default::default()
         };
 
         // First spawn succeeds
@@ -768,7 +768,7 @@ mod tests {
         let agent = AgentConfig {
             command: "sleep".to_string(),
             args: vec!["10".to_string()],
-            adapter: None,
+            ..Default::default()
         };
 
         pool.spawn_worker("beads-active", &agent, "test", &output_dir, &conn)

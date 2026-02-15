@@ -638,23 +638,58 @@ async fn run_session_with_watchdog(
                 source: e,
             })?;
 
+    // For file mode: write prompt to a temp file
+    let prompt_file = if config.agent.prompt_via == crate::config::PromptVia::File {
+        let tmp =
+            tempfile::NamedTempFile::new().map_err(|e| session::SessionError::Io { source: e })?;
+        std::fs::write(tmp.path(), prompt).map_err(|e| session::SessionError::Io { source: e })?;
+        Some(tmp)
+    } else {
+        None
+    };
+
     let args = config
         .agent
         .args
         .iter()
-        .map(|arg| arg.replace("{prompt}", prompt))
+        .map(|arg| {
+            let mut result = arg.replace("{prompt}", prompt);
+            if let Some(ref pf) = prompt_file {
+                result = result.replace("{prompt_file}", &pf.path().display().to_string());
+            }
+            result
+        })
         .collect::<Vec<_>>();
+
+    // For stdin mode, pipe stdin instead of null
+    let stdin_mode = if config.agent.prompt_via == crate::config::PromptVia::Stdin {
+        std::process::Stdio::piped()
+    } else {
+        std::process::Stdio::null()
+    };
 
     let start = std::time::Instant::now();
 
     let mut child = tokio::process::Command::new(&config.agent.command)
         .args(&args)
-        .stdin(std::process::Stdio::null())
+        .stdin(stdin_mode)
         .stdout(std::process::Stdio::from(output_file))
         .stderr(std::process::Stdio::from(output_file_stderr))
         .process_group(0)
         .spawn()
         .map_err(|e| session::SessionError::Spawn { source: e })?;
+
+    // For stdin mode: write the prompt to the child's stdin, then close it
+    if config.agent.prompt_via == crate::config::PromptVia::Stdin {
+        if let Some(mut stdin) = child.stdin.take() {
+            use tokio::io::AsyncWriteExt;
+            stdin
+                .write_all(prompt.as_bytes())
+                .await
+                .map_err(|e| session::SessionError::Io { source: e })?;
+            // Dropping stdin closes the pipe, signaling EOF to the child
+        }
+    }
 
     let pid = child.id().unwrap_or(0);
     tracing::info!(pid, "agent subprocess started");
@@ -692,6 +727,9 @@ async fn run_session_with_watchdog(
     }
 
     signals.clear_child_pid();
+
+    // Clean up temp prompt file if created
+    drop(prompt_file);
 
     let duration = start.elapsed();
     let output_bytes = std::fs::metadata(output_path).map(|m| m.len()).unwrap_or(0);
@@ -766,7 +804,7 @@ mod tests {
             agent: AgentConfig {
                 command: command.to_string(),
                 args,
-                adapter: None,
+                ..Default::default()
             },
             watchdog: WatchdogConfig {
                 check_interval_secs: 60,
