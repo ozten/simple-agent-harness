@@ -1,29 +1,39 @@
-## Last Session: Implement integration circuit breaker and failure handling (yg5)
+## Last Session: Add agent.coding and agent.integration config sections (hxq)
 
 ### Completed
-- Added `TrippedFailure` struct to `src/integrator.rs` carrying escalation info: bead_id, error_summary, worktree_path, attempts
-- `TrippedFailure::display_message()` — formats ANSI red/bold HUMAN REVIEW NEEDED message per spec (lines 638-644)
-- `TrippedFailure::failure_notes()` — generates notes string for `bd update`
-- `CircuitBreaker::check_tripped()` — returns `Some(TrippedFailure)` when tripped, `None` otherwise
-- Updated `src/coordinator.rs` integration failure path to use CircuitBreaker:
-  - On success: reset circuit breaker, reset worker (as before)
-  - On failure (retries remain): record attempt, log with retry state, reset worker for retry
-  - On failure (tripped): escalate — print HUMAN REVIEW NEEDED to stderr, run `bd update --status=needs_review --notes=...`, preserve worktree (skip cleanup/reset)
-- Added `handle_tripped_failure()` fn in coordinator: prints ANSI message, logs, calls `bd update`
-- Added 7 new tests (628 total passing):
-  - `test_check_tripped_returns_none_when_not_tripped`
-  - `test_check_tripped_returns_none_when_closed`
-  - `test_check_tripped_returns_some_when_tripped`
-  - `test_tripped_failure_display_message`
-  - `test_tripped_failure_notes`
-  - `test_handle_tripped_failure_does_not_panic`
-  - `test_circuit_breaker_integration_with_coordinator_logic`
+- Added `AgentPhaseConfig` struct with optional command/args/adapter/prompt_via fields
+- Added `coding: Option<AgentPhaseConfig>` and `integration: Option<AgentPhaseConfig>` to `AgentConfig`
+- Added `ResolvedAgentConfig` struct for fully-resolved agent configs (no optional fields)
+- Added `resolved_coding()` method: coding → flat agent fallback
+- Added `resolved_integration()` method: integration → coding → flat agent fallback
+- Added `uses_legacy_flat_config()` helper
+- Added deprecation warning in `warn_deprecated_paths()` when flat [agent] fields are used alongside [agent.coding]/[agent.integration]
+- Updated `validate()` to validate both coding and integration resolved configs
+- Updated `runner.rs` (`run` and `run_session_with_watchdog`) to use `resolved_coding()`
+- Updated `coordinator.rs` to use `resolved_coding()` for spawning workers
+- Updated `pool.rs` (`spawn_worker` and `spawn_agent_in_worktree`) to accept `&ResolvedAgentConfig`
+- Updated `main.rs` debug output to show resolved coding and integration configs
+- Added 11 new tests (639 total passing):
+  - test_default_agent_has_no_phase_configs
+  - test_resolved_coding_falls_back_to_flat_agent
+  - test_resolved_integration_falls_back_to_coding_then_flat
+  - test_load_agent_coding_from_toml
+  - test_load_agent_coding_and_integration_from_toml
+  - test_resolved_coding_overrides_flat_fields
+  - test_resolved_integration_inherits_from_coding
+  - test_resolved_integration_partial_override
+  - test_uses_legacy_flat_config
+  - test_validate_resolves_agent_for_both_phases
+  - test_validate_catches_bad_integration_command
 
 ### Key Files Modified
-- `src/integrator.rs` — added TrippedFailure struct, check_tripped method, 5 new tests
-- `src/coordinator.rs` — circuit breaker in coordinator loop, handle_tripped_failure fn, 2 new tests
+- `src/config.rs` — AgentPhaseConfig, ResolvedAgentConfig, resolution methods, deprecation warning, validation
+- `src/runner.rs` — uses resolved_coding() for the main loop
+- `src/coordinator.rs` — uses resolved_coding() for spawning workers
+- `src/pool.rs` — spawn_worker/spawn_agent_in_worktree accept ResolvedAgentConfig
+- `src/main.rs` — debug output shows resolved agent configs
 
 ### Suggested Next Tasks
-- **hxq**: Add agent.coding and agent.integration config sections (P2, blocks m5l)
+- **m5l**: Implement integration agent spawning for compiler fixes (P1, was blocked by hxq) — now unblocked
 - **jkn**: Implement blacksmith migrate --consolidate command (P2)
-- **dfe**: Implement git revert rollback with entanglement tracking (P2, was blocked by yg5)
+- **ee2**: Implement graceful metric degradation for adapter limitations (P2)

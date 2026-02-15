@@ -2,7 +2,7 @@
 ///
 /// Each worker runs in its own git worktree and progresses through states:
 /// idle -> coding -> completed/failed. Completed workers are queued for integration.
-use crate::config::{AgentConfig, WorkersConfig};
+use crate::config::{ResolvedAgentConfig, WorkersConfig};
 use crate::db;
 use crate::worktree;
 use rusqlite::Connection;
@@ -185,7 +185,7 @@ impl WorkerPool {
     pub async fn spawn_worker(
         &mut self,
         bead_id: &str,
-        agent_config: &AgentConfig,
+        agent_config: &ResolvedAgentConfig,
         prompt: &str,
         output_dir: &Path,
         db_conn: &Connection,
@@ -408,7 +408,7 @@ impl WorkerPool {
 /// that resolves to the session outcome.
 fn spawn_agent_in_worktree(
     worker_id: u32,
-    agent_config: &AgentConfig,
+    agent_config: &ResolvedAgentConfig,
     worktree_path: &Path,
     output_path: &Path,
     prompt: &str,
@@ -469,7 +469,7 @@ fn spawn_agent_in_worktree(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{AgentConfig, WorkersConfig};
+    use crate::config::{ResolvedAgentConfig, WorkersConfig};
     use std::process::Command as StdCommand;
     use tempfile::TempDir;
 
@@ -521,11 +521,12 @@ mod tests {
         dir
     }
 
-    fn test_agent_config() -> AgentConfig {
-        AgentConfig {
+    fn test_agent_config() -> ResolvedAgentConfig {
+        ResolvedAgentConfig {
             command: "echo".to_string(),
             args: vec!["hello from worker".to_string()],
-            ..Default::default()
+            adapter: None,
+            prompt_via: crate::config::PromptVia::Arg,
         }
     }
 
@@ -656,10 +657,11 @@ mod tests {
         let db_path = dir.path().join("test.db");
         let conn = db::open_or_create(&db_path).unwrap();
 
-        let agent = AgentConfig {
+        let agent = ResolvedAgentConfig {
             command: "sh".to_string(),
             args: vec!["-c".to_string(), "exit 1".to_string()],
-            ..Default::default()
+            adapter: None,
+            prompt_via: crate::config::PromptVia::Arg,
         };
 
         let (worker_id, assignment_id) = pool
@@ -733,10 +735,11 @@ mod tests {
         let conn = db::open_or_create(&db_path).unwrap();
 
         // Use sleep so it doesn't finish immediately
-        let agent = AgentConfig {
+        let agent = ResolvedAgentConfig {
             command: "sleep".to_string(),
             args: vec!["10".to_string()],
-            ..Default::default()
+            adapter: None,
+            prompt_via: crate::config::PromptVia::Arg,
         };
 
         // First spawn succeeds
@@ -765,10 +768,11 @@ mod tests {
 
         let db_path = dir.path().join("test.db");
         let conn = db::open_or_create(&db_path).unwrap();
-        let agent = AgentConfig {
+        let agent = ResolvedAgentConfig {
             command: "sleep".to_string(),
             args: vec!["10".to_string()],
-            ..Default::default()
+            adapter: None,
+            prompt_via: crate::config::PromptVia::Arg,
         };
 
         pool.spawn_worker("beads-active", &agent, "test", &output_dir, &conn)

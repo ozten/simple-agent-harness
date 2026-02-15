@@ -157,6 +157,108 @@ pub struct AgentConfig {
     /// - "file": write prompt to a temp file, substitute `{prompt_file}` in args
     #[serde(default)]
     pub prompt_via: PromptVia,
+    /// Phase-specific config for coding tasks. If set, takes precedence over
+    /// the flat [agent] fields for coding sessions.
+    pub coding: Option<AgentPhaseConfig>,
+    /// Phase-specific config for integration tasks. Falls back to coding if omitted.
+    pub integration: Option<AgentPhaseConfig>,
+}
+
+/// Phase-specific agent configuration (used in [agent.coding] and [agent.integration]).
+/// All fields are optional; unset fields inherit from the parent [agent] section.
+#[derive(Debug, Deserialize, Clone, Default)]
+#[serde(default)]
+pub struct AgentPhaseConfig {
+    pub command: Option<String>,
+    pub args: Option<Vec<String>>,
+    pub adapter: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_prompt_via")]
+    pub prompt_via: Option<PromptVia>,
+}
+
+impl AgentConfig {
+    /// Resolve the effective agent config for coding tasks.
+    /// If [agent.coding] is set, its fields override the flat [agent] fields.
+    /// If [agent.coding] is not set, returns the flat [agent] fields.
+    pub fn resolved_coding(&self) -> ResolvedAgentConfig {
+        match &self.coding {
+            Some(phase) => ResolvedAgentConfig {
+                command: phase
+                    .command
+                    .as_deref()
+                    .unwrap_or(&self.command)
+                    .to_string(),
+                args: phase.args.clone().unwrap_or_else(|| self.args.clone()),
+                adapter: phase.adapter.clone().or_else(|| self.adapter.clone()),
+                prompt_via: phase
+                    .prompt_via
+                    .clone()
+                    .unwrap_or_else(|| self.prompt_via.clone()),
+            },
+            None => ResolvedAgentConfig {
+                command: self.command.clone(),
+                args: self.args.clone(),
+                adapter: self.adapter.clone(),
+                prompt_via: self.prompt_via.clone(),
+            },
+        }
+    }
+
+    /// Resolve the effective agent config for integration tasks.
+    /// Falls back: [agent.integration] → [agent.coding] → flat [agent].
+    pub fn resolved_integration(&self) -> ResolvedAgentConfig {
+        match &self.integration {
+            Some(phase) => {
+                let coding = self.resolved_coding();
+                ResolvedAgentConfig {
+                    command: phase
+                        .command
+                        .as_deref()
+                        .unwrap_or(&coding.command)
+                        .to_string(),
+                    args: phase.args.clone().unwrap_or(coding.args),
+                    adapter: phase.adapter.clone().or(coding.adapter),
+                    prompt_via: phase.prompt_via.clone().unwrap_or(coding.prompt_via),
+                }
+            }
+            None => self.resolved_coding(),
+        }
+    }
+
+    /// Returns true if the legacy flat [agent] section is being used
+    /// (i.e., no [agent.coding] section is configured).
+    pub fn uses_legacy_flat_config(&self) -> bool {
+        self.coding.is_none() && self.integration.is_none()
+    }
+}
+
+/// Fully resolved agent configuration with no optional fields.
+/// Produced by `resolved_coding()` / `resolved_integration()`.
+#[derive(Debug, Clone)]
+pub struct ResolvedAgentConfig {
+    pub command: String,
+    pub args: Vec<String>,
+    pub adapter: Option<String>,
+    pub prompt_via: PromptVia,
+}
+
+fn deserialize_optional_prompt_via<'de, D>(deserializer: D) -> Result<Option<PromptVia>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let s: Option<String> = Option::deserialize(deserializer)?;
+    match s {
+        None => Ok(None),
+        Some(s) => match s.as_str() {
+            "arg" => Ok(Some(PromptVia::Arg)),
+            "stdin" => Ok(Some(PromptVia::Stdin)),
+            "file" => Ok(Some(PromptVia::File)),
+            other => Err(serde::de::Error::custom(format!(
+                "invalid prompt_via '{}': expected 'arg', 'stdin', or 'file'",
+                other
+            ))),
+        },
+    }
 }
 
 /// How the assembled prompt is delivered to the agent subprocess.
@@ -521,6 +623,18 @@ impl HarnessConfig {
                 self.session.output_dir.display()
             );
         }
+        // Warn about legacy flat [agent] section when phase-specific sections exist
+        if self.agent.coding.is_some() || self.agent.integration.is_some() {
+            let agent_defaults = AgentConfig::default();
+            if self.agent.command != agent_defaults.command
+                || self.agent.args != agent_defaults.args
+            {
+                tracing::warn!(
+                    "flat [agent] command/args are deprecated when [agent.coding] or [agent.integration] is set; \
+                     migrate all agent settings to [agent.coding]/[agent.integration]"
+                );
+            }
+        }
     }
 
     /// Validate the resolved configuration, returning a list of actionable error messages.
@@ -538,24 +652,28 @@ impl HarnessConfig {
 
         // output_dir validation removed — session output now uses storage.data_dir
 
-        // agent.command must be found on PATH (or be an absolute/relative path that exists)
-        if !self.agent.command.is_empty() {
-            let cmd = Path::new(&self.agent.command);
-            if cmd.is_absolute() || self.agent.command.contains('/') {
-                if !cmd.exists() {
+        // Validate resolved agent configs (coding + integration phases)
+        let coding = self.agent.resolved_coding();
+        let integration = self.agent.resolved_integration();
+        for (label, resolved) in [("coding", &coding), ("integration", &integration)] {
+            if !resolved.command.is_empty() {
+                let cmd = Path::new(&resolved.command);
+                if cmd.is_absolute() || resolved.command.contains('/') {
+                    if !cmd.exists() {
+                        errors.push(format!(
+                            "agent.{label}: binary '{}' not found at specified path",
+                            resolved.command
+                        ));
+                    }
+                } else if !command_in_path(&resolved.command) {
                     errors.push(format!(
-                        "agent.command: binary '{}' not found at specified path",
-                        self.agent.command
+                        "agent.{label}: binary '{}' not found in PATH",
+                        resolved.command
                     ));
                 }
-            } else if !command_in_path(&self.agent.command) {
-                errors.push(format!(
-                    "agent.command: binary '{}' not found in PATH",
-                    self.agent.command
-                ));
+            } else {
+                errors.push(format!("agent.{label}: command must not be empty"));
             }
-        } else {
-            errors.push("agent.command: must not be empty".to_string());
         }
 
         // Timeout values must be positive
@@ -676,6 +794,8 @@ impl Default for AgentConfig {
             ],
             adapter: None,
             prompt_via: PromptVia::default(),
+            coding: None,
+            integration: None,
         }
     }
 }
@@ -1226,7 +1346,7 @@ compress_after = 10
         let errors = config.validate();
         assert!(errors
             .iter()
-            .any(|e| e.contains("agent.command") && e.contains("must not be empty")));
+            .any(|e| e.contains("command must not be empty")));
     }
 
     #[test]
@@ -1234,9 +1354,7 @@ compress_after = 10
         let mut config = valid_config();
         config.agent.command = "nonexistent_binary_xyz_12345".to_string();
         let errors = config.validate();
-        assert!(errors
-            .iter()
-            .any(|e| e.contains("agent.command") && e.contains("not found in PATH")));
+        assert!(errors.iter().any(|e| e.contains("not found in PATH")));
     }
 
     #[test]
@@ -1246,7 +1364,7 @@ compress_after = 10
         let errors = config.validate();
         assert!(errors
             .iter()
-            .any(|e| e.contains("agent.command") && e.contains("not found at specified path")));
+            .any(|e| e.contains("not found at specified path")));
     }
 
     #[test]
@@ -1688,5 +1806,218 @@ prompt_via = "invalid"
         .unwrap();
         let err = HarnessConfig::load(&path).unwrap_err();
         assert!(matches!(err, ConfigError::Parse { .. }));
+    }
+
+    // --- agent.coding / agent.integration tests ---
+
+    #[test]
+    fn test_default_agent_has_no_phase_configs() {
+        let config = HarnessConfig::default();
+        assert!(config.agent.coding.is_none());
+        assert!(config.agent.integration.is_none());
+    }
+
+    #[test]
+    fn test_resolved_coding_falls_back_to_flat_agent() {
+        let config = HarnessConfig::default();
+        let resolved = config.agent.resolved_coding();
+        assert_eq!(resolved.command, "claude");
+        assert_eq!(resolved.args.len(), 6);
+        assert!(resolved.adapter.is_none());
+        assert_eq!(resolved.prompt_via, PromptVia::Arg);
+    }
+
+    #[test]
+    fn test_resolved_integration_falls_back_to_coding_then_flat() {
+        let config = HarnessConfig::default();
+        let resolved = config.agent.resolved_integration();
+        // With no coding or integration, falls back to flat agent
+        assert_eq!(resolved.command, "claude");
+        assert_eq!(resolved.args.len(), 6);
+    }
+
+    #[test]
+    fn test_load_agent_coding_from_toml() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("blacksmith.toml");
+        std::fs::write(
+            &path,
+            r#"
+[agent.coding]
+command = "claude"
+args = ["-p", "{prompt}", "--verbose", "--output-format", "stream-json"]
+adapter = "claude"
+"#,
+        )
+        .unwrap();
+        let config = HarnessConfig::load(&path).unwrap();
+        assert!(config.agent.coding.is_some());
+        let coding = config.agent.coding.unwrap();
+        assert_eq!(coding.command, Some("claude".to_string()));
+        assert_eq!(coding.args.unwrap().len(), 5);
+        assert_eq!(coding.adapter, Some("claude".to_string()));
+    }
+
+    #[test]
+    fn test_load_agent_coding_and_integration_from_toml() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("blacksmith.toml");
+        std::fs::write(
+            &path,
+            r#"
+[agent.coding]
+command = "claude"
+args = ["-p", "{prompt}", "--verbose", "--output-format", "stream-json"]
+adapter = "claude"
+
+[agent.integration]
+command = "claude"
+args = ["-p", "{prompt}", "--output-format", "stream-json"]
+adapter = "claude"
+"#,
+        )
+        .unwrap();
+        let config = HarnessConfig::load(&path).unwrap();
+        assert!(config.agent.coding.is_some());
+        assert!(config.agent.integration.is_some());
+
+        let resolved_coding = config.agent.resolved_coding();
+        assert_eq!(resolved_coding.command, "claude");
+        assert_eq!(resolved_coding.args.len(), 5);
+
+        let resolved_integration = config.agent.resolved_integration();
+        assert_eq!(resolved_integration.command, "claude");
+        assert_eq!(resolved_integration.args.len(), 4); // fewer args
+    }
+
+    #[test]
+    fn test_resolved_coding_overrides_flat_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("blacksmith.toml");
+        std::fs::write(
+            &path,
+            r#"
+[agent]
+command = "legacy-agent"
+args = ["--legacy"]
+
+[agent.coding]
+command = "claude"
+args = ["-p", "{prompt}"]
+"#,
+        )
+        .unwrap();
+        let config = HarnessConfig::load(&path).unwrap();
+        let resolved = config.agent.resolved_coding();
+        assert_eq!(resolved.command, "claude");
+        assert_eq!(resolved.args, vec!["-p", "{prompt}"]);
+    }
+
+    #[test]
+    fn test_resolved_integration_inherits_from_coding() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("blacksmith.toml");
+        std::fs::write(
+            &path,
+            r#"
+[agent.coding]
+command = "claude"
+args = ["-p", "{prompt}", "--verbose"]
+adapter = "claude"
+prompt_via = "stdin"
+"#,
+        )
+        .unwrap();
+        let config = HarnessConfig::load(&path).unwrap();
+        // No [agent.integration] set — should fall back to coding
+        let resolved = config.agent.resolved_integration();
+        assert_eq!(resolved.command, "claude");
+        assert_eq!(resolved.args, vec!["-p", "{prompt}", "--verbose"]);
+        assert_eq!(resolved.adapter, Some("claude".to_string()));
+        assert_eq!(resolved.prompt_via, PromptVia::Stdin);
+    }
+
+    #[test]
+    fn test_resolved_integration_partial_override() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("blacksmith.toml");
+        std::fs::write(
+            &path,
+            r#"
+[agent.coding]
+command = "claude"
+args = ["-p", "{prompt}", "--verbose"]
+adapter = "claude"
+
+[agent.integration]
+args = ["-p", "{prompt}"]
+"#,
+        )
+        .unwrap();
+        let config = HarnessConfig::load(&path).unwrap();
+        let resolved = config.agent.resolved_integration();
+        // command falls back to coding
+        assert_eq!(resolved.command, "claude");
+        // args overridden by integration
+        assert_eq!(resolved.args, vec!["-p", "{prompt}"]);
+        // adapter falls back to coding
+        assert_eq!(resolved.adapter, Some("claude".to_string()));
+    }
+
+    #[test]
+    fn test_uses_legacy_flat_config() {
+        let config = HarnessConfig::default();
+        assert!(config.agent.uses_legacy_flat_config());
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("blacksmith.toml");
+        std::fs::write(
+            &path,
+            r#"
+[agent.coding]
+command = "claude"
+"#,
+        )
+        .unwrap();
+        let config = HarnessConfig::load(&path).unwrap();
+        assert!(!config.agent.uses_legacy_flat_config());
+    }
+
+    #[test]
+    fn test_validate_resolves_agent_for_both_phases() {
+        let mut config = valid_config();
+        // Set coding to a valid command, integration inherits
+        config.agent.coding = Some(AgentPhaseConfig {
+            command: Some("sh".to_string()),
+            ..Default::default()
+        });
+        let errors = config.validate();
+        // Should validate both coding and integration (both resolve to "sh")
+        assert!(
+            !errors
+                .iter()
+                .any(|e| e.contains("agent.coding") || e.contains("agent.integration")),
+            "expected no agent errors, got: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn test_validate_catches_bad_integration_command() {
+        let mut config = valid_config();
+        config.agent.coding = Some(AgentPhaseConfig {
+            command: Some("sh".to_string()),
+            ..Default::default()
+        });
+        config.agent.integration = Some(AgentPhaseConfig {
+            command: Some("nonexistent_binary_xyz_12345".to_string()),
+            ..Default::default()
+        });
+        let errors = config.validate();
+        assert!(errors
+            .iter()
+            .any(|e| e.contains("agent.integration") && e.contains("not found")));
+        // coding should still be valid
+        assert!(!errors.iter().any(|e| e.contains("agent.coding")));
     }
 }

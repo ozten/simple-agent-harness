@@ -131,9 +131,12 @@ pub async fn run(
         })
         .collect();
 
+    // Resolve the coding agent config (used for the main loop)
+    let resolved_agent = config.agent.resolved_coding();
+
     // Create adapter for JSONL metric extraction
     let adapter_name =
-        adapters::resolve_adapter_name(config.agent.adapter.as_deref(), &config.agent.command);
+        adapters::resolve_adapter_name(resolved_agent.adapter.as_deref(), &resolved_agent.command);
     let adapter = adapters::create_adapter(adapter_name);
     tracing::info!(adapter = adapter_name, "using agent adapter");
 
@@ -561,6 +564,8 @@ async fn run_session_with_watchdog(
     prompt: &str,
     signals: &SignalHandler,
 ) -> Result<SessionResult, session::SessionError> {
+    let resolved_agent = config.agent.resolved_coding();
+
     // We need to create the output file first for the watchdog to monitor
     let session_fut = session::run_session(&config.agent, output_path, prompt);
 
@@ -639,7 +644,7 @@ async fn run_session_with_watchdog(
             })?;
 
     // For file mode: write prompt to a temp file
-    let prompt_file = if config.agent.prompt_via == crate::config::PromptVia::File {
+    let prompt_file = if resolved_agent.prompt_via == crate::config::PromptVia::File {
         let tmp =
             tempfile::NamedTempFile::new().map_err(|e| session::SessionError::Io { source: e })?;
         std::fs::write(tmp.path(), prompt).map_err(|e| session::SessionError::Io { source: e })?;
@@ -648,8 +653,7 @@ async fn run_session_with_watchdog(
         None
     };
 
-    let args = config
-        .agent
+    let args = resolved_agent
         .args
         .iter()
         .map(|arg| {
@@ -662,7 +666,7 @@ async fn run_session_with_watchdog(
         .collect::<Vec<_>>();
 
     // For stdin mode, pipe stdin instead of null
-    let stdin_mode = if config.agent.prompt_via == crate::config::PromptVia::Stdin {
+    let stdin_mode = if resolved_agent.prompt_via == crate::config::PromptVia::Stdin {
         std::process::Stdio::piped()
     } else {
         std::process::Stdio::null()
@@ -670,7 +674,7 @@ async fn run_session_with_watchdog(
 
     let start = std::time::Instant::now();
 
-    let mut child = tokio::process::Command::new(&config.agent.command)
+    let mut child = tokio::process::Command::new(&resolved_agent.command)
         .args(&args)
         .stdin(stdin_mode)
         .stdout(std::process::Stdio::from(output_file))
@@ -680,7 +684,7 @@ async fn run_session_with_watchdog(
         .map_err(|e| session::SessionError::Spawn { source: e })?;
 
     // For stdin mode: write the prompt to the child's stdin, then close it
-    if config.agent.prompt_via == crate::config::PromptVia::Stdin {
+    if resolved_agent.prompt_via == crate::config::PromptVia::Stdin {
         if let Some(mut stdin) = child.stdin.take() {
             use tokio::io::AsyncWriteExt;
             stdin

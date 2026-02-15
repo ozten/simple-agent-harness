@@ -248,8 +248,9 @@ pub async fn run(
                     None => continue,
                 };
 
+                let resolved_agent = config.agent.resolved_coding();
                 match pool
-                    .spawn_worker(bead_id, &config.agent, &prompt, &output_dir, &db_conn)
+                    .spawn_worker(bead_id, &resolved_agent, &prompt, &output_dir, &db_conn)
                     .await
                 {
                     Ok((worker_id, assignment_id)) => {

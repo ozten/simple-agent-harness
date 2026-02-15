@@ -470,9 +470,17 @@ async fn main() {
         );
         println!("  data_dir.counter = {}", data_dir.counter().display());
         println!("  data_dir.status = {}", data_dir.status().display());
-        println!("  agent.command = {}", config.agent.command);
-        println!("  agent.args = {:?}", config.agent.args);
-        println!("  agent.prompt_via = {}", config.agent.prompt_via);
+        let coding = config.agent.resolved_coding();
+        let integration = config.agent.resolved_integration();
+        println!("  agent.coding.command = {}", coding.command);
+        println!("  agent.coding.args = {:?}", coding.args);
+        println!("  agent.coding.prompt_via = {}", coding.prompt_via);
+        println!("  agent.integration.command = {}", integration.command);
+        println!("  agent.integration.args = {:?}", integration.args);
+        println!(
+            "  agent.integration.prompt_via = {}",
+            integration.prompt_via
+        );
         println!(
             "  watchdog.check_interval_secs = {}",
             config.watchdog.check_interval_secs
