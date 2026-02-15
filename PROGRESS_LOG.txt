@@ -1378,3 +1378,29 @@
 - **wck**: Implement blacksmith gc command (P2)
 - **hxq**: Add agent.coding and agent.integration config sections (P2)
 - **jkn**: Implement blacksmith migrate --consolidate command (P2)
+
+--- 2026-02-15 16:20:59 | simple-agent-harness-wck ---
+## Last Session: Implement blacksmith gc command (wck)
+
+### Completed
+- Created `src/gc.rs` module with manual garbage collection for session files
+- Added `Gc` command variant to `Commands` enum in `main.rs` with `--dry-run` and `--aggressive` flags
+- Wired up `gc::handle_gc()` in main command dispatch
+- Gc modes:
+  - Normal: runs retention (delete beyond policy) + compression (compress files older than compress_after)
+  - `--dry-run`: reports what would be cleaned without making changes
+  - `--aggressive`: compresses ALL uncompressed session files (not just beyond compress_after), deletes beyond retention
+- Reuses existing `compress::compress_old_sessions` for normal mode, custom compress for aggressive mode
+- Reads current iteration from counter file for compression threshold calculations
+- CLI output shows file counts and names for deleted/compressed files
+- Added 8 tests: dry_run, normal_mode, aggressive, nothing_to_clean, already_compressed, missing_dir, days_retention, aggressive_with_retention
+- All 612 tests pass, clippy clean, fmt clean
+
+### Key Files Modified
+- `src/gc.rs` — new module: GcReport, run_gc, handle_gc, helper functions
+- `src/main.rs` — added `mod gc`, `Gc` command variant, handler dispatch
+
+### Suggested Next Tasks
+- **hxq**: Add agent.coding and agent.integration config sections (P2)
+- **jkn**: Implement blacksmith migrate --consolidate command (P2)
+- **ee2**: Implement graceful metric degradation for adapter limitations (P2)

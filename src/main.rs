@@ -6,6 +6,7 @@ mod config;
 mod coordinator;
 mod data_dir;
 mod db;
+mod gc;
 mod hooks;
 mod improve;
 mod ingest;
@@ -96,6 +97,15 @@ enum Commands {
     Metrics {
         #[command(subcommand)]
         action: MetricsAction,
+    },
+    /// Run session file cleanup (retention + compression)
+    Gc {
+        /// Show what would be cleaned without making changes
+        #[arg(long)]
+        dry_run: bool,
+        /// Compress all eligible files and delete beyond retention
+        #[arg(long)]
+        aggressive: bool,
     },
 }
 
@@ -300,6 +310,27 @@ async fn main() {
             eprintln!("Error: {e}");
             std::process::exit(1);
         }
+        return;
+    }
+
+    if let Some(Commands::Gc {
+        dry_run,
+        aggressive,
+    }) = &cli.command
+    {
+        let config_for_gc = HarnessConfig::load(&cli.config).unwrap_or_default();
+        let dd = data_dir::DataDir::new(&config_for_gc.storage.data_dir);
+        if let Err(e) = dd.ensure_initialized() {
+            eprintln!("Error initializing data directory: {e}");
+            std::process::exit(1);
+        }
+        gc::handle_gc(
+            &dd,
+            &config_for_gc.storage.retention,
+            config_for_gc.storage.compress_after,
+            *dry_run,
+            *aggressive,
+        );
         return;
     }
 
