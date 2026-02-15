@@ -1,26 +1,25 @@
-## Last Session: Implement metrics export, query, and events dump commands (simple-agent-harness-odo)
+## Last Session: PRD-to-beads decomposition of SPEC-v3-agents.md
 
 ### Completed
-- Added `blacksmith metrics export [--format csv|json]` CLI subcommand
-  - JSON format outputs pretty-printed array of observation objects with session, ts, duration, outcome, and nested data
-  - CSV format dynamically discovers all data keys, outputs header + rows with flattened columns
-  - Error on unknown format
-- Added `blacksmith metrics query <kind> [--last N] [--aggregate avg|trend]` CLI subcommand
-  - Default list mode: shows session, timestamp, value for each matching event
-  - `--aggregate avg`: computes mean of numeric values
-  - `--aggregate trend`: shows values with direction indicator (UP/DOWN/STABLE)
-  - `--last N`: limits to N most recent sessions
-- Added `blacksmith metrics events [--session N]` CLI subcommand
-  - Dumps all raw events with ID, session, timestamp, kind, value, tags
-  - `--session N` filters to a single session
-- Added 3 new db functions: `all_observations()`, `all_events()`, `events_by_kind_last()`
-- Added Export/Query/Events variants to MetricsAction enum, wired in main.rs match
-- Added 17 new tests covering all three commands (edge cases: no db, empty db, various formats/modes, error cases)
-- All 393 tests pass, clippy clean (pre-existing warnings only), fmt applied
+- Decomposed SPEC-v3-agents.md (Milestones 5-9) into 37 beads with full dependency graph
+- Milestone 5 (Data Directory & Lifecycle): 6 beads (ib1, 1u6, x1a, 503, wck, jkn)
+- Milestone 6 (Agent Adapters): 6 beads (wi2, e2l, 6hk, 9jw, ee2, zb5)
+- Milestone 7 (Prompt Delivery & Additional Adapters): 6 beads (tzx, hxq, ec1, y74, 2su, hhv)
+- Milestone 8 (Multi-Agent Coordinator & Worktrees): 9 beads (zl7, mjx, 1jv, f9m, 1ky, d2q, wdo, 3mu, dgh)
+- Milestone 9 (Integration Loop, Reconciliation & Time Estimation): 10 beads (3pa, v6v, m5l, yg5, 3su, 7ed, dfe, ml7, 506, c37)
+- All dependencies wired: 30 blocked, 7 ready to work
 
 ### Current State
-- All metrics CLI commands from PRD are now implemented: log, status, targets, migrate, rebuild, export, query, events
-- The metrics subsystem is feature-complete per SPEC-v2-metrics.md
+- 37 open beads, 7 ready (no blockers):
+  1. [P1] ib1: Add storage config and .blacksmith/ directory initialization
+  2. [P1] wi2: Define AgentAdapter trait and extract Claude adapter
+  3. [P1] zl7: Add coordinator SQLite tables for multi-agent state
+  4. [P1] mjx: Implement affected set parsing and glob overlap detection
+  5. [P1] v6v: Implement task_manifest.toml parsing and manifest application
+  6. [P2] tzx: Implement prompt_via config with arg/stdin/file delivery modes
+  7. [P2] hxq: Add agent.coding and agent.integration config sections
 
 ### Suggested Next Tasks
-- Check `bd ready` for the next available task
+- Start with ib1 (storage config) — it unblocks 4 downstream beads (1u6, x1a, jkn, 1jv)
+- wi2 (AgentAdapter trait) can be done in parallel — it unblocks 7 downstream beads
+- zl7 (coordinator tables) can also start in parallel — it unblocks f9m, dgh
