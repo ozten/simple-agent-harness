@@ -1,14 +1,16 @@
-## Last Session: Closed simple-agent-harness-cqf (Surface cycle warnings in CLI status output)
+## Last Session: PRD Decomposition (2026-02-15)
 
 ### What Was Done
-- Updated `build_progress_string()` in `src/runner.rs` to surface cycle warnings in the `blacksmith run` progress line:
-  - Progress count now says "schedulable beads" when cycles exist (matching PRD format)
-  - Cycle warning now includes "beads" count and fix hint: `⚠ N beads in dependency cycle — run bd dep cycles to fix`
-- The `--status` output in `src/status.rs` was already complete from prior sessions (Schedulable line + Cycle warning)
+- Decomposed PRD (prd/automated-architecture-and-metadata.md) into 24 beads with full dependency wiring
+- Three major areas covered: Two-Phase Task Metadata, Automated Architecture Agent, Migration Maps
+- All beads have descriptions referencing specific PRD sections
 
 ### Current State
-- All 869 tests pass, clippy and fmt clean
-- Both CLI surfaces now match the PRD spec (SPEC-v3-agents.md lines 775-796)
+- 24 new open beads, 5 ready to work (no blockers)
+- Ready beads: 4a1 (import graph parser, P1), 5f1 (intent data model, P1), 0lk (file resolution model, P1), ldy (integration loop tracking, P2), 34d (config knobs, P3)
+- Dependency graph fans out from 3 roots: import graph parser, intent model, file resolution model
 
 ### Suggested Next Tasks
-- Check `bd ready` for next available work
+- Start with P1 ready beads: 4a1 (import graph parser), 5f1 (intent data model), 0lk (file resolution model)
+- These unlock the most downstream work
+- 4a1 is the highest-value starting point — it unblocks 7 direct dependents
