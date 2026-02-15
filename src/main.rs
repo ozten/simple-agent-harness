@@ -8,6 +8,7 @@ mod signals;
 mod watchdog;
 
 use clap::Parser;
+use config::{CliOverrides, HarnessConfig};
 use std::path::PathBuf;
 
 /// A Rust CLI tool that runs an AI coding agent in a supervised loop:
@@ -57,6 +58,19 @@ pub struct Cli {
     status: bool,
 }
 
+impl Cli {
+    /// Extract the override-able fields into a CliOverrides struct.
+    fn to_overrides(&self) -> CliOverrides {
+        CliOverrides {
+            max_iterations: self.max_iterations,
+            prompt: self.prompt.clone(),
+            output_dir: self.output_dir.clone(),
+            timeout: self.timeout,
+            retries: self.retries,
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
@@ -69,11 +83,81 @@ async fn main() {
     tracing::info!("simple-agent-harness starting");
     tracing::debug!(?cli, "parsed CLI arguments");
 
-    // TODO: Load config, merge CLI overrides, and run the main loop
-    println!("simple-agent-harness v{}", env!("CARGO_PKG_VERSION"));
-    println!("Config file: {}", cli.config.display());
+    // Load config: file > defaults, then CLI > file
+    let mut config = match HarnessConfig::load(&cli.config) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::error!("Configuration error: {e}");
+            std::process::exit(1);
+        }
+    };
+    config.apply_cli_overrides(&cli.to_overrides());
+
+    tracing::debug!(?config, "resolved configuration");
 
     if cli.dry_run {
+        println!("simple-agent-harness v{}", env!("CARGO_PKG_VERSION"));
+        println!("Config file: {}", cli.config.display());
+        println!();
+        println!("Resolved configuration:");
+        println!(
+            "  session.max_iterations = {}",
+            config.session.max_iterations
+        );
+        println!(
+            "  session.prompt_file = {}",
+            config.session.prompt_file.display()
+        );
+        println!(
+            "  session.output_dir = {}",
+            config.session.output_dir.display()
+        );
+        println!("  session.output_prefix = {}", config.session.output_prefix);
+        println!(
+            "  session.counter_file = {}",
+            config.session.counter_file.display()
+        );
+        println!("  agent.command = {}", config.agent.command);
+        println!("  agent.args = {:?}", config.agent.args);
+        println!(
+            "  watchdog.check_interval_secs = {}",
+            config.watchdog.check_interval_secs
+        );
+        println!(
+            "  watchdog.stale_timeout_mins = {}",
+            config.watchdog.stale_timeout_mins
+        );
+        println!(
+            "  watchdog.min_output_bytes = {}",
+            config.watchdog.min_output_bytes
+        );
+        println!(
+            "  retry.max_empty_retries = {}",
+            config.retry.max_empty_retries
+        );
+        println!(
+            "  retry.retry_delay_secs = {}",
+            config.retry.retry_delay_secs
+        );
+        println!(
+            "  backoff.initial_delay_secs = {}",
+            config.backoff.initial_delay_secs
+        );
+        println!(
+            "  backoff.max_delay_secs = {}",
+            config.backoff.max_delay_secs
+        );
+        println!(
+            "  backoff.max_consecutive_rate_limits = {}",
+            config.backoff.max_consecutive_rate_limits
+        );
+        println!(
+            "  shutdown.stop_file = {}",
+            config.shutdown.stop_file.display()
+        );
+        println!("  hooks.pre_session = {:?}", config.hooks.pre_session);
+        println!("  hooks.post_session = {:?}", config.hooks.post_session);
+        println!();
         println!("Dry run mode — config validated, not running.");
         return;
     }
@@ -83,5 +167,7 @@ async fn main() {
         return;
     }
 
+    println!("simple-agent-harness v{}", env!("CARGO_PKG_VERSION"));
+    println!("Max iterations: {}", config.session.max_iterations);
     println!("Main loop not yet implemented.");
 }
