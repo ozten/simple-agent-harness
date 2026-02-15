@@ -13,6 +13,7 @@ mod prompt;
 mod ratelimit;
 mod retry;
 mod runner;
+mod scheduler;
 mod session;
 mod signals;
 mod status;

@@ -1034,3 +1034,32 @@
 - **dgh**: Implement session-to-bead attribution (now unblocked by zl7)
 - **mjx**: Implement affected set parsing and glob overlap detection (independent P1)
 - **1jv**: Implement git worktree lifecycle management (independent P1)
+
+--- 2026-02-15 15:42:14 | simple-agent-harness-mjx ---
+## Last Session: Implement affected set parsing and glob overlap detection (mjx)
+
+### Completed
+- Created src/scheduler.rs with affected-set parsing and glob overlap detection
+- parse_affected_set(): extracts glob list from bead design field ("affected: glob1, glob2, ...")
+  - Case-insensitive prefix matching
+  - Handles whitespace, empty lines, surrounding text
+  - Returns None for missing affected set (= "affects everything")
+- globs_overlap(): conservative overlap check between two sets of file globs
+  - Empty set = affects everything (always overlaps)
+  - Uses literal-prefix heuristic: extracts path before first wildcard
+  - Two exact paths overlap only if equal
+  - Glob vs path: overlap if prefixes are nested
+  - Conservative: false positives OK, false negatives not
+- 33 new tests covering parsing, overlap detection, prefix extraction, helper functions
+- Registered module in main.rs
+- All 484 tests pass, clippy clean (only pre-existing dead_code warnings), fmt clean
+
+### Current State
+- scheduler.rs is ready for use by the scheduler/worker pool (1ky, f9m)
+- Functions are pub for cross-module access
+- No external dependencies added (pure string manipulation)
+
+### Suggested Next Tasks
+- **1jv**: Implement git worktree lifecycle management (independent P1)
+- **v6v**: Implement task_manifest.toml parsing (independent P1)
+- **1ky**: Implement scheduler for assigning beads to idle workers (now unblocked by mjx)

@@ -1,27 +1,27 @@
-## Last Session: Add coordinator SQLite tables for multi-agent state (zl7)
+## Last Session: Implement affected set parsing and glob overlap detection (mjx)
 
 ### Completed
-- Added 4 coordinator tables to db.rs open_or_create migration:
-  - worker_assignments: tracks worker-to-bead assignments with status, affected_globs JSON, timestamps, failure_notes
-  - task_file_changes: records which files each assignment modified (added/modified/deleted)
-  - integration_log: tracks merge history with manifest entries, cross-task imports, reconciliation flag
-  - bead_metrics: per-bead cumulative metrics (sessions, wall_time, turns, tokens, integration_time)
-- Added indexes: worker_assignments(status, bead_id), task_file_changes(assignment_id), integration_log(assignment_id)
-- Added CRUD functions for all 4 tables:
-  - insert_worker_assignment, update_worker_assignment_status, get_worker_assignment, worker_assignments_by_status
-  - insert_task_file_change, file_changes_by_assignment
-  - insert_integration_log, integration_log_by_assignment
-  - upsert_bead_metrics (with ON CONFLICT upsert), get_bead_metrics, all_bead_metrics
-- Added comprehensive tests for all new tables and functions (22 new tests)
-- All 451 tests pass, clippy clean, fmt clean
+- Created src/scheduler.rs with affected-set parsing and glob overlap detection
+- parse_affected_set(): extracts glob list from bead design field ("affected: glob1, glob2, ...")
+  - Case-insensitive prefix matching
+  - Handles whitespace, empty lines, surrounding text
+  - Returns None for missing affected set (= "affects everything")
+- globs_overlap(): conservative overlap check between two sets of file globs
+  - Empty set = affects everything (always overlaps)
+  - Uses literal-prefix heuristic: extracts path before first wildcard
+  - Two exact paths overlap only if equal
+  - Glob vs path: overlap if prefixes are nested
+  - Conservative: false positives OK, false negatives not
+- 33 new tests covering parsing, overlap detection, prefix extraction, helper functions
+- Registered module in main.rs
+- All 484 tests pass, clippy clean (only pre-existing dead_code warnings), fmt clean
 
 ### Current State
-- Coordinator tables are ready for use by worker pool manager (f9m) and session-to-bead attribution (dgh)
-- Schema matches SPEC-v3-agents.md lines 669-713 exactly
-- Dead code warnings expected since no consumers exist yet (blocked tasks f9m, dgh)
+- scheduler.rs is ready for use by the scheduler/worker pool (1ky, f9m)
+- Functions are pub for cross-module access
+- No external dependencies added (pure string manipulation)
 
 ### Suggested Next Tasks
-- **f9m**: Implement worker pool manager (now unblocked by zl7)
-- **dgh**: Implement session-to-bead attribution (now unblocked by zl7)
-- **mjx**: Implement affected set parsing and glob overlap detection (independent P1)
 - **1jv**: Implement git worktree lifecycle management (independent P1)
+- **v6v**: Implement task_manifest.toml parsing (independent P1)
+- **1ky**: Implement scheduler for assigning beads to idle workers (now unblocked by mjx)
