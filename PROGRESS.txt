@@ -1,17 +1,22 @@
-## Last Session: Filed Milestone 8b beads (Dependency Cycle Detection)
+## Last Session: Implemented cycle detection algorithms (simple-agent-harness-9xv)
 
-### Status
-- Created 4 beads from SPEC-v3-agents.md Milestone 8b (Dependency Cycle Detection)
-- All beads have descriptions referencing PRD line numbers
-- Dependency graph wired: core algorithm -> coordinator wiring + estimation -> CLI surface
+### What Was Done
+- Created src/cycle_detect.rs with detect_cycles() function
+- Phase 1: Kahn's algorithm (BFS topological sort) identifies nodes in cycles
+- Phase 2: Tarjan's SCC decomposes remaining nodes into individual strongly connected components
+- Reuses BeadNode from estimation.rs
+- Returns Vec<Vec<String>> of sorted cycle groups (deterministic output)
+- Handles: self-loops, multi-node cycles, external deps, mixed DAG+cycle graphs
+- 11 comprehensive unit tests all passing
+- Registered module in main.rs
 
-### Beads Created
-- simple-agent-harness-9xv: Implement cycle detection algorithms (Kahn's + Tarjan's SCC) in cycle_detect.rs [READY]
-- simple-agent-harness-fyx: Wire cycle detection into coordinator scheduling pass [blocked by 9xv]
-- simple-agent-harness-8iq: Exclude cycled beads from critical path estimation [blocked by 9xv]
-- simple-agent-harness-cqf: Surface cycle warnings in CLI status output [blocked by 9xv, fyx, 8iq]
+### Current State
+- 865 tests passing, no clippy errors, code formatted
+- dead_code warnings expected (detect_cycles not yet called from production code)
+- Next beads (fyx, 8iq) are now unblocked
 
 ### Suggested Next Tasks
-- Pick up simple-agent-harness-9xv (core algorithms) — it's the only ready bead
-- After that, fyx and 8iq can be done in parallel
-- Consider filing beads from automated-architecture-and-metadata.md PRD after cycle detection is complete
+- simple-agent-harness-fyx: Wire cycle detection into coordinator scheduling pass
+- simple-agent-harness-8iq: Exclude cycled beads from critical path estimation
+- Both can be done in parallel after this bead closes
+- simple-agent-harness-cqf: CLI surface (blocked by fyx + 8iq)

@@ -2041,3 +2041,27 @@
 ### Suggested Next Tasks
 - File new beads from the updated SPEC-v3-agents.md (dependency cycle detection feature)
 - Consider filing beads from automated-architecture-and-metadata.md PRD
+
+--- 2026-02-15 18:34:18 | simple-agent-harness-9xv ---
+## Last Session: Implemented cycle detection algorithms (simple-agent-harness-9xv)
+
+### What Was Done
+- Created src/cycle_detect.rs with detect_cycles() function
+- Phase 1: Kahn's algorithm (BFS topological sort) identifies nodes in cycles
+- Phase 2: Tarjan's SCC decomposes remaining nodes into individual strongly connected components
+- Reuses BeadNode from estimation.rs
+- Returns Vec<Vec<String>> of sorted cycle groups (deterministic output)
+- Handles: self-loops, multi-node cycles, external deps, mixed DAG+cycle graphs
+- 11 comprehensive unit tests all passing
+- Registered module in main.rs
+
+### Current State
+- 865 tests passing, no clippy errors, code formatted
+- dead_code warnings expected (detect_cycles not yet called from production code)
+- Next beads (fyx, 8iq) are now unblocked
+
+### Suggested Next Tasks
+- simple-agent-harness-fyx: Wire cycle detection into coordinator scheduling pass
+- simple-agent-harness-8iq: Exclude cycled beads from critical path estimation
+- Both can be done in parallel after this bead closes
+- simple-agent-harness-cqf: CLI surface (blocked by fyx + 8iq)
