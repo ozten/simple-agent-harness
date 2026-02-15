@@ -597,3 +597,27 @@
 - Implement configurable extraction rules from TOML config (i9s) — P2, ready
 - Implement configurable target thresholds and metrics targets command (obm) — P2, ready
 - Add target miss warnings and streak detection to brief output (h97) — P2, blocked by obm
+
+--- 2026-02-15 14:24:50 | simple-agent-harness-i9s ---
+## Last Session: Implement configurable extraction rules from TOML config (simple-agent-harness-i9s)
+
+### Completed
+- Added `MetricsConfig` → `MetricsExtractConfig` → `Vec<ExtractionRule>` to `config.rs`
+- Each rule supports: kind, pattern (regex), anti_pattern, source (tool_commands/text/raw), transform (last_segment/int/trim), first_match, count, emit
+- Added `CompiledRule` struct and `ExtractionRule::compile()` method for regex compilation
+- Updated `ingest.rs` to collect session text (raw lines, text blocks, tool commands) during parsing
+- Added `ingest_session_with_rules()` that applies configurable rules alongside built-in metrics
+- Rule results written as events and included in observation data JSON
+- Updated `runner.rs` to compile extraction rules at startup and pass them to ingestion
+- Added 24 new tests (301 total pass): config parsing, rule compilation, all rule modes (count, emit, first_match, anti_pattern, source types, transforms), end-to-end ingestion with rules
+- Clippy clean, fmt applied
+
+### Current State
+- Adding a new metric = 3-4 lines of TOML in `[metrics.extract.rules]`
+- `ingest_session()` still works without rules (backward compatible)
+- Pre-existing dead_code warnings remain for functions consumed by future features
+
+### Suggested Next Tasks
+- Implement configurable target thresholds and metrics targets command (obm) — P2, ready
+- Add target miss warnings and streak detection to brief output (h97) — P2, blocked by obm
+- Implement --dry-run mode (5x6) — P3, ready

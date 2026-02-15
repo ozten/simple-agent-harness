@@ -106,6 +106,21 @@ pub async fn run(config: &HarnessConfig, signals: &SignalHandler) -> RunSummary 
         }
     };
 
+    // Compile metrics extraction rules once at startup
+    let extraction_rules: Vec<crate::config::CompiledRule> = config
+        .metrics
+        .extract
+        .rules
+        .iter()
+        .filter_map(|r| match r.compile() {
+            Ok(compiled) => Some(compiled),
+            Err(e) => {
+                tracing::warn!(error = %e, "invalid extraction rule, skipping");
+                None
+            }
+        })
+        .collect();
+
     tracing::info!(max_iterations, global_iteration, "starting iteration loop");
 
     while productive < max_iterations {
@@ -275,11 +290,12 @@ pub async fn run(config: &HarnessConfig, signals: &SignalHandler) -> RunSummary 
 
                 // Ingest JSONL metrics into database
                 if let Some(ref conn) = metrics_db {
-                    match ingest::ingest_session(
+                    match ingest::ingest_session_with_rules(
                         conn,
                         global_iteration as i64,
                         &output_path,
                         result.exit_code,
+                        &extraction_rules,
                     ) {
                         Ok(m) => {
                             tracing::info!(
@@ -420,11 +436,12 @@ pub async fn run(config: &HarnessConfig, signals: &SignalHandler) -> RunSummary 
 
                 // Ingest JSONL metrics for skipped session (still has data)
                 if let Some(ref conn) = metrics_db {
-                    if let Err(e) = ingest::ingest_session(
+                    if let Err(e) = ingest::ingest_session_with_rules(
                         conn,
                         global_iteration as i64,
                         &output_path,
                         result.exit_code,
+                        &extraction_rules,
                     ) {
                         tracing::warn!(
                             error = %e,
@@ -734,6 +751,7 @@ mod tests {
             prompt: PromptConfig::default(),
             output: OutputConfig::default(),
             commit_detection: CommitDetectionConfig::default(),
+            metrics: MetricsConfig::default(),
         }
     }
 

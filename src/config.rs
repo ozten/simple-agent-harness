@@ -1,3 +1,4 @@
+use regex::Regex;
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
@@ -16,6 +17,7 @@ pub struct HarnessConfig {
     pub prompt: PromptConfig,
     pub output: OutputConfig,
     pub commit_detection: CommitDetectionConfig,
+    pub metrics: MetricsConfig,
 }
 
 impl HarnessConfig {
@@ -211,6 +213,84 @@ impl Default for CommitDetectionConfig {
         Self {
             patterns: crate::commit::default_patterns(),
         }
+    }
+}
+
+#[derive(Debug, Deserialize, Clone, Default)]
+#[serde(default)]
+pub struct MetricsConfig {
+    pub extract: MetricsExtractConfig,
+}
+
+#[derive(Debug, Deserialize, Clone, Default)]
+#[serde(default)]
+pub struct MetricsExtractConfig {
+    pub rules: Vec<ExtractionRule>,
+}
+
+/// A configurable extraction rule that scans session output for a pattern
+/// and emits a metric event.
+#[derive(Debug, Deserialize, Clone)]
+pub struct ExtractionRule {
+    /// Event kind to emit (e.g. "extract.bead_id", "commit.detected")
+    pub kind: String,
+    /// Regex pattern to search for
+    pub pattern: String,
+    /// Exclude matches that also match this pattern (optional)
+    pub anti_pattern: Option<String>,
+    /// Where to search: "tool_commands", "text", "raw". Default: "tool_commands"
+    #[serde(default = "default_source")]
+    pub source: String,
+    /// Post-processing: "last_segment", "int", "trim". Default: raw capture group.
+    pub transform: Option<String>,
+    /// Stop after first match, emit the value. Default: false
+    #[serde(default)]
+    pub first_match: bool,
+    /// Emit count of matches instead of match content. Default: false
+    #[serde(default)]
+    pub count: bool,
+    /// Emit a fixed value if pattern is found. Default: not set.
+    pub emit: Option<toml::Value>,
+}
+
+fn default_source() -> String {
+    "tool_commands".to_string()
+}
+
+/// A compiled extraction rule ready for use during ingestion.
+#[derive(Debug)]
+pub struct CompiledRule {
+    pub kind: String,
+    pub pattern: Regex,
+    pub anti_pattern: Option<Regex>,
+    pub source: String,
+    pub transform: Option<String>,
+    pub first_match: bool,
+    pub count: bool,
+    pub emit: Option<toml::Value>,
+}
+
+impl ExtractionRule {
+    /// Compile this rule's patterns into regexes.
+    /// Returns an error if the pattern or anti_pattern is invalid.
+    pub fn compile(&self) -> Result<CompiledRule, String> {
+        let pattern = Regex::new(&self.pattern)
+            .map_err(|e| format!("invalid pattern '{}': {}", self.pattern, e))?;
+        let anti_pattern = self
+            .anti_pattern
+            .as_ref()
+            .map(|ap| Regex::new(ap).map_err(|e| format!("invalid anti_pattern '{}': {}", ap, e)))
+            .transpose()?;
+        Ok(CompiledRule {
+            kind: self.kind.clone(),
+            pattern,
+            anti_pattern,
+            source: self.source.clone(),
+            transform: self.transform.clone(),
+            first_match: self.first_match,
+            count: self.count,
+            emit: self.emit.clone(),
+        })
     }
 }
 
@@ -521,5 +601,155 @@ max_empty_retries = 4
         assert_eq!(config.watchdog.stale_timeout_mins, 30); // file value kept
         assert_eq!(config.retry.max_empty_retries, 4); // file value kept
         assert_eq!(config.session.prompt_file, PathBuf::from("PROMPT.md")); // default kept
+    }
+
+    #[test]
+    fn test_default_config_has_no_extraction_rules() {
+        let config = HarnessConfig::default();
+        assert!(config.metrics.extract.rules.is_empty());
+    }
+
+    #[test]
+    fn test_load_extraction_rules_from_toml() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("blacksmith.toml");
+        std::fs::write(
+            &path,
+            r#"
+[[metrics.extract.rules]]
+kind = "extract.test_runs"
+pattern = "cargo test"
+count = true
+
+[[metrics.extract.rules]]
+kind = "commit.detected"
+pattern = "bd-finish"
+emit = true
+
+[[metrics.extract.rules]]
+kind = "extract.bead_id"
+pattern = 'bd update (\S+) --status.?in.?progress'
+transform = "last_segment"
+first_match = true
+"#,
+        )
+        .unwrap();
+        let config = HarnessConfig::load(&path).unwrap();
+        assert_eq!(config.metrics.extract.rules.len(), 3);
+
+        let r0 = &config.metrics.extract.rules[0];
+        assert_eq!(r0.kind, "extract.test_runs");
+        assert_eq!(r0.pattern, "cargo test");
+        assert!(r0.count);
+        assert!(!r0.first_match);
+        assert_eq!(r0.source, "tool_commands"); // default
+
+        let r1 = &config.metrics.extract.rules[1];
+        assert_eq!(r1.kind, "commit.detected");
+        assert_eq!(r1.emit, Some(toml::Value::Boolean(true)));
+
+        let r2 = &config.metrics.extract.rules[2];
+        assert_eq!(r2.kind, "extract.bead_id");
+        assert_eq!(r2.transform, Some("last_segment".to_string()));
+        assert!(r2.first_match);
+    }
+
+    #[test]
+    fn test_load_extraction_rule_with_anti_pattern() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("blacksmith.toml");
+        std::fs::write(
+            &path,
+            r#"
+[[metrics.extract.rules]]
+kind = "extract.full_suite"
+pattern = "cargo test"
+anti_pattern = "--filter"
+source = "tool_commands"
+count = true
+"#,
+        )
+        .unwrap();
+        let config = HarnessConfig::load(&path).unwrap();
+        assert_eq!(config.metrics.extract.rules.len(), 1);
+        let rule = &config.metrics.extract.rules[0];
+        assert_eq!(rule.anti_pattern, Some("--filter".to_string()));
+        assert_eq!(rule.source, "tool_commands");
+    }
+
+    #[test]
+    fn test_load_extraction_rule_source_raw() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("blacksmith.toml");
+        std::fs::write(
+            &path,
+            r#"
+[[metrics.extract.rules]]
+kind = "extract.file_reads"
+pattern = '"name":\s*"Read"'
+source = "raw"
+count = true
+"#,
+        )
+        .unwrap();
+        let config = HarnessConfig::load(&path).unwrap();
+        let rule = &config.metrics.extract.rules[0];
+        assert_eq!(rule.source, "raw");
+    }
+
+    #[test]
+    fn test_compile_extraction_rule() {
+        let rule = ExtractionRule {
+            kind: "test".to_string(),
+            pattern: r"(\d+)".to_string(),
+            anti_pattern: Some(r"skip".to_string()),
+            source: "text".to_string(),
+            transform: Some("int".to_string()),
+            first_match: true,
+            count: false,
+            emit: None,
+        };
+        let compiled = rule.compile().unwrap();
+        assert_eq!(compiled.kind, "test");
+        assert!(compiled.pattern.is_match("42"));
+        assert!(compiled
+            .anti_pattern
+            .as_ref()
+            .unwrap()
+            .is_match("skip this"));
+    }
+
+    #[test]
+    fn test_compile_invalid_regex_returns_error() {
+        let rule = ExtractionRule {
+            kind: "bad".to_string(),
+            pattern: "[invalid".to_string(),
+            anti_pattern: None,
+            source: "tool_commands".to_string(),
+            transform: None,
+            first_match: false,
+            count: false,
+            emit: None,
+        };
+        let result = rule.compile();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("invalid pattern"));
+    }
+
+    #[test]
+    fn test_existing_config_with_no_metrics_section_still_works() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("blacksmith.toml");
+        std::fs::write(
+            &path,
+            r#"
+[session]
+max_iterations = 50
+"#,
+        )
+        .unwrap();
+        let config = HarnessConfig::load(&path).unwrap();
+        assert_eq!(config.session.max_iterations, 50);
+        assert!(config.metrics.extract.rules.is_empty());
     }
 }

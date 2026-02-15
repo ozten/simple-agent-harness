@@ -1,21 +1,22 @@
-## Last Session: Add quantitative metrics summary to brief command output (simple-agent-harness-pcb)
+## Last Session: Implement configurable extraction rules from TOML config (simple-agent-harness-i9s)
 
 ### Completed
-- Extended `generate_brief()` in `brief.rs` to include a `## PERFORMANCE FEEDBACK (auto-generated)` section
-- Queries the most recent observation from the database via `db::recent_observations(conn, 1)`
-- Parses the observation's JSON data field and formats metrics: turns, narration %, parallel %, cost, duration
-- Performance feedback section appears before the OPEN IMPROVEMENTS section
-- Output matches PRD format: "Last session #N:" followed by metric lines
-- Brief still works correctly when only improvements exist (no observations) or only observations (no improvements)
-- Added 8 new tests for performance feedback (277 total tests pass)
+- Added `MetricsConfig` → `MetricsExtractConfig` → `Vec<ExtractionRule>` to `config.rs`
+- Each rule supports: kind, pattern (regex), anti_pattern, source (tool_commands/text/raw), transform (last_segment/int/trim), first_match, count, emit
+- Added `CompiledRule` struct and `ExtractionRule::compile()` method for regex compilation
+- Updated `ingest.rs` to collect session text (raw lines, text blocks, tool commands) during parsing
+- Added `ingest_session_with_rules()` that applies configurable rules alongside built-in metrics
+- Rule results written as events and included in observation data JSON
+- Updated `runner.rs` to compile extraction rules at startup and pass them to ingestion
+- Added 24 new tests (301 total pass): config parsing, rule compilation, all rule modes (count, emit, first_match, anti_pattern, source types, transforms), end-to-end ingestion with rules
 - Clippy clean, fmt applied
 
 ### Current State
-- Brief command now outputs both performance feedback and improvements
-- Target comparison (OK/MISS) not yet implemented — depends on configurable targets (obm bead)
+- Adding a new metric = 3-4 lines of TOML in `[metrics.extract.rules]`
+- `ingest_session()` still works without rules (backward compatible)
 - Pre-existing dead_code warnings remain for functions consumed by future features
 
 ### Suggested Next Tasks
-- Implement configurable extraction rules from TOML config (i9s) — P2, ready
 - Implement configurable target thresholds and metrics targets command (obm) — P2, ready
 - Add target miss warnings and streak detection to brief output (h97) — P2, blocked by obm
+- Implement --dry-run mode (5x6) — P3, ready
