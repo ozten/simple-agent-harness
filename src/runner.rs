@@ -986,12 +986,19 @@ mod tests {
     #[tokio::test]
     async fn test_rate_limited_session_not_counted_as_productive() {
         let dir = tempdir().unwrap();
-        // Echo output that contains a rate limit pattern
-        let mut config = test_config(
-            dir.path(),
-            "echo",
-            vec![r#"{"error":"rate_limit","message":"too many requests"}"#.to_string()],
-        );
+        // Script outputs a JSONL result event with is_error=true and rate_limit text
+        let script = dir.path().join("rate_limit_echo.sh");
+        std::fs::write(
+            &script,
+            r#"#!/bin/sh
+printf '{"type":"result","subtype":"error","is_error":true,"result":"rate_limit: too many requests"}\n'
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+
+        let mut config = test_config(dir.path(), script.to_str().unwrap(), vec![]);
         config.session.max_iterations = 3;
         config.backoff.initial_delay_secs = 0;
         config.backoff.max_delay_secs = 0;
@@ -1011,7 +1018,7 @@ mod tests {
     #[tokio::test]
     async fn test_rate_limit_resets_on_success() {
         let dir = tempdir().unwrap();
-        // Create a script that outputs rate limit text on first call, then normal text
+        // Script: first call outputs rate-limited error result, subsequent calls output success
         let script = dir.path().join("rate_limit_script.sh");
         let marker = dir.path().join("call_count");
         std::fs::write(
@@ -1025,9 +1032,9 @@ fi
 count=$((count + 1))
 echo $count > "{marker}"
 if [ $count -le 1 ]; then
-    echo '{{"error":"rate_limit"}}'
+    printf '{{"type":"result","subtype":"error","is_error":true,"result":"rate_limit exceeded"}}\n'
 else
-    echo 'normal productive output here'
+    printf '{{"type":"result","subtype":"success","is_error":false,"result":"productive output"}}\n'
 fi
 "#,
                 marker = marker.display()
@@ -1061,7 +1068,19 @@ fi
     async fn test_rate_limited_event_log_shows_rate_limited_true() {
         let dir = tempdir().unwrap();
         let event_log_path = dir.path().join("events.jsonl");
-        let mut config = test_config(dir.path(), "echo", vec!["hit your limit".to_string()]);
+        // Script outputs a JSONL error result with rate limit text
+        let script = dir.path().join("rate_limit_echo.sh");
+        std::fs::write(
+            &script,
+            r#"#!/bin/sh
+printf '{"type":"result","subtype":"error","is_error":true,"result":"hit your limit"}\n'
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+
+        let mut config = test_config(dir.path(), script.to_str().unwrap(), vec![]);
         config.session.max_iterations = 1;
         config.backoff.initial_delay_secs = 0;
         config.backoff.max_delay_secs = 0;
@@ -1084,6 +1103,36 @@ fi
                 "event should show rate_limited=true"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn test_successful_session_with_rate_limit_text_not_detected() {
+        let dir = tempdir().unwrap();
+        // Script outputs tool output with rate limit text, but the session result is success
+        let script = dir.path().join("success_with_rate_text.sh");
+        std::fs::write(
+            &script,
+            r#"#!/bin/sh
+printf '{"type":"tool_result","content":"rate_limit detection code: usage limit"}\n'
+printf '{"type":"result","subtype":"success","is_error":false,"result":"Done."}\n'
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+
+        let mut config = test_config(dir.path(), script.to_str().unwrap(), vec![]);
+        config.session.max_iterations = 1;
+        config.backoff.initial_delay_secs = 0;
+
+        std::fs::write(&config.session.prompt_file, "test prompt").unwrap();
+
+        let signals = make_signals();
+        let summary = run(&config, &signals).await;
+
+        // Session should be counted as productive (not rate-limited)
+        assert_eq!(summary.productive_iterations, 1);
+        assert_eq!(summary.exit_reason, ExitReason::MaxIterations);
     }
 
     #[tokio::test]

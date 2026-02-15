@@ -1,34 +1,25 @@
-## Last Session: Implement rate limit detection with exponential backoff (simple-agent-harness-7d0)
+## Last Session: Fix rate limit false positives (simple-agent-harness-0t2)
 
 ### Completed
-- Created src/ratelimit.rs with rate limit detection and backoff logic:
-  - `detect_rate_limit()` scans output file for rate limit patterns
-  - `detect_rate_limit_in_text()` internal helper checks text against compiled regex patterns
-  - Patterns: JSON `"error":"rate_limit"`, text `usage limit`, `hit your limit`, `resets.*UTC` (case-insensitive)
-  - Uses `regex` crate with `LazyLock` for compiled pattern caching
-  - `backoff_delay()` computes exponential backoff: `initial_delay * 2^count`, capped at max_delay
-  - Overflow-safe with checked_shl + saturating_mul
-- Integrated into runner.rs:
-  - Added `ExitReason::RateLimited` variant
-  - After session passes retry check (Proceed), scans output for rate limit patterns
-  - Rate-limited sessions: don't increment productive counter, apply exponential backoff, update status tracker
-  - After max_consecutive_rate_limits, exits loop with RateLimited reason
-  - Successful sessions reset consecutive_rate_limits counter to 0
-  - Status tracker updated with consecutive_rate_limits on each detection
-  - Event log entries now correctly report rate_limited=true/false
-- Added `mod ratelimit` to main.rs
-- Added `regex = "1"` to Cargo.toml dependencies
-- 21 new tests (18 unit + 3 integration):
-  - Unit: JSON pattern, text patterns (case-insensitive), file detection, missing file, backoff math, overflow safety
-  - Integration: rate-limited sessions not counted productive, resets on success, event log shows rate_limited=true
-- All 137 tests pass, clippy clean, fmt applied
+- Rewrote rate limit detection to only inspect the final `type=result` JSONL event
+- Previously: `detect_rate_limit()` grepped the entire output file for rate limit patterns,
+  causing false positives when the agent read source files mentioning rate limiting
+- Now: `detect_rate_limit_in_result_event()` finds the last `"type":"result"` line, checks
+  `is_error`/`subtype`, and only scans for rate limit patterns if the session ended in error
+- A successful session (`is_error: false`, `subtype: "success"`) is NEVER classified as rate-limited
+- Simplified patterns: removed `resets.*UTC` pattern (too broad), consolidated to:
+  `rate[_.\s]limit`, `usage limit`, `hit your limit` (all case-insensitive)
+- Updated all ratelimit.rs unit tests (21 tests) to use JSONL result event format
+- Updated 3 runner.rs integration tests to produce proper JSONL result events via shell scripts
+- Added new integration test: `test_successful_session_with_rate_limit_text_not_detected`
+  verifying the core false-positive fix works end-to-end
+- All 140 tests pass, clippy clean, fmt applied
 
 ### Current State
-- Rate limit detection fully functional per PRD spec
+- Rate limit detection is now safe against false positives from tool output content
 - Pre-existing dead_code warnings remain for unimplemented features (metrics, status, watchdog, session)
-- Note: bead 0t2 (rate limit false positive fix) should refine detection to only inspect final result event
 
 ### Suggested Next Tasks
 - Implement commit detection in session output (ee7) — P3
 - Implement --dry-run mode (5x6) — P3
-- Fix rate limit false positives by only inspecting system events (0t2) — P3
+- Implement --quiet mode for minimal output (r43) — P3

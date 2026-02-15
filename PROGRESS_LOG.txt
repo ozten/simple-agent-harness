@@ -249,3 +249,30 @@
 - Implement commit detection in session output (ee7) — P3
 - Implement --dry-run mode (5x6) — P3
 - Fix rate limit false positives by only inspecting system events (0t2) — P3
+
+--- 2026-02-15 02:42:03 | simple-agent-harness-0t2 ---
+## Last Session: Fix rate limit false positives (simple-agent-harness-0t2)
+
+### Completed
+- Rewrote rate limit detection to only inspect the final `type=result` JSONL event
+- Previously: `detect_rate_limit()` grepped the entire output file for rate limit patterns,
+  causing false positives when the agent read source files mentioning rate limiting
+- Now: `detect_rate_limit_in_result_event()` finds the last `"type":"result"` line, checks
+  `is_error`/`subtype`, and only scans for rate limit patterns if the session ended in error
+- A successful session (`is_error: false`, `subtype: "success"`) is NEVER classified as rate-limited
+- Simplified patterns: removed `resets.*UTC` pattern (too broad), consolidated to:
+  `rate[_.\s]limit`, `usage limit`, `hit your limit` (all case-insensitive)
+- Updated all ratelimit.rs unit tests (21 tests) to use JSONL result event format
+- Updated 3 runner.rs integration tests to produce proper JSONL result events via shell scripts
+- Added new integration test: `test_successful_session_with_rate_limit_text_not_detected`
+  verifying the core false-positive fix works end-to-end
+- All 140 tests pass, clippy clean, fmt applied
+
+### Current State
+- Rate limit detection is now safe against false positives from tool output content
+- Pre-existing dead_code warnings remain for unimplemented features (metrics, status, watchdog, session)
+
+### Suggested Next Tasks
+- Implement commit detection in session output (ee7) — P3
+- Implement --dry-run mode (5x6) — P3
+- Implement --quiet mode for minimal output (r43) — P3
