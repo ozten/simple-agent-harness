@@ -1,4 +1,5 @@
 pub mod claude;
+pub mod codex;
 pub mod raw;
 
 use serde_json::Value;
@@ -128,7 +129,7 @@ pub fn resolve_adapter_name(explicit: Option<&str>, command: &str) -> &'static s
 pub fn create_adapter(adapter_name: &str) -> Box<dyn AgentAdapter> {
     match adapter_name {
         "claude" => Box::new(claude::ClaudeAdapter::new()),
-        // Future adapters: "codex" | "opencode" | "aider" => ...
+        "codex" => Box::new(codex::CodexAdapter::new()),
         _ => Box::new(raw::RawAdapter::new()),
     }
 }
@@ -231,9 +232,14 @@ mod tests {
     }
 
     #[test]
-    fn test_create_adapter_unknown_falls_back_to_raw() {
+    fn test_create_adapter_codex() {
         let adapter = create_adapter("codex");
-        // codex adapter not yet implemented, should get raw fallback
+        assert_eq!(adapter.name(), "codex");
+    }
+
+    #[test]
+    fn test_create_adapter_unknown_falls_back_to_raw() {
+        let adapter = create_adapter("unknown-agent");
         assert_eq!(adapter.name(), "raw");
     }
 

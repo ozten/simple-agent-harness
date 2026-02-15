@@ -1861,3 +1861,29 @@
 - **ec1**: Implement codex agent adapter (P3)
 - **c37**: Implement blacksmith metrics beads per-bead timing report (P3)
 - **zb5**: Implement blacksmith adapter info/list/test commands (P3)
+
+--- 2026-02-15 18:00:46 | simple-agent-harness-ec1 ---
+## Last Session: Implement codex agent adapter (ec1)
+
+### Completed
+- Created `src/adapters/codex.rs` implementing the `AgentAdapter` trait for OpenAI Codex CLI
+- Parses Codex `--json` JSONL output format: `turn.completed`, `item.completed`, `thread.started` events
+- Supported metrics: `turns.total`, `turns.tool_calls`, `session.output_bytes`, `session.exit_code`, `session.duration_secs`
+- Gracefully skips unsupported metrics: `turns.narration_only`, `turns.parallel`, `cost.*`
+- Source mapping: `tool_commands` → `command_execution` items (strips `bash -lc` prefix), `text` → `agent_message` items, `raw` → all lines
+- Counts `file_change`, `mcp_tool_call`, `web_search` item types as tool calls
+- Duration calculated from first/last event timestamps
+- Exit code taken from last `command_execution` item
+- Registered module in `src/adapters/mod.rs` and wired into `create_adapter()`
+- Updated existing test that expected codex to fall back to raw adapter
+- Added 18 new tests (788 total passing)
+
+### Key Files Modified
+- `src/adapters/codex.rs` — new file, CodexAdapter implementation
+- `src/adapters/mod.rs` — added `pub mod codex`, wired `create_adapter`, updated test
+
+### Suggested Next Tasks
+- **y74**: Implement opencode agent adapter (P3)
+- **2su**: Implement aider agent adapter (P3)
+- **zb5**: Implement blacksmith adapter info/list/test commands (P3)
+- **c37**: Implement blacksmith metrics beads per-bead timing report (P3)

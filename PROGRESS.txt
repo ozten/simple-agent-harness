@@ -1,30 +1,24 @@
-## Last Session: Add progress and ETA to blacksmith run and --status output (506)
+## Last Session: Implement codex agent adapter (ec1)
 
 ### Completed
-- Added progress line printing after each productive iteration in `runner.rs`:
-  - Format: `[iter N] completed in Xm (Y turns) | Progress: A/B beads | avg Xm/bead | ETA: ~Zm`
-  - Shows turn count from ingest result when available
-  - Multi-worker mode shows parallel ETA with worker count
-  - Warns about dependency cycles
-  - Helper functions: `print_progress_line()`, `build_progress_string()`, `format_duration_secs()`
-- Enhanced `display_status()` in `status.rs` for `blacksmith --status`:
-  - Now shows worker-aware status label ("2 workers active" vs "PID X")
-  - Bead progress: "Progress: A/B beads (X%)" with completed/remaining counts
-  - Serial and parallel ETA from estimation module
-  - Dependency cycle warnings
-  - Failed beads count (checks `bd list --status=in_progress` for FAILED-ATTEMPT markers)
-  - Helper functions: `display_bead_progress()`, `count_failed_beads()`, `format_duration_f64()`
-- Updated `main.rs` call site to pass DB path and worker count to `display_status()`
-- Added 12 new tests (770 total passing):
-  - runner: format_duration_secs (3), print_progress_line (2), build_progress_string (2)
-  - status: format_duration_f64 (3), display_status_with_db (1), display_status_multi_worker (1)
+- Created `src/adapters/codex.rs` implementing the `AgentAdapter` trait for OpenAI Codex CLI
+- Parses Codex `--json` JSONL output format: `turn.completed`, `item.completed`, `thread.started` events
+- Supported metrics: `turns.total`, `turns.tool_calls`, `session.output_bytes`, `session.exit_code`, `session.duration_secs`
+- Gracefully skips unsupported metrics: `turns.narration_only`, `turns.parallel`, `cost.*`
+- Source mapping: `tool_commands` → `command_execution` items (strips `bash -lc` prefix), `text` → `agent_message` items, `raw` → all lines
+- Counts `file_change`, `mcp_tool_call`, `web_search` item types as tool calls
+- Duration calculated from first/last event timestamps
+- Exit code taken from last `command_execution` item
+- Registered module in `src/adapters/mod.rs` and wired into `create_adapter()`
+- Updated existing test that expected codex to fall back to raw adapter
+- Added 18 new tests (788 total passing)
 
 ### Key Files Modified
-- `src/runner.rs` — progress line printing after productive iterations
-- `src/status.rs` — enhanced --status output with bead progress/ETA
-- `src/main.rs` — updated display_status call with db_path and workers
+- `src/adapters/codex.rs` — new file, CodexAdapter implementation
+- `src/adapters/mod.rs` — added `pub mod codex`, wired `create_adapter`, updated test
 
 ### Suggested Next Tasks
-- **ec1**: Implement codex agent adapter (P3)
-- **c37**: Implement blacksmith metrics beads per-bead timing report (P3)
+- **y74**: Implement opencode agent adapter (P3)
+- **2su**: Implement aider agent adapter (P3)
 - **zb5**: Implement blacksmith adapter info/list/test commands (P3)
+- **c37**: Implement blacksmith metrics beads per-bead timing report (P3)
