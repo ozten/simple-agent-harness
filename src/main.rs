@@ -154,6 +154,7 @@ enum Commands {
         action: AdapterAction,
     },
     /// Run architecture analysis on the codebase
+    #[command(alias = "analyze")]
     Arch {
         /// Output as JSON instead of human-readable text
         #[arg(long)]
