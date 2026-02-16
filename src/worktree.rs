@@ -166,6 +166,7 @@ pub fn list(repo_dir: &Path) -> Result<Vec<PathBuf>, WorktreeError> {
 /// Prune stale worktree metadata for worktrees whose directories no longer exist.
 ///
 /// Runs: `git worktree prune`
+#[allow(dead_code)]
 pub fn prune(repo_dir: &Path) -> Result<(), WorktreeError> {
     let output = Command::new("git")
         .args(["worktree", "prune"])

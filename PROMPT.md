@@ -66,6 +66,16 @@ For the selected task (e.g., bd-X):
    - Follow existing code patterns (see MEMORY.md for architecture and testing conventions)
 
 4. **Verify** (use parallel calls per Rule A):
+
+   **4a. Bead-specific verification:**
+   Run `bd show bd-X` and look for a "## Verify" section in the description. If it exists, execute those exact steps. If any verification step fails, fix the issue before proceeding.
+
+   If the bead has NO "## Verify" section, add one now:
+   ```bash
+   bd update bd-X --notes="## Verify\n- Run: <command you used to test>\n- Expect: <what you observed>"
+   ```
+
+   **4b. Code quality gates:**
    ```bash
    # Run full test suite FIRST, then lint in parallel:
    cargo test
@@ -74,6 +84,9 @@ For the selected task (e.g., bd-X):
    cargo fmt --check
    ```
    Run clippy and fmt exactly ONCE each. Do not repeat them.
+
+   **4c. Integration check:**
+   Before closing, verify your changes don't break existing callers. Grep for the function/struct names you changed or renamed. If other code references them, confirm those references still work.
 
 5. **Finish** — write PROGRESS.txt and call bd-finish.sh, then STOP (Rule C):
    - **Write PROGRESS.txt** (overwrite, not append) with a short handoff note:

@@ -1205,6 +1205,30 @@ async fn main() {
             "  commit_detection.patterns = {:?}",
             config.commit_detection.patterns
         );
+        println!(
+            "  architecture.fan_in_threshold = {}",
+            config.architecture.fan_in_threshold
+        );
+        println!(
+            "  architecture.integration_loop_max = {}",
+            config.architecture.integration_loop_max
+        );
+        println!(
+            "  architecture.expansion_event_threshold = {}",
+            config.architecture.expansion_event_threshold
+        );
+        println!(
+            "  architecture.expansion_event_window = {}",
+            config.architecture.expansion_event_window
+        );
+        println!(
+            "  architecture.metadata_drift_sensitivity = {}",
+            config.architecture.metadata_drift_sensitivity
+        );
+        println!(
+            "  architecture.refactor_auto_approve = {}",
+            config.architecture.refactor_auto_approve
+        );
         if config.metrics.extract.rules.is_empty() {
             println!("  metrics.extract.rules = (none)");
         } else {
