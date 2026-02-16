@@ -12,6 +12,7 @@
 /// Workers continue coding while one task integrates.
 use crate::config::ResolvedAgentConfig;
 use crate::db;
+use crate::metadata_regen;
 use crate::task_manifest;
 use crate::worktree;
 use rusqlite::Connection;
@@ -1013,6 +1014,75 @@ impl IntegrationQueue {
             manifest_entries_reversed: manifest_reversed,
             blocked_by: Vec::new(),
         })
+    }
+
+    /// Run post-integration metadata hooks: invalidation and (for refactors) eager regeneration.
+    ///
+    /// Called after a successful integration. This implements the PRD's regeneration strategies:
+    /// - **All integrations**: lazily invalidate stale Layer 2 metadata via
+    ///   `invalidate_on_integration()`. Entries with a `base_commit` other than
+    ///   `new_commit` are deleted; regeneration happens on next `ensure_fresh()`.
+    /// - **Refactor integrations**: eagerly regenerate Layer 2 for all pending tasks
+    ///   via `regenerate_after_refactor()`, since refactors are more likely to move files.
+    ///
+    /// Regeneration failures are logged but never block the integration pipeline.
+    pub fn post_integration_hooks(
+        &self,
+        new_commit: &str,
+        is_refactor: bool,
+        pending_task_ids: &[&str],
+        db_conn: &Connection,
+    ) {
+        // Lazy invalidation: delete stale Layer 2 cache entries
+        match metadata_regen::invalidate_on_integration(db_conn, new_commit) {
+            Ok(count) => {
+                if count > 0 {
+                    tracing::info!(
+                        invalidated = count,
+                        new_commit,
+                        "invalidated stale metadata cache entries"
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    new_commit,
+                    "failed to invalidate metadata (best-effort, continuing)"
+                );
+            }
+        }
+
+        // Eager regeneration for refactor integrations
+        if is_refactor {
+            tracing::info!(
+                pending_tasks = pending_task_ids.len(),
+                new_commit,
+                "refactor integration detected, regenerating metadata for pending tasks"
+            );
+            match metadata_regen::regenerate_after_refactor(
+                db_conn,
+                &self.repo_dir,
+                new_commit,
+                pending_task_ids,
+            ) {
+                Ok(report) => {
+                    tracing::info!(
+                        invalidated = report.invalidated,
+                        regenerated = report.regenerated,
+                        already_fresh = report.already_fresh,
+                        skipped_no_intent = report.skipped_no_intent,
+                        "refactor metadata regeneration complete"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "failed to regenerate metadata after refactor (best-effort, continuing)"
+                    );
+                }
+            }
+        }
     }
 
     /// Record a failed integration in the database.
@@ -2153,5 +2223,199 @@ mod tests {
         assert_eq!(result.reverted_commit.as_deref(), Some("abc123"));
         assert_eq!(result.manifest_entries_reversed, 3);
         assert!(result.blocked_by.is_empty());
+    }
+
+    // --- Post-integration metadata invalidation tests ---
+
+    /// Helper: set up DB with intent + file_resolution tables for metadata tests.
+    fn setup_metadata_db(conn: &Connection) {
+        crate::intent::create_table(conn).unwrap();
+        crate::file_resolution::create_table(conn).unwrap();
+    }
+
+    /// Helper: store an intent analysis for a task.
+    fn store_test_intent(conn: &Connection, task_id: &str, content_hash: &str) {
+        let analysis = crate::intent::IntentAnalysis {
+            task_id: task_id.to_string(),
+            content_hash: content_hash.to_string(),
+            target_areas: vec![crate::intent::TargetArea {
+                concept: "test_concept".to_string(),
+                reasoning: "testing".to_string(),
+            }],
+        };
+        crate::intent::store(conn, &analysis).unwrap();
+    }
+
+    /// Helper: store a file resolution at a specific commit.
+    fn store_test_resolution(conn: &Connection, task_id: &str, base_commit: &str, intent_hash: &str) {
+        let res = crate::file_resolution::FileResolution {
+            task_id: task_id.to_string(),
+            base_commit: base_commit.to_string(),
+            intent_hash: intent_hash.to_string(),
+            mappings: vec![crate::file_resolution::FileResolutionMapping {
+                concept: "test".to_string(),
+                resolved_files: vec!["src/test.rs".to_string()],
+                resolved_modules: vec!["test".to_string()],
+            }],
+            derived: crate::file_resolution::DerivedFields::default(),
+        };
+        crate::file_resolution::store(conn, &res).unwrap();
+    }
+
+    #[test]
+    fn test_integrator_invalidation_normal_integration() {
+        // After a normal (non-refactor) integration, stale metadata should be invalidated
+        let dir = init_test_repo();
+        let repo_dir = dir.path();
+        let db_path = repo_dir.join("test.db");
+        let conn = db::open_or_create(&db_path).unwrap();
+        setup_metadata_db(&conn);
+
+        // Store resolutions at the "old" commit
+        store_test_resolution(&conn, "task-1", "old-commit", "h1");
+        store_test_resolution(&conn, "task-2", "old-commit", "h2");
+        store_test_resolution(&conn, "task-3", "new-commit-abc", "h3");
+
+        let queue = IntegrationQueue::new(repo_dir.to_path_buf(), "main".to_string());
+
+        // Call post_integration_hooks for a normal (non-refactor) integration
+        queue.post_integration_hooks(
+            "new-commit-abc",
+            false,    // not a refactor
+            &[],      // no pending tasks needed for non-refactor
+            &conn,
+        );
+
+        // Old entries should be invalidated (deleted)
+        assert!(crate::file_resolution::get(&conn, "task-1", "old-commit", "h1")
+            .unwrap()
+            .is_none());
+        assert!(crate::file_resolution::get(&conn, "task-2", "old-commit", "h2")
+            .unwrap()
+            .is_none());
+
+        // Fresh entry should still exist
+        assert!(crate::file_resolution::get(&conn, "task-3", "new-commit-abc", "h3")
+            .unwrap()
+            .is_some());
+    }
+
+    #[test]
+    fn test_integrator_invalidation_refactor_regenerates() {
+        // After a refactor integration, metadata should be eagerly regenerated
+        let dir = init_test_repo();
+        let repo_dir = dir.path();
+        let db_path = repo_dir.join("test.db");
+        let conn = db::open_or_create(&db_path).unwrap();
+        setup_metadata_db(&conn);
+
+        // Create a src dir with a file so file_resolution::resolve has something to scan
+        let src = repo_dir.join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("main.rs"), "fn main() {}").unwrap();
+
+        // Store intents for pending tasks
+        store_test_intent(&conn, "task-1", "h1");
+        store_test_intent(&conn, "task-2", "h2");
+
+        // Store stale resolutions at old commit
+        store_test_resolution(&conn, "task-1", "old-commit", "h1");
+        store_test_resolution(&conn, "task-2", "old-commit", "h2");
+
+        let queue = IntegrationQueue::new(repo_dir.to_path_buf(), "main".to_string());
+
+        // Call post_integration_hooks for a refactor integration
+        queue.post_integration_hooks(
+            "new-commit-def",
+            true,     // refactor
+            &["task-1", "task-2"],
+            &conn,
+        );
+
+        // Old entries should be invalidated
+        assert!(crate::file_resolution::get(&conn, "task-1", "old-commit", "h1")
+            .unwrap()
+            .is_none());
+        assert!(crate::file_resolution::get(&conn, "task-2", "old-commit", "h2")
+            .unwrap()
+            .is_none());
+
+        // New entries should have been regenerated at the new commit
+        assert!(crate::file_resolution::get(&conn, "task-1", "new-commit-def", "h1")
+            .unwrap()
+            .is_some());
+        assert!(crate::file_resolution::get(&conn, "task-2", "new-commit-def", "h2")
+            .unwrap()
+            .is_some());
+    }
+
+    #[test]
+    fn test_integrator_invalidation_no_stale_entries_is_noop() {
+        // When all metadata is already fresh, invalidation is a no-op
+        let dir = init_test_repo();
+        let repo_dir = dir.path();
+        let db_path = repo_dir.join("test.db");
+        let conn = db::open_or_create(&db_path).unwrap();
+        setup_metadata_db(&conn);
+
+        // Store a resolution at the current commit (already fresh)
+        store_test_resolution(&conn, "task-1", "current", "h1");
+
+        let queue = IntegrationQueue::new(repo_dir.to_path_buf(), "main".to_string());
+
+        queue.post_integration_hooks("current", false, &[], &conn);
+
+        // Entry should still be present
+        assert!(crate::file_resolution::get(&conn, "task-1", "current", "h1")
+            .unwrap()
+            .is_some());
+    }
+
+    #[test]
+    fn test_integrator_invalidation_refactor_skips_no_intent() {
+        // Refactor regeneration should skip tasks without intent analysis
+        let dir = init_test_repo();
+        let repo_dir = dir.path();
+        let db_path = repo_dir.join("test.db");
+        let conn = db::open_or_create(&db_path).unwrap();
+        setup_metadata_db(&conn);
+
+        let src = repo_dir.join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("main.rs"), "fn main() {}").unwrap();
+
+        // task-1 has intent, task-no-intent does not
+        store_test_intent(&conn, "task-1", "h1");
+
+        let queue = IntegrationQueue::new(repo_dir.to_path_buf(), "main".to_string());
+
+        // Should not panic or error on tasks without intent
+        queue.post_integration_hooks(
+            "new-commit",
+            true,
+            &["task-1", "task-no-intent"],
+            &conn,
+        );
+
+        // task-1 should have been regenerated
+        assert!(crate::file_resolution::get(&conn, "task-1", "new-commit", "h1")
+            .unwrap()
+            .is_some());
+    }
+
+    #[test]
+    fn test_integrator_invalidation_does_not_block_on_empty_db() {
+        // Post-integration hooks should work fine even with no metadata at all
+        let dir = init_test_repo();
+        let repo_dir = dir.path();
+        let db_path = repo_dir.join("test.db");
+        let conn = db::open_or_create(&db_path).unwrap();
+        setup_metadata_db(&conn);
+
+        let queue = IntegrationQueue::new(repo_dir.to_path_buf(), "main".to_string());
+
+        // Should not panic or error
+        queue.post_integration_hooks("some-commit", false, &[], &conn);
+        queue.post_integration_hooks("some-commit", true, &[], &conn);
     }
 }

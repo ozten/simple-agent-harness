@@ -233,6 +233,23 @@ pub async fn run(
                             merge_commit,
                             &config.workers.base_branch,
                         );
+
+                        // Post-integration metadata hooks: invalidate stale Layer 2 cache,
+                        // and eagerly regenerate if this was a refactor integration.
+                        let is_refactor = is_refactor_bead(&bead_id);
+                        let pending_ids = if is_refactor {
+                            query_pending_task_ids()
+                        } else {
+                            Vec::new()
+                        };
+                        let pending_refs: Vec<&str> =
+                            pending_ids.iter().map(|s| s.as_str()).collect();
+                        integration_queue.post_integration_hooks(
+                            merge_commit,
+                            is_refactor,
+                            &pending_refs,
+                            &db_conn,
+                        );
                     }
 
                     // Check if architecture review is needed after this integration
@@ -782,6 +799,56 @@ fn handle_tripped_failure(tripped: &TrippedFailure) {
                 "failed to run bd update command"
             );
         }
+    }
+}
+
+/// Check whether a bead is a refactor task by querying its issue_type.
+///
+/// Shells out to `bd show <id> --json` and checks if `issue_type` contains "refactor".
+/// Returns `false` on any error (fail-open: non-refactor is the safe default).
+fn is_refactor_bead(bead_id: &str) -> bool {
+    let output = match std::process::Command::new("bd")
+        .args(["show", bead_id, "--json"])
+        .output()
+    {
+        Ok(o) if o.status.success() => o,
+        _ => return false,
+    };
+
+    let json_str = String::from_utf8_lossy(&output.stdout);
+    let parsed: Result<Vec<serde_json::Value>, _> = serde_json::from_str(&json_str);
+    match parsed {
+        Ok(beads) => beads
+            .first()
+            .and_then(|b| b.get("issue_type"))
+            .and_then(|v| v.as_str())
+            .map(|t| t.contains("refactor"))
+            .unwrap_or(false),
+        Err(_) => false,
+    }
+}
+
+/// Query all open/in-progress task IDs for use in refactor metadata regeneration.
+///
+/// Returns bead IDs that have pending work (open or in_progress status).
+/// On error, returns an empty list (regeneration is best-effort).
+fn query_pending_task_ids() -> Vec<String> {
+    let output = match std::process::Command::new("bd")
+        .args(["list", "--status=open", "--json"])
+        .output()
+    {
+        Ok(o) if o.status.success() => o,
+        _ => return Vec::new(),
+    };
+
+    let json_str = String::from_utf8_lossy(&output.stdout);
+    let parsed: Result<Vec<serde_json::Value>, _> = serde_json::from_str(&json_str);
+    match parsed {
+        Ok(beads) => beads
+            .iter()
+            .filter_map(|b| b.get("id").and_then(|v| v.as_str()).map(|s| s.to_string()))
+            .collect(),
+        Err(_) => Vec::new(),
     }
 }
 
