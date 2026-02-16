@@ -557,6 +557,13 @@ pub struct ArchitectureConfig {
     /// automatically approved and queued, or require human confirmation.
     /// Default: false
     pub refactor_auto_approve: bool,
+    /// Number of completed task integrations between periodic architecture
+    /// reviews. Set to 0 to disable periodic reviews. Default: 10
+    pub arch_review_interval: u32,
+    /// Average integration iteration count threshold. When the rolling
+    /// average of iterations across recent tasks exceeds this value,
+    /// an architecture review is triggered. Default: 3.0
+    pub integration_iteration_threshold: f64,
 }
 
 impl Default for ArchitectureConfig {
@@ -568,6 +575,8 @@ impl Default for ArchitectureConfig {
             expansion_event_window: 20,
             metadata_drift_sensitivity: 3.0,
             refactor_auto_approve: false,
+            arch_review_interval: 10,
+            integration_iteration_threshold: 3.0,
         }
     }
 }
@@ -583,6 +592,8 @@ impl ArchitectureConfig {
             expansion_event_window: 30,
             metadata_drift_sensitivity: 5.0,
             refactor_auto_approve: false,
+            arch_review_interval: 20,
+            integration_iteration_threshold: 5.0,
         }
     }
 
@@ -595,6 +606,8 @@ impl ArchitectureConfig {
             expansion_event_window: 15,
             metadata_drift_sensitivity: 2.0,
             refactor_auto_approve: true,
+            arch_review_interval: 5,
+            integration_iteration_threshold: 2.0,
         }
     }
 }

@@ -4,6 +4,7 @@
 /// It reads ready beads, uses the scheduler to find non-conflicting assignments,
 /// spawns workers in git worktrees, and polls for completions.
 /// Completed workers are queued for sequential integration into main.
+use crate::architecture_runner::{ArchitectureRunner, RunOutcome, TriggerContext};
 use crate::config::HarnessConfig;
 use crate::cycle_detect;
 use crate::data_dir::DataDir;
@@ -116,6 +117,7 @@ pub async fn run(
     let mut failed_beads = 0u32;
     let mut consecutive_no_work = 0u32;
     const MAX_CONSECUTIVE_NO_WORK: u32 = 3;
+    let mut arch_runner = ArchitectureRunner::new(&config.architecture);
 
     tracing::info!(
         max_workers = config.workers.max,
@@ -231,6 +233,25 @@ pub async fn run(
                             merge_commit,
                             &config.workers.base_branch,
                         );
+                    }
+
+                    // Check if architecture review is needed after this integration
+                    let trigger = TriggerContext::TaskCompleted {
+                        completed_count: completed_beads,
+                    };
+                    match arch_runner.run_if_needed(
+                        trigger,
+                        &repo_dir,
+                        &db_conn,
+                        &config.architecture,
+                    ) {
+                        RunOutcome::Ran(report) => {
+                            tracing::info!(
+                                proposals = report.proposals.len(),
+                                "architecture review completed after integration"
+                            );
+                        }
+                        RunOutcome::Skipped { .. } => {}
                     }
 
                     // Reset the worker back to idle after successful integration

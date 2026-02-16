@@ -1,4 +1,6 @@
 mod adapters;
+mod architecture_pipeline;
+mod architecture_runner;
 mod boundary_violation;
 mod brief;
 mod circular_dep;
