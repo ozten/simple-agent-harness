@@ -458,12 +458,16 @@ impl WorkerPool {
         &self.worktrees_dir
     }
 
-    /// Get active worktree paths (for orphan cleanup).
-    #[allow(dead_code)]
+    /// Get all worktree paths currently owned by non-idle workers.
+    ///
+    /// Includes workers in **any** non-idle state (Coding, Completed, Failed,
+    /// Integrating) — all of them have worktrees that must not be cleaned up
+    /// as orphans. Only idle workers (which have `worktree_path = None`) are
+    /// excluded.
     pub fn active_worktree_paths(&self) -> Vec<PathBuf> {
         self.workers
             .iter()
-            .filter(|w| w.state == WorkerState::Coding)
+            .filter(|w| w.state != WorkerState::Idle)
             .filter_map(|w| w.worktree_path.clone())
             .collect()
     }
@@ -678,6 +682,51 @@ mod tests {
         let pool = WorkerPool::new(&config, dir.path().to_path_buf(), wt_dir, 0);
 
         assert!(pool.active_worktree_paths().is_empty());
+    }
+
+    #[test]
+    fn test_active_worktree_paths_includes_all_non_idle_states() {
+        let dir = init_test_repo();
+        let wt_dir = dir.path().join("worktrees");
+        let config = test_workers_config(4);
+        let mut pool = WorkerPool::new(&config, dir.path().to_path_buf(), wt_dir.clone(), 0);
+
+        // Simulate workers in different non-idle states, each with a worktree
+        pool.set_worker_state_for_test(
+            0,
+            WorkerState::Coding,
+            Some(1),
+            Some("bead-a".into()),
+            Some(wt_dir.join("worker-0")),
+        );
+        pool.set_worker_state_for_test(
+            1,
+            WorkerState::Completed,
+            Some(2),
+            Some("bead-b".into()),
+            Some(wt_dir.join("worker-1")),
+        );
+        pool.set_worker_state_for_test(
+            2,
+            WorkerState::Failed,
+            Some(3),
+            Some("bead-c".into()),
+            Some(wt_dir.join("worker-2")),
+        );
+        pool.set_worker_state_for_test(
+            3,
+            WorkerState::Integrating,
+            Some(4),
+            Some("bead-d".into()),
+            Some(wt_dir.join("worker-3")),
+        );
+
+        let paths = pool.active_worktree_paths();
+        assert_eq!(paths.len(), 4, "all non-idle workers must be included");
+        assert!(paths.contains(&wt_dir.join("worker-0")));
+        assert!(paths.contains(&wt_dir.join("worker-1")));
+        assert!(paths.contains(&wt_dir.join("worker-2")));
+        assert!(paths.contains(&wt_dir.join("worker-3")));
     }
 
     #[tokio::test]
