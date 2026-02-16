@@ -11,7 +11,7 @@ use crate::data_dir::DataDir;
 use crate::db;
 use crate::estimation::BeadNode;
 use crate::ingest;
-use crate::integrator::{CircuitBreaker, IntegrationQueue, TrippedFailure};
+use crate::integrator::{CircuitBreaker, IntegrationQueue, IntegrationResult, TrippedFailure};
 use crate::pool::{PoolError, SessionOutcome, WorkerPool};
 use crate::runner;
 use crate::scheduler::{self, InProgressAssignment, ReadyBead};
@@ -117,6 +117,12 @@ pub async fn run(
     let mut failed_beads = 0u32;
     let mut consecutive_no_work = 0u32;
     const MAX_CONSECUTIVE_NO_WORK: u32 = 3;
+
+    // Handle for the background integration task (at most one at a time).
+    let mut integration_handle: Option<
+        tokio::task::JoinHandle<(IntegrationResult, CircuitBreaker)>,
+    > = None;
+    let db_path = data_dir.db();
 
     // StatusTracker: write state transitions so `--status` works
     let status_path = data_dir.status();
@@ -239,76 +245,106 @@ pub async fn run(
             }
         }
 
-        // Integration: process one completed worker at a time (sequential)
-        // Only integrate if no other worker is currently integrating
-        if !pool.has_integrating() {
-            if let Some((worker_id, assignment_id, worktree_path, bead_id)) = pool.next_completed()
-            {
-                // Mark the worker as integrating
-                pool.set_integrating(worker_id);
+        // Integration: process one completed worker at a time (sequential).
+        // The actual integrate() call runs in a background thread so the
+        // coordinator loop can continue polling/scheduling while it runs.
 
-                tracing::info!(worker_id, bead_id = %bead_id, "starting integration");
+        // Poll the in-flight integration handle (if any)
+        if let Some(handle) = integration_handle.as_mut() {
+            if handle.is_finished() {
+                let handle = integration_handle.take().unwrap();
+                match handle.await {
+                    Ok((result, updated_cb)) => {
+                        // Merge circuit breaker state back from the background task
+                        circuit_breaker = updated_cb;
 
-                let resolved_integration = config.agent.resolved_integration();
-                let result = integration_queue.integrate(
-                    worker_id,
-                    assignment_id,
-                    &bead_id,
-                    &worktree_path,
-                    &db_conn,
-                    Some(&resolved_integration),
-                    &mut circuit_breaker,
-                );
+                        let worker_id = result.worker_id;
+                        let bead_id = result.bead_id.clone();
+                        let worktree_path = pool
+                            .worker_worktree_path(worker_id)
+                            .unwrap_or_else(|| PathBuf::from("<unknown>"));
 
-                if result.success {
-                    completed_beads += 1;
+                        if result.success {
+                            completed_beads += 1;
 
-                    // Print progress using DB state (metrics already ingested during poll phase)
-                    print_coordinator_integration_progress(
-                        worker_id,
-                        &bead_id,
-                        completed_beads,
-                        failed_beads,
-                        &db_conn,
-                        config.workers.max,
-                    );
+                            print_coordinator_integration_progress(
+                                worker_id,
+                                &bead_id,
+                                completed_beads,
+                                failed_beads,
+                                &db_conn,
+                                config.workers.max,
+                            );
 
-                    tracing::info!(
-                        worker_id,
-                        bead_id = %bead_id,
-                        commit = ?result.merge_commit,
-                        "integration succeeded"
-                    );
-                    // Reset the worker back to idle after successful integration
-                    if let Err(e) = pool.reset_worker(worker_id) {
-                        tracing::warn!(error = %e, worker_id, "failed to reset worker after integration");
-                    }
-                } else {
-                    let error_summary = result.failure_reason.as_deref().unwrap_or("unknown error");
+                            tracing::info!(
+                                worker_id,
+                                bead_id = %bead_id,
+                                commit = ?result.merge_commit,
+                                "integration succeeded"
+                            );
+                            if let Err(e) = pool.reset_worker(worker_id) {
+                                tracing::warn!(error = %e, worker_id, "failed to reset worker after integration");
+                            }
+                        } else {
+                            let error_summary =
+                                result.failure_reason.as_deref().unwrap_or("unknown error");
 
-                    // Check if the circuit breaker has tripped (integrate() already recorded attempts)
-                    if let Some(tripped) =
-                        circuit_breaker.check_tripped(&bead_id, error_summary, &worktree_path)
-                    {
-                        // Circuit breaker tripped — escalate to human review
-                        failed_beads += 1;
-                        handle_tripped_failure(&tripped);
-                        // Do NOT reset the worker — worktree is preserved for inspection
-                        // Do NOT clean up the worktree
-                    } else {
-                        tracing::warn!(
-                            worker_id,
-                            bead_id = %bead_id,
-                            reason = ?result.failure_reason,
-                            state = %circuit_breaker.state(&bead_id),
-                            "integration failed, retries remain"
-                        );
-                        // Reset the worker back to idle so it can retry
-                        if let Err(e) = pool.reset_worker(worker_id) {
-                            tracing::warn!(error = %e, worker_id, "failed to reset worker after integration failure");
+                            if let Some(tripped) = circuit_breaker.check_tripped(
+                                &bead_id,
+                                error_summary,
+                                &worktree_path,
+                            ) {
+                                failed_beads += 1;
+                                handle_tripped_failure(&tripped);
+                            } else {
+                                tracing::warn!(
+                                    worker_id,
+                                    bead_id = %bead_id,
+                                    reason = ?result.failure_reason,
+                                    state = %circuit_breaker.state(&bead_id),
+                                    "integration failed, retries remain"
+                                );
+                                if let Err(e) = pool.reset_worker(worker_id) {
+                                    tracing::warn!(error = %e, worker_id, "failed to reset worker after integration failure");
+                                }
+                            }
                         }
                     }
+                    Err(e) => {
+                        tracing::error!(error = %e, "integration task panicked");
+                    }
                 }
+            }
+        }
+
+        // Start a new integration if none is in-flight and a completed worker is ready
+        if integration_handle.is_none() && !pool.has_integrating() {
+            if let Some((worker_id, assignment_id, worktree_path, bead_id)) = pool.next_completed()
+            {
+                pool.set_integrating(worker_id);
+                tracing::info!(worker_id, bead_id = %bead_id, "starting integration");
+
+                // Clone/own everything needed for the background task
+                let iq = integration_queue.clone();
+                let cb = circuit_breaker.clone();
+                let resolved_integration = config.agent.resolved_integration();
+                let db_path = db_path.clone();
+
+                integration_handle = Some(tokio::task::spawn_blocking(move || {
+                    let bg_conn = db::open_or_create(&db_path)
+                        .expect("failed to open DB for integration");
+                    let mut cb = cb;
+                    let result = iq.integrate(
+                        worker_id,
+                        assignment_id,
+                        &bead_id,
+                        &worktree_path,
+                        &bg_conn,
+                        Some(&resolved_integration),
+                        &mut cb,
+                    );
+                    (result, cb)
+                }));
             }
         }
 
@@ -324,7 +360,7 @@ pub async fn run(
             let bead_query = query_ready_beads();
             let ready_beads = bead_query.ready;
 
-            if ready_beads.is_empty() && pool.active_count() == 0 {
+            if ready_beads.is_empty() && pool.active_count() == 0 && integration_handle.is_none() {
                 consecutive_no_work += 1;
                 if consecutive_no_work >= MAX_CONSECUTIVE_NO_WORK {
                     tracing::info!("no work available and no active workers, exiting");
@@ -393,7 +429,7 @@ pub async fn run(
         }
 
         // Update status between poll cycles
-        if pool.active_count() == 0 {
+        if pool.active_count() == 0 && integration_handle.is_none() {
             status.update(HarnessState::Idle);
         }
 
