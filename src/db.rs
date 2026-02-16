@@ -3070,29 +3070,33 @@ mod tests {
         let (_dir, conn) = test_db();
 
         // Insert bead with NULL completed_at
-        upsert_bead_metrics(&conn, "beads-abc", 1, 60.0, 10, Some(100), None, None)
-            .unwrap();
+        upsert_bead_metrics(&conn, "beads-abc", 1, 60.0, 10, Some(100), None, None).unwrap();
 
         let result = mark_bead_completed(&conn, "beads-abc").unwrap();
         assert!(result, "should return true when updating a bead");
 
         let bm = get_bead_metrics(&conn, "beads-abc").unwrap().unwrap();
         assert!(bm.completed_at.is_some(), "completed_at should now be set");
-        assert!(bm.completed_at.unwrap().contains('T'), "should be ISO timestamp");
+        assert!(
+            bm.completed_at.unwrap().contains('T'),
+            "should be ISO timestamp"
+        );
     }
 
     #[test]
     fn test_mark_bead_completed_idempotent() {
         let (_dir, conn) = test_db();
 
-        upsert_bead_metrics(&conn, "beads-abc", 1, 60.0, 10, Some(100), None, None)
-            .unwrap();
+        upsert_bead_metrics(&conn, "beads-abc", 1, 60.0, 10, Some(100), None, None).unwrap();
 
         let first = mark_bead_completed(&conn, "beads-abc").unwrap();
         assert!(first, "first call should return true");
 
         let second = mark_bead_completed(&conn, "beads-abc").unwrap();
-        assert!(!second, "second call should return false (already completed)");
+        assert!(
+            !second,
+            "second call should return false (already completed)"
+        );
     }
 
     #[test]
@@ -3110,12 +3114,20 @@ mod tests {
         let (_dir, conn) = test_db();
 
         // Insert with completed_at set
-        upsert_bead_metrics(&conn, "beads-abc", 1, 60.0, 10, Some(100), None, Some("2026-02-16T12:00:00Z"))
-            .unwrap();
+        upsert_bead_metrics(
+            &conn,
+            "beads-abc",
+            1,
+            60.0,
+            10,
+            Some(100),
+            None,
+            Some("2026-02-16T12:00:00Z"),
+        )
+        .unwrap();
 
         // Upsert with completed_at=None — should preserve existing value
-        upsert_bead_metrics(&conn, "beads-abc", 2, 120.0, 20, Some(200), None, None)
-            .unwrap();
+        upsert_bead_metrics(&conn, "beads-abc", 2, 120.0, 20, Some(200), None, None).unwrap();
 
         let bm = get_bead_metrics(&conn, "beads-abc").unwrap().unwrap();
         assert_eq!(bm.sessions, 2);
@@ -3132,12 +3144,20 @@ mod tests {
         let (_dir, conn) = test_db();
 
         // Insert without completed_at
-        upsert_bead_metrics(&conn, "beads-abc", 1, 60.0, 10, Some(100), None, None)
-            .unwrap();
+        upsert_bead_metrics(&conn, "beads-abc", 1, 60.0, 10, Some(100), None, None).unwrap();
 
         // Upsert with a new completed_at value
-        upsert_bead_metrics(&conn, "beads-abc", 2, 120.0, 20, Some(200), None, Some("2026-02-16T14:00:00Z"))
-            .unwrap();
+        upsert_bead_metrics(
+            &conn,
+            "beads-abc",
+            2,
+            120.0,
+            20,
+            Some(200),
+            None,
+            Some("2026-02-16T14:00:00Z"),
+        )
+        .unwrap();
 
         let bm = get_bead_metrics(&conn, "beads-abc").unwrap().unwrap();
         assert_eq!(

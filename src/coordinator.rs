@@ -356,8 +356,8 @@ pub async fn run(
                 let db_path = db_path.clone();
 
                 integration_handle = Some(tokio::task::spawn_blocking(move || {
-                    let bg_conn = db::open_or_create(&db_path)
-                        .expect("failed to open DB for integration");
+                    let bg_conn =
+                        db::open_or_create(&db_path).expect("failed to open DB for integration");
                     let mut cb = cb;
                     let result = iq.integrate(
                         worker_id,
@@ -1066,10 +1066,11 @@ fn maybe_run_architecture_review(
 ) {
     let periodic_trigger = arch_config.review_interval > 0
         && completed_beads > 0
-        && completed_beads % arch_config.review_interval == 0;
+        && completed_beads.is_multiple_of(arch_config.review_interval);
 
     let threshold_trigger = if arch_config.expansion_event_threshold > 0 {
-        match expansion_event::count_recent_expansions(db_conn, arch_config.expansion_event_window) {
+        match expansion_event::count_recent_expansions(db_conn, arch_config.expansion_event_window)
+        {
             Ok(count) => count >= arch_config.expansion_event_threshold,
             Err(e) => {
                 tracing::debug!(error = %e, "failed to count expansion events for arch review");
@@ -1537,8 +1538,7 @@ mod tests {
         let wa = db::get_worker_assignment(&db_conn, assignment_id)
             .unwrap()
             .unwrap();
-        let globs: Vec<String> =
-            serde_json::from_str(&wa.affected_globs.unwrap()).unwrap();
+        let globs: Vec<String> = serde_json::from_str(&wa.affected_globs.unwrap()).unwrap();
         assert!(globs.contains(&"src/db.rs".to_string()));
         assert!(globs.contains(&"src/config.rs".to_string()));
         assert!(globs.contains(&"src/signals.rs".to_string()));
@@ -1597,8 +1597,7 @@ mod tests {
         let wa = db::get_worker_assignment(&db_conn, assignment_id)
             .unwrap()
             .unwrap();
-        let globs: Vec<String> =
-            serde_json::from_str(&wa.affected_globs.unwrap()).unwrap();
+        let globs: Vec<String> = serde_json::from_str(&wa.affected_globs.unwrap()).unwrap();
 
         // src/db.rs should appear only once
         assert_eq!(globs.iter().filter(|g| *g == "src/db.rs").count(), 1);
@@ -1709,8 +1708,7 @@ mod tests {
         let wa = db::get_worker_assignment(&db_conn, assignment_id)
             .unwrap()
             .unwrap();
-        let globs: Vec<String> =
-            serde_json::from_str(&wa.affected_globs.unwrap()).unwrap();
+        let globs: Vec<String> = serde_json::from_str(&wa.affected_globs.unwrap()).unwrap();
         assert_eq!(globs, vec!["src/config.rs", "src/signals.rs"]);
     }
 

@@ -124,10 +124,7 @@ struct SessionMetrics {
 fn parse_session_jsonl(path: &Path) -> Result<SessionMetrics, String> {
     let file =
         std::fs::File::open(path).map_err(|e| format!("Cannot open {}: {e}", path.display()))?;
-    let file_size = file
-        .metadata()
-        .map(|m| m.len())
-        .unwrap_or(0);
+    let file_size = file.metadata().map(|m| m.len()).unwrap_or(0);
     let reader = std::io::BufReader::new(file);
 
     let mut m = SessionMetrics {
@@ -234,7 +231,12 @@ fn extract_result(v: &Value, m: &mut SessionMetrics) {
 
 // ── Database operations ──────────────────────────────────────────────────
 
-fn upsert_session(conn: &Connection, session_id: u64, file: &str, m: &SessionMetrics) -> rusqlite::Result<()> {
+fn upsert_session(
+    conn: &Connection,
+    session_id: u64,
+    file: &str,
+    m: &SessionMetrics,
+) -> rusqlite::Result<()> {
     conn.execute(
         "INSERT INTO sessions (session_id, file, timestamp, turns, tool_calls,
             narration_only_turns, parallel_tool_calls, duration_secs,
@@ -289,8 +291,12 @@ fn session_id_from_path(path: &Path) -> Option<u64> {
 // ── Subcommand handlers ──────────────────────────────────────────────────
 
 fn handle_log(conn: &Connection, file: &Path) -> Result<(), String> {
-    let session_id = session_id_from_path(file)
-        .ok_or_else(|| format!("Cannot extract session ID from filename: {}", file.display()))?;
+    let session_id = session_id_from_path(file).ok_or_else(|| {
+        format!(
+            "Cannot extract session ID from filename: {}",
+            file.display()
+        )
+    })?;
 
     // Handle zstd-compressed files
     let metrics = if file.extension().and_then(|e| e.to_str()) == Some("zst") {
@@ -381,9 +387,7 @@ fn handle_backfill(
         }
     }
 
-    println!(
-        "Backfill complete: {success}/{total} sessions ingested ({errors} errors)"
-    );
+    println!("Backfill complete: {success}/{total} sessions ingested ({errors} errors)");
     Ok(())
 }
 
@@ -395,8 +399,8 @@ fn handle_seed(conn: &Connection, source_db_path: &Path) -> Result<(), String> {
         ));
     }
 
-    let source = Connection::open(source_db_path)
-        .map_err(|e| format!("Cannot open source DB: {e}"))?;
+    let source =
+        Connection::open(source_db_path).map_err(|e| format!("Cannot open source DB: {e}"))?;
 
     // Check if the source has an improvements table
     let has_table: bool = source
@@ -467,8 +471,7 @@ fn handle_seed(conn: &Connection, source_db_path: &Path) -> Result<(), String> {
 fn parse_zst_session(path: &Path) -> Result<SessionMetrics, String> {
     let file =
         std::fs::File::open(path).map_err(|e| format!("Cannot open {}: {e}", path.display()))?;
-    let decoder =
-        zstd::Decoder::new(file).map_err(|e| format!("Zstd decode error: {e}"))?;
+    let decoder = zstd::Decoder::new(file).map_err(|e| format!("Zstd decode error: {e}"))?;
     let reader = std::io::BufReader::new(decoder);
 
     // Get output_bytes from compressed file size
@@ -590,18 +593,12 @@ mod tests {
 
     #[test]
     fn session_id_from_jsonl() {
-        assert_eq!(
-            session_id_from_path(Path::new("100.jsonl")),
-            Some(100)
-        );
+        assert_eq!(session_id_from_path(Path::new("100.jsonl")), Some(100));
     }
 
     #[test]
     fn session_id_from_zst() {
-        assert_eq!(
-            session_id_from_path(Path::new("42.jsonl.zst")),
-            Some(42)
-        );
+        assert_eq!(session_id_from_path(Path::new("42.jsonl.zst")), Some(42));
     }
 
     #[test]
@@ -669,9 +666,7 @@ mod tests {
     #[test]
     fn parse_error_result() {
         let dir = TempDir::new().unwrap();
-        let lines = &[
-            r#"{"type":"result","subtype":"error","is_error":true,"duration_ms":1000}"#,
-        ];
+        let lines = &[r#"{"type":"result","subtype":"error","is_error":true,"duration_ms":1000}"#];
         let path = write_jsonl(dir.path(), "3.jsonl", lines);
         let m = parse_session_jsonl(&path).unwrap();
         assert!(!m.completion);

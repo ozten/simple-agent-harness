@@ -669,7 +669,10 @@ mod tests {
 
         // Verify completed_at is initially NULL
         let bm = db::get_bead_metrics(&conn, "test-bead").unwrap().unwrap();
-        assert!(bm.completed_at.is_none(), "completed_at should start as None");
+        assert!(
+            bm.completed_at.is_none(),
+            "completed_at should start as None"
+        );
         drop(conn);
 
         // Call handle_finish with all gates passing but it will fail at git stage

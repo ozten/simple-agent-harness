@@ -29,9 +29,7 @@ pub fn handle_log(db_path: &Path, file: &Path) -> Result<(), String> {
     println!("Ingested session {session} from {}", file.display());
     println!(
         "  turns: {}  cost: ${:.2}  duration: {}s",
-        result.turns_total,
-        result.cost_estimate_usd,
-        result.session_duration_secs as u64
+        result.turns_total, result.cost_estimate_usd, result.session_duration_secs as u64
     );
 
     Ok(())
@@ -669,7 +667,10 @@ fn migrate_sessions(v1: &Connection, v2: &Connection) -> rusqlite::Result<u64> {
             "session.output_bytes".into(),
             serde_json::json!(output_bytes),
         );
-        map.insert("session.duration_secs".into(), serde_json::json!(duration_secs));
+        map.insert(
+            "session.duration_secs".into(),
+            serde_json::json!(duration_secs),
+        );
         if let Some(code) = exit_code {
             map.insert("session.exit_code".into(), serde_json::json!(code));
         }

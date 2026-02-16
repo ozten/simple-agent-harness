@@ -2511,10 +2511,7 @@ format = []
         .unwrap();
         let config = HarnessConfig::load(&path).unwrap();
         assert_eq!(config.quality_gates.check, vec!["npm run build"]);
-        assert_eq!(
-            config.quality_gates.test,
-            vec!["npm test", "npm run e2e"]
-        );
+        assert_eq!(config.quality_gates.test, vec!["npm test", "npm run e2e"]);
         assert_eq!(config.quality_gates.lint, vec!["eslint ."]);
         assert!(config.quality_gates.format.is_empty());
     }
