@@ -28,6 +28,7 @@ mod migrate;
 mod module_detect;
 mod pool;
 mod prompt;
+mod proposal_validation;
 mod public_api;
 mod ratelimit;
 mod retention;
