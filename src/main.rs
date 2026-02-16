@@ -556,6 +556,18 @@ fn handle_integration_rollback(
 /// Handle `blacksmith workers status` — show current worker pool state.
 fn handle_workers_status(db_path: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
     let conn = db::open_or_create(db_path)?;
+
+    // Clean up stale assignments whose worktrees no longer exist on disk.
+    match db::cleanup_stale_worker_assignments(&conn) {
+        Ok(count) if count > 0 => {
+            eprintln!("Cleaned up {} stale worker assignment(s).", count);
+        }
+        Err(e) => {
+            eprintln!("Warning: failed to clean up stale assignments: {e}");
+        }
+        _ => {}
+    }
+
     let assignments = db::active_worker_assignments(&conn)?;
 
     if assignments.is_empty() {

@@ -176,6 +176,20 @@ pub async fn run(
         _ => {}
     }
 
+    // Clean up stale worker assignments whose worktree directories no longer exist.
+    match db::cleanup_stale_worker_assignments(&db_conn) {
+        Ok(count) if count > 0 => {
+            tracing::info!(
+                count,
+                "cleaned up stale worker assignments from previous run"
+            );
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to clean up stale worker assignments");
+        }
+        _ => {}
+    }
+
     loop {
         // Check for shutdown signals
         if signals.shutdown_requested() {

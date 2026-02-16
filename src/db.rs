@@ -700,6 +700,29 @@ fn map_worker_assignment(row: &rusqlite::Row) -> Result<WorkerAssignment> {
     })
 }
 
+/// Clean up stale worker assignments whose worktree directories no longer exist.
+///
+/// Iterates active assignments (status = coding/integrating). For each, checks if
+/// the worktree_path directory exists on disk. If not, marks the assignment as
+/// 'failed' with notes indicating it was stale. Returns the count of cleaned
+/// assignments.
+pub fn cleanup_stale_worker_assignments(conn: &Connection) -> Result<usize> {
+    let active = active_worker_assignments(conn)?;
+    let mut cleaned = 0;
+    for wa in &active {
+        if !Path::new(&wa.worktree_path).exists() {
+            update_worker_assignment_status(
+                conn,
+                wa.id,
+                "failed",
+                Some("stale: worktree no longer exists"),
+            )?;
+            cleaned += 1;
+        }
+    }
+    Ok(cleaned)
+}
+
 // ── Task File Changes ──────────────────────────────────────────────
 
 /// A row from the task_file_changes table.
@@ -2295,6 +2318,75 @@ mod tests {
 
         let active = active_worker_assignments(&conn).unwrap();
         assert!(active.is_empty());
+    }
+
+    // ── Stale Worker Cleanup tests ──────────────────────────────────────
+
+    #[test]
+    fn test_cleanup_stale_worker_assignments() {
+        let (_dir, conn) = test_db();
+
+        // Insert assignments with non-existent worktree paths
+        insert_worker_assignment(
+            &conn,
+            0,
+            "beads-stale1",
+            "/nonexistent/path/wt-0",
+            "coding",
+            None,
+        )
+        .unwrap();
+        insert_worker_assignment(
+            &conn,
+            1,
+            "beads-stale2",
+            "/nonexistent/path/wt-1",
+            "integrating",
+            None,
+        )
+        .unwrap();
+
+        let cleaned = cleanup_stale_worker_assignments(&conn).unwrap();
+        assert_eq!(cleaned, 2);
+
+        // Verify they are now failed
+        let active = active_worker_assignments(&conn).unwrap();
+        assert!(active.is_empty());
+
+        let wa0 = get_worker_assignment(&conn, 1).unwrap().unwrap();
+        assert_eq!(wa0.status, "failed");
+        assert_eq!(
+            wa0.failure_notes.as_deref(),
+            Some("stale: worktree no longer exists")
+        );
+    }
+
+    #[test]
+    fn test_cleanup_stale_preserves_valid() {
+        let (_dir, conn) = test_db();
+
+        // Insert assignment with an existing directory (/tmp always exists)
+        insert_worker_assignment(&conn, 0, "beads-valid", "/tmp", "coding", None).unwrap();
+
+        // Insert a stale one too
+        insert_worker_assignment(
+            &conn,
+            1,
+            "beads-stale",
+            "/nonexistent/path/wt-stale",
+            "coding",
+            None,
+        )
+        .unwrap();
+
+        let cleaned = cleanup_stale_worker_assignments(&conn).unwrap();
+        assert_eq!(cleaned, 1);
+
+        // Valid assignment should still be active
+        let active = active_worker_assignments(&conn).unwrap();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].bead_id, "beads-valid");
+        assert_eq!(active[0].status, "coding");
     }
 
     // ── Task File Changes tests ─────────────────────────────────────────
