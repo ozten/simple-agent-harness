@@ -9,6 +9,7 @@ mod coordinator;
 mod cycle_detect;
 mod data_dir;
 mod db;
+mod defaults;
 mod estimation;
 mod expansion_event;
 mod fan_in;
@@ -104,7 +105,14 @@ pub struct Cli {
 #[derive(Subcommand, Debug)]
 enum Commands {
     /// Initialize the .blacksmith/ data directory
-    Init,
+    Init {
+        /// Overwrite existing files with fresh defaults
+        #[arg(long)]
+        force: bool,
+        /// Copy PROMPT.md and skills/ to project root
+        #[arg(long = "export")]
+        export_files: bool,
+    },
     /// Generate performance brief for prompt injection
     Brief,
     /// Manage improvement records (institutional memory)
@@ -807,21 +815,59 @@ async fn main() {
     tracing::debug!(?cli, "parsed CLI arguments");
 
     // Handle subcommands that don't need the full config
-    if let Some(Commands::Init) = &cli.command {
+    if let Some(Commands::Init {
+        force,
+        export_files,
+    }) = &cli.command
+    {
         let config = HarnessConfig::load(&cli.config).unwrap_or_default();
         let dd = data_dir::DataDir::new(&config.storage.data_dir);
-        match dd.ensure_initialized() {
-            Ok(()) => {
-                println!(
-                    "Initialized data directory: {}",
-                    config.storage.data_dir.display()
-                );
-            }
-            Err(e) => {
-                eprintln!("Error initializing data directory: {e}");
-                std::process::exit(1);
+
+        // Always ensure base directory structure exists
+        if let Err(e) = dd.ensure_initialized() {
+            eprintln!("Error initializing data directory: {e}");
+            std::process::exit(1);
+        }
+        println!("Created: {}", config.storage.data_dir.display());
+
+        // --force: overwrite existing files with fresh defaults
+        if *force {
+            match dd.force_extract() {
+                Ok(overwritten) => {
+                    if overwritten.is_empty() {
+                        println!("Overwrote: (no existing files to overwrite)");
+                    } else {
+                        for path in &overwritten {
+                            println!("Overwrote: {}", path.display());
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Error force-extracting defaults: {e}");
+                    std::process::exit(1);
+                }
             }
         }
+
+        // --export: copy PROMPT.md and skills/ to project root
+        if *export_files {
+            match dd.export_to_root() {
+                Ok(exported) => {
+                    if exported.is_empty() {
+                        println!("Exported: (nothing to export)");
+                    } else {
+                        for path in &exported {
+                            println!("Exported: {}", path.display());
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Error exporting files: {e}");
+                    std::process::exit(1);
+                }
+            }
+        }
+
         return;
     }
 

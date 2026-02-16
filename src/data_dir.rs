@@ -1,3 +1,4 @@
+use crate::defaults;
 use std::path::{Path, PathBuf};
 
 /// Manages the `.blacksmith/` directory layout.
@@ -55,6 +56,16 @@ impl DataDir {
         self.sessions_dir().join(format!("{iteration}.jsonl"))
     }
 
+    /// Path to the skills directory (e.g. `.blacksmith/skills/`).
+    pub fn skills_dir(&self) -> PathBuf {
+        self.root.join("skills")
+    }
+
+    /// Path to the PROMPT.md file (e.g. `.blacksmith/PROMPT.md`).
+    pub fn prompt_file(&self) -> PathBuf {
+        self.root.join("PROMPT.md")
+    }
+
     /// Initialize the full directory structure.
     /// Creates root, sessions/, and worktrees/ directories.
     /// Returns Ok(true) if directories were created, Ok(false) if they already existed.
@@ -67,12 +78,89 @@ impl DataDir {
     }
 
     /// Ensure the data directory is initialized, creating it if missing.
+    /// Extracts embedded default files on first run (never overwrites existing).
     /// Also appends the data_dir to .gitignore if a .gitignore exists
     /// and doesn't already contain the entry.
     pub fn ensure_initialized(&self) -> std::io::Result<()> {
         self.init()?;
+        self.extract_defaults()?;
         self.update_gitignore()?;
         Ok(())
+    }
+
+    /// Default files to extract: (relative path within data dir, content).
+    fn default_files() -> Vec<(&'static str, &'static str)> {
+        vec![
+            ("PROMPT.md", defaults::PROMPT_MD),
+            ("blacksmith.toml", defaults::DEFAULT_CONFIG),
+            ("bd-finish.sh", defaults::FINISH_SCRIPT),
+            ("skills/prd-to-beads.md", defaults::SKILL_PRD_TO_BEADS),
+            ("skills/break-down-issue.md", defaults::SKILL_BREAK_DOWN),
+            ("skills/self-improvement.md", defaults::SKILL_SELF_IMPROVE),
+        ]
+    }
+
+    /// Extract embedded default files into the data directory.
+    /// Only writes files that don't already exist (never overwrites).
+    fn extract_defaults(&self) -> std::io::Result<()> {
+        std::fs::create_dir_all(self.skills_dir())?;
+
+        for (rel_path, content) in Self::default_files() {
+            let path = self.root.join(rel_path);
+            if !path.exists() {
+                std::fs::write(&path, content)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Force-extract embedded defaults, overwriting existing files.
+    /// Returns the list of files that were overwritten (already existed).
+    pub fn force_extract(&self) -> std::io::Result<Vec<PathBuf>> {
+        std::fs::create_dir_all(self.skills_dir())?;
+
+        let mut overwritten = Vec::new();
+        for (rel_path, content) in Self::default_files() {
+            let path = self.root.join(rel_path);
+            if path.exists() {
+                overwritten.push(path.clone());
+            }
+            std::fs::write(&path, content)?;
+        }
+        Ok(overwritten)
+    }
+
+    /// Export PROMPT.md and skills/ to the project root (parent of the data dir).
+    /// Returns the list of files exported.
+    pub fn export_to_root(&self) -> std::io::Result<Vec<PathBuf>> {
+        let project_root = self.root.parent().unwrap_or_else(|| Path::new("."));
+        let mut exported = Vec::new();
+
+        // Export PROMPT.md
+        let prompt_src = self.prompt_file();
+        if prompt_src.exists() {
+            let dest = project_root.join("PROMPT.md");
+            std::fs::copy(&prompt_src, &dest)?;
+            exported.push(dest);
+        }
+
+        // Export skills/
+        let skills_src = self.skills_dir();
+        if skills_src.exists() {
+            let dest_dir = project_root.join("skills");
+            std::fs::create_dir_all(&dest_dir)?;
+
+            for entry in std::fs::read_dir(&skills_src)? {
+                let entry = entry?;
+                if entry.file_type()?.is_file() {
+                    let dest = dest_dir.join(entry.file_name());
+                    std::fs::copy(entry.path(), &dest)?;
+                    exported.push(dest);
+                }
+            }
+        }
+
+        Ok(exported)
     }
 
     /// Append the data directory path to .gitignore if:
@@ -130,6 +218,8 @@ mod tests {
         assert_eq!(dd.counter(), PathBuf::from(".blacksmith/counter"));
         assert_eq!(dd.sessions_dir(), PathBuf::from(".blacksmith/sessions"));
         assert_eq!(dd.worktrees_dir(), PathBuf::from(".blacksmith/worktrees"));
+        assert_eq!(dd.skills_dir(), PathBuf::from(".blacksmith/skills"));
+        assert_eq!(dd.prompt_file(), PathBuf::from(".blacksmith/PROMPT.md"));
         assert_eq!(
             dd.session_file(42),
             PathBuf::from(".blacksmith/sessions/42.jsonl")
@@ -221,5 +311,108 @@ mod tests {
 
         let contents = std::fs::read_to_string(&gitignore).unwrap();
         assert_eq!(contents, "node_modules/\n.blacksmith/\n");
+    }
+
+    #[test]
+    fn test_first_run_extracts_defaults() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join(".blacksmith");
+        let dd = DataDir::new(&root);
+
+        dd.ensure_initialized().unwrap();
+
+        // All default files should exist
+        assert!(dd.prompt_file().exists(), "PROMPT.md should be extracted");
+        assert!(
+            root.join("blacksmith.toml").exists(),
+            "blacksmith.toml should be extracted"
+        );
+        assert!(
+            root.join("bd-finish.sh").exists(),
+            "bd-finish.sh should be extracted"
+        );
+        assert!(dd.skills_dir().exists(), "skills/ dir should exist");
+        assert!(dd.skills_dir().join("prd-to-beads.md").exists());
+        assert!(dd.skills_dir().join("break-down-issue.md").exists());
+        assert!(dd.skills_dir().join("self-improvement.md").exists());
+
+        // Verify content is non-empty
+        let prompt = std::fs::read_to_string(dd.prompt_file()).unwrap();
+        assert!(!prompt.is_empty());
+        assert!(prompt.contains("Task Execution"));
+    }
+
+    #[test]
+    fn test_existing_files_not_overwritten() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join(".blacksmith");
+        let dd = DataDir::new(&root);
+
+        // First init to create defaults
+        dd.ensure_initialized().unwrap();
+
+        // Overwrite PROMPT.md with custom content
+        let custom = "My custom prompt";
+        std::fs::write(dd.prompt_file(), custom).unwrap();
+
+        // Re-init should not overwrite
+        dd.ensure_initialized().unwrap();
+
+        let content = std::fs::read_to_string(dd.prompt_file()).unwrap();
+        assert_eq!(content, custom, "Custom content should survive re-init");
+    }
+
+    #[test]
+    fn test_force_extract_overwrites() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join(".blacksmith");
+        let dd = DataDir::new(&root);
+
+        dd.ensure_initialized().unwrap();
+
+        // Write custom content
+        let custom = "My custom prompt";
+        std::fs::write(dd.prompt_file(), custom).unwrap();
+
+        // Force extract should overwrite
+        let overwritten = dd.force_extract().unwrap();
+        assert!(!overwritten.is_empty(), "Should report overwritten files");
+        assert!(overwritten.contains(&dd.prompt_file()));
+
+        let content = std::fs::read_to_string(dd.prompt_file()).unwrap();
+        assert_ne!(
+            content, custom,
+            "Force extract should overwrite custom content"
+        );
+        assert!(content.contains("Task Execution"));
+    }
+
+    #[test]
+    fn test_export_to_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join(".blacksmith");
+        let dd = DataDir::new(&root);
+
+        dd.ensure_initialized().unwrap();
+
+        let exported = dd.export_to_root().unwrap();
+        assert!(!exported.is_empty());
+
+        // PROMPT.md should be in project root
+        let prompt_in_root = tmp.path().join("PROMPT.md");
+        assert!(
+            prompt_in_root.exists(),
+            "PROMPT.md should be exported to project root"
+        );
+
+        // Skills should be in project root/skills/
+        let skills_in_root = tmp.path().join("skills");
+        assert!(
+            skills_in_root.exists(),
+            "skills/ should be exported to project root"
+        );
+        assert!(skills_in_root.join("prd-to-beads.md").exists());
+        assert!(skills_in_root.join("break-down-issue.md").exists());
+        assert!(skills_in_root.join("self-improvement.md").exists());
     }
 }

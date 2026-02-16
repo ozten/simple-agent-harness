@@ -178,8 +178,7 @@ fn build_recommendation(candidate: &RefactorCandidate, kind: &RefactorKind) -> S
                 "Move misplaced files out of module '{module}' to resolve \
                  boundary violations ({} as source, {} as target). Relocate \
                  files to the module that best matches their dependency pattern.",
-                candidate.smells.has_violations as u8,
-                candidate.smells.has_violations as u8
+                candidate.smells.has_violations as u8, candidate.smells.has_violations as u8
             )
         }
         RefactorKind::BreakCycle => {
@@ -358,7 +357,11 @@ mod tests {
         ]);
 
         let proposals = generate_proposals(&report);
-        assert_eq!(proposals.len(), 1, "Only the 0.8 candidate should produce a proposal");
+        assert_eq!(
+            proposals.len(),
+            1,
+            "Only the 0.8 candidate should produce a proposal"
+        );
         assert_eq!(proposals[0].target, "above_threshold");
         assert!((proposals[0].confidence - 0.8).abs() < f64::EPSILON);
 

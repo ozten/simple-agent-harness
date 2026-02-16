@@ -128,7 +128,10 @@ pub async fn run(
     // No workers are active yet, so every existing worktree is orphaned.
     match worktree::cleanup_orphans(&repo_dir, pool.worktrees_dir(), &[]) {
         Ok(cleaned) if !cleaned.is_empty() => {
-            tracing::info!(count = cleaned.len(), "cleaned up stale worktrees from previous run");
+            tracing::info!(
+                count = cleaned.len(),
+                "cleaned up stale worktrees from previous run"
+            );
         }
         Err(e) => {
             tracing::warn!(error = %e, "failed to clean up stale worktrees");

@@ -187,9 +187,7 @@ fn check_dependency_feasibility(
             findings.push(ValidationFinding {
                 check: "dependency_feasibility".to_string(),
                 severity: ValidationSeverity::Error,
-                message: format!(
-                    "Proposed split would create circular dependency: {cycle_str}"
-                ),
+                message: format!("Proposed split would create circular dependency: {cycle_str}"),
             });
         }
     }
@@ -228,8 +226,10 @@ fn simulate_module_split(
     let files_per_module = if proposal.proposed_modules.is_empty() {
         0
     } else {
-        (proposal.affected_files.len() + proposal.proposed_modules.len() - 1)
-            / proposal.proposed_modules.len()
+        proposal
+            .affected_files
+            .len()
+            .div_ceil(proposal.proposed_modules.len())
     };
 
     for (i, module_name) in proposal.proposed_modules.iter().enumerate() {
@@ -293,12 +293,8 @@ fn check_api_surface_preservation(
     let mut symbols_being_moved: Vec<&str> = Vec::new();
     for sym in &target_api.public_symbols {
         // Check if the symbol's file is in the affected set
-        let sym_in_affected = is_symbol_in_affected_files(
-            &sym.file,
-            &proposal.target_module,
-            modules,
-            &affected_set,
-        );
+        let sym_in_affected =
+            is_symbol_in_affected_files(&sym.file, &proposal.target_module, modules, &affected_set);
         if sym_in_affected {
             symbols_being_moved.push(&sym.name);
         }
@@ -378,10 +374,7 @@ fn is_symbol_in_affected_files(
 ///
 /// Looks for test files or `#[cfg(test)]` modules in the affected files.
 /// Warns if boundaries are being changed without test coverage.
-fn check_test_coverage(
-    proposal: &RefactorProposal,
-    repo_root: &Path,
-) -> Vec<ValidationFinding> {
+fn check_test_coverage(proposal: &RefactorProposal, repo_root: &Path) -> Vec<ValidationFinding> {
     let mut findings = Vec::new();
     let mut files_with_tests = 0;
     let mut files_checked = 0;
@@ -661,7 +654,9 @@ mod tests {
 
         let findings = check_dependency_feasibility(&proposal, &graph, &modules);
         assert!(
-            findings.iter().all(|f| f.severity != ValidationSeverity::Error),
+            findings
+                .iter()
+                .all(|f| f.severity != ValidationSeverity::Error),
             "Should not have errors for clean split"
         );
     }
@@ -742,9 +737,7 @@ mod tests {
 
     #[test]
     fn api_preservation_warns_on_moved_symbols() {
-        let modules = make_modules(&[
-            ("auth", &["src/auth/mod.rs", "src/auth/session.rs"]),
-        ]);
+        let modules = make_modules(&[("auth", &["src/auth/mod.rs", "src/auth/session.rs"])]);
 
         let apis: HashMap<String, ModuleApi> = [(
             "auth".to_string(),
@@ -788,9 +781,7 @@ mod tests {
 
     #[test]
     fn api_preservation_no_issue_when_symbols_stay() {
-        let modules = make_modules(&[
-            ("auth", &["src/auth/mod.rs", "src/auth/internal.rs"]),
-        ]);
+        let modules = make_modules(&[("auth", &["src/auth/mod.rs", "src/auth/internal.rs"])]);
 
         let apis: HashMap<String, ModuleApi> = [(
             "auth".to_string(),
@@ -821,9 +812,7 @@ mod tests {
 
     #[test]
     fn api_preservation_error_when_no_target_module() {
-        let modules = make_modules(&[
-            ("auth", &["src/auth/mod.rs", "src/auth/session.rs"]),
-        ]);
+        let modules = make_modules(&[("auth", &["src/auth/mod.rs", "src/auth/session.rs"])]);
 
         let apis: HashMap<String, ModuleApi> = [(
             "auth".to_string(),
@@ -914,11 +903,7 @@ mod tests {
         std::fs::create_dir_all(&src).unwrap();
 
         let file = src.join("tested.rs");
-        std::fs::write(
-            &file,
-            "pub fn foo() {}\n#[cfg(test)]\nmod tests {}",
-        )
-        .unwrap();
+        std::fs::write(&file, "pub fn foo() {}\n#[cfg(test)]\nmod tests {}").unwrap();
 
         let proposal = RefactorProposal {
             kind: ProposalKind::SplitModule,
@@ -1106,7 +1091,8 @@ mod tests {
         let file_b = src.join("b.rs");
         std::fs::write(&file_b, "pub fn beta() {}\n#[cfg(test)]\nmod tests {}").unwrap();
 
-        let modules = make_modules(&[("big", &[file_a.to_str().unwrap(), file_b.to_str().unwrap()])]);
+        let modules =
+            make_modules(&[("big", &[file_a.to_str().unwrap(), file_b.to_str().unwrap()])]);
         let graph = make_graph(&[
             (file_a.to_str().unwrap(), &[]),
             (file_b.to_str().unwrap(), &[]),
@@ -1129,7 +1115,11 @@ mod tests {
         };
 
         let result = validate_proposal(&proposal, &graph, &modules, &apis, &conn, tmp.path());
-        assert!(result.passed, "Clean proposal should pass: {:?}", result.findings);
+        assert!(
+            result.passed,
+            "Clean proposal should pass: {:?}",
+            result.findings
+        );
         assert_eq!(result.error_count(), 0);
     }
 
@@ -1208,7 +1198,9 @@ mod tests {
     #[test]
     fn has_test_coverage_positive() {
         assert!(has_test_coverage("#[cfg(test)]\nmod tests {}"));
-        assert!(has_test_coverage("pub fn foo() {}\n#[test]\nfn test_foo() {}"));
+        assert!(has_test_coverage(
+            "pub fn foo() {}\n#[test]\nfn test_foo() {}"
+        ));
     }
 
     #[test]
