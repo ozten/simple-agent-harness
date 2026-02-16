@@ -29,7 +29,7 @@ See [docs/getting-started.md](docs/getting-started.md) for a full walkthrough.
 - **Institutional memory** — improvement tracking with two-speed feedback (DB → prompt promotion)
 - **Agent adapters** — Claude, Codex, OpenCode, Aider, Raw — with graceful metric degradation
 - **Architecture analysis** — fan-in detection, god files, circular deps, automated refactor proposals
-- **Deployment model** — embedded defaults, `blacksmith init`, quality-gated `blacksmith finish`
+- **Deployment model** — embedded defaults, `blacksmith init`, quality-gated `bd-finish.sh`
 - **Language-agnostic** — configurable quality gates for Rust, TypeScript, Go, Python, etc.
 
 ## Documentation

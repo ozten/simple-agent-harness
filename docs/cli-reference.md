@@ -222,3 +222,17 @@ blacksmith adapter list
 # Parse a file and show extracted metrics
 blacksmith adapter test path/to/session.jsonl
 ```
+
+### `arch`
+
+Run architecture analysis on the codebase.
+
+```bash
+# Human-readable structural analysis
+blacksmith arch
+
+# JSON output for programmatic consumption
+blacksmith arch --json
+```
+
+Computes structural metrics (fan-in hotspots, god files, circular dependencies, boundary violations, API surface width) and correlates them with historical operational signals from the metrics database if available. See [Architecture Analysis](architecture-analysis.md).

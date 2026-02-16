@@ -200,14 +200,6 @@ label = "Narration-only turns"
 unit = "%"
 ```
 
-## `[finish]`
+## Quality Gates
 
-Quality gates for the `blacksmith finish` command.
-
-```toml
-[finish]
-check = "cargo check"
-test = "cargo test"
-lint = "cargo clippy --fix"
-format = "cargo fmt"
-```
+Quality gates are handled by the `bd-finish.sh` shell script (extracted by `blacksmith init`), not by a config section. Edit `bd-finish.sh` directly to customize the check and test commands for your project.

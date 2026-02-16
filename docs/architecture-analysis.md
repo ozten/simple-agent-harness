@@ -72,6 +72,18 @@ Bad module boundaries
             → Equilibrium
 ```
 
+## CLI Usage
+
+```bash
+# Human-readable report
+blacksmith arch
+
+# JSON output
+blacksmith arch --json
+```
+
+The command runs structural analysis on the current repository and, if a metrics database exists, correlates structural findings with historical operational signals.
+
 ## Drift Detection
 
 Metadata drift detection provides early warning before integration failures occur. When a module's actual file footprint grows beyond what metadata predicts (by `metadata_drift_sensitivity` times the historical average), an alert is raised.

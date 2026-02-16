@@ -40,25 +40,28 @@ Defaults for `PROMPT.md`, skills, and config are embedded in the binary. On firs
 
 When a worker is spawned, blacksmith copies skills from `.blacksmith/skills/` to the worktree's `.claude/skills/` directory so the agent has access to all configured skills.
 
-## The `finish` Command
+## The `bd-finish.sh` Script
 
-`blacksmith finish` replaces manual commit workflows with quality-gated completion:
+The `bd-finish.sh` shell script replaces manual commit workflows with quality-gated completion:
 
 ```bash
-blacksmith finish beads-abc "Implement feature X" src/feature.rs src/lib.rs
+./bd-finish.sh beads-abc "Implement feature X" src/feature.rs src/lib.rs
 ```
 
-This runs the configured quality gates in order:
+If no files are specified, it stages all tracked modified files (`git add -u`).
 
-```toml
-[finish]
-check = "cargo check"      # Compilation
-test = "cargo test"         # Tests
-lint = "cargo clippy --fix" # Lint
-format = "cargo fmt"        # Format
-```
+The script runs these steps in order:
+1. `cargo check` — abort if code doesn't compile
+2. `cargo test` — abort if tests fail
+3. Append `PROGRESS.txt` to `PROGRESS_LOG.txt` (timestamped)
+4. Stage specified files (or `git add -u`)
+5. `git commit`
+6. `bd close <bead-id>`
+7. `bd sync`
+8. Auto-commit `.beads/` changes
+9. `git push`
 
-Then commits, closes the bead, and signals completion.
+The script is extracted to the project root by `blacksmith init`.
 
 ## Self-Improvement Architecture
 
@@ -77,30 +80,4 @@ prepend_commands = ["blacksmith brief"]
 
 ## Language-Agnostic Design
 
-Blacksmith works with any language. Configure quality gates per project:
-
-```toml
-# Rust
-[finish]
-check = "cargo check"
-test = "cargo test"
-
-# TypeScript
-[finish]
-check = "tsc --noEmit"
-test = "npm test"
-
-# Go
-[finish]
-check = "go build ./..."
-test = "go test ./..."
-
-# Python
-[finish]
-check = "python -m py_compile src/*.py"
-test = "pytest"
-```
-
-## Template Variables
-
-Prompts support template variable substitution for dynamic content injection at session start.
+Blacksmith works with any language. To customize quality gates, edit `bd-finish.sh` to replace the `cargo check` and `cargo test` commands with your project's equivalents (e.g. `tsc --noEmit` / `npm test` for TypeScript, `go build ./...` / `go test ./...` for Go).
