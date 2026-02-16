@@ -183,6 +183,47 @@ pub fn prune(repo_dir: &Path) -> Result<(), WorktreeError> {
     Ok(())
 }
 
+/// Provision a worktree with skills from the data directory.
+///
+/// Copies all files from `skills_src` into `<worktree>/.claude/skills/`.
+/// No-op if `skills_src` does not exist or is empty (graceful degradation).
+pub fn provision(wt_path: &Path, skills_src: &Path) -> Result<(), WorktreeError> {
+    if !skills_src.exists() {
+        return Ok(());
+    }
+
+    let dest = wt_path.join(".claude").join("skills");
+    copy_dir_recursive(skills_src, &dest)?;
+    Ok(())
+}
+
+/// Remove the `.claude/` directory from a worktree before removal.
+///
+/// No-op if the directory does not exist.
+pub fn deprovision(wt_path: &Path) -> Result<(), WorktreeError> {
+    let claude_dir = wt_path.join(".claude");
+    if claude_dir.exists() {
+        std::fs::remove_dir_all(&claude_dir)?;
+    }
+    Ok(())
+}
+
+/// Recursively copy a directory tree from `src` to `dest`.
+fn copy_dir_recursive(src: &Path, dest: &Path) -> Result<(), WorktreeError> {
+    std::fs::create_dir_all(dest)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        let target = dest.join(entry.file_name());
+        if file_type.is_dir() {
+            copy_dir_recursive(&entry.path(), &target)?;
+        } else {
+            std::fs::copy(entry.path(), &target)?;
+        }
+    }
+    Ok(())
+}
+
 /// Clean up orphaned worktrees: worktrees that exist on disk under `worktrees_dir`
 /// but are not tracked by any active worker assignment.
 ///
@@ -436,5 +477,84 @@ mod tests {
 
         let e = WorktreeError::Io(std::io::Error::new(std::io::ErrorKind::NotFound, "gone"));
         assert!(e.to_string().contains("gone"));
+    }
+
+    #[test]
+    fn test_provision_copies_skills() {
+        let dir = init_test_repo();
+        let wt_dir = dir.path().join("worktrees");
+        std::fs::create_dir_all(&wt_dir).unwrap();
+
+        let wt_path = create(dir.path(), &wt_dir, 0, "beads-prov", "main").unwrap();
+
+        // Create a fake skills source directory with files and a subdirectory
+        let skills_src = dir.path().join("skills");
+        std::fs::create_dir_all(skills_src.join("subskill")).unwrap();
+        std::fs::write(skills_src.join("skill-a.md"), "# Skill A").unwrap();
+        std::fs::write(skills_src.join("subskill").join("SKILL.md"), "# Sub").unwrap();
+
+        provision(&wt_path, &skills_src).unwrap();
+
+        // Verify skills are in the worktree
+        let dest = wt_path.join(".claude").join("skills");
+        assert!(dest.exists());
+        assert!(dest.join("skill-a.md").exists());
+        assert_eq!(
+            std::fs::read_to_string(dest.join("skill-a.md")).unwrap(),
+            "# Skill A"
+        );
+        assert!(dest.join("subskill").join("SKILL.md").exists());
+        assert_eq!(
+            std::fs::read_to_string(dest.join("subskill").join("SKILL.md")).unwrap(),
+            "# Sub"
+        );
+    }
+
+    #[test]
+    fn test_provision_noop_if_no_source() {
+        let dir = init_test_repo();
+        let wt_dir = dir.path().join("worktrees");
+        std::fs::create_dir_all(&wt_dir).unwrap();
+
+        let wt_path = create(dir.path(), &wt_dir, 0, "beads-noop", "main").unwrap();
+
+        // Non-existent skills dir should be a no-op
+        let skills_src = dir.path().join("no-such-skills");
+        provision(&wt_path, &skills_src).unwrap();
+
+        assert!(!wt_path.join(".claude").exists());
+    }
+
+    #[test]
+    fn test_deprovision_cleans_up() {
+        let dir = init_test_repo();
+        let wt_dir = dir.path().join("worktrees");
+        std::fs::create_dir_all(&wt_dir).unwrap();
+
+        let wt_path = create(dir.path(), &wt_dir, 0, "beads-deprov", "main").unwrap();
+
+        // Provision first
+        let skills_src = dir.path().join("skills");
+        std::fs::create_dir_all(&skills_src).unwrap();
+        std::fs::write(skills_src.join("skill-a.md"), "# Skill A").unwrap();
+        provision(&wt_path, &skills_src).unwrap();
+        assert!(wt_path.join(".claude").exists());
+
+        // Deprovision should remove .claude/
+        deprovision(&wt_path).unwrap();
+        assert!(!wt_path.join(".claude").exists());
+    }
+
+    #[test]
+    fn test_deprovision_noop_if_no_claude_dir() {
+        let dir = init_test_repo();
+        let wt_dir = dir.path().join("worktrees");
+        std::fs::create_dir_all(&wt_dir).unwrap();
+
+        let wt_path = create(dir.path(), &wt_dir, 0, "beads-depnoop", "main").unwrap();
+
+        // No .claude/ dir — deprovision should be a no-op
+        deprovision(&wt_path).unwrap();
+        assert!(!wt_path.join(".claude").exists());
     }
 }

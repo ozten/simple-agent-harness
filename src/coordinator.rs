@@ -95,6 +95,7 @@ pub async fn run(
         repo_dir.clone(),
         worktrees_dir,
         initial_session_id,
+        Some(data_dir.skills_dir()),
     );
     let output_dir = data_dir.sessions_dir();
     let integration_queue =
@@ -1060,7 +1061,7 @@ mod tests {
             base_branch: "main".to_string(),
             worktrees_dir: "worktrees".to_string(),
         };
-        let pool = WorkerPool::new(&config, dir.path().to_path_buf(), wt_dir, 0);
+        let pool = WorkerPool::new(&config, dir.path().to_path_buf(), wt_dir, 0, None);
         let db_path = dir.path().join("test.db");
         let db_conn = db::open_or_create(&db_path).unwrap();
         let in_progress = build_in_progress_list(&pool, &db_conn);
@@ -1249,7 +1250,7 @@ mod tests {
             base_branch: "main".to_string(),
             worktrees_dir: "worktrees".to_string(),
         };
-        let mut pool = WorkerPool::new(&workers_config, repo.to_path_buf(), wt_dir, 0);
+        let mut pool = WorkerPool::new(&workers_config, repo.to_path_buf(), wt_dir, 0, None);
 
         // Use set_worker_for_test to set up the coding state
         pool.set_worker_state_for_test(
@@ -1312,6 +1313,7 @@ mod tests {
             dir.path().to_path_buf(),
             dir.path().join("wt"),
             0,
+            None,
         );
         pool.set_worker_state_for_test(
             0,
@@ -1371,6 +1373,7 @@ mod tests {
             dir.path().to_path_buf(),
             dir.path().join("wt"),
             0,
+            None,
         );
         pool.set_worker_state_for_test(
             0,
@@ -1424,6 +1427,7 @@ mod tests {
             dir.path().to_path_buf(),
             dir.path().join("wt"),
             0,
+            None,
         );
         pool.set_worker_state_for_test(
             0,
@@ -1478,6 +1482,7 @@ mod tests {
             dir.path().to_path_buf(),
             dir.path().join("wt"),
             0,
+            None,
         );
         pool.set_worker_state_for_test(
             0,

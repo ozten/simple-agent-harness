@@ -87,6 +87,9 @@ pub struct WorkerPool {
     repo_dir: PathBuf,
     worktrees_dir: PathBuf,
     base_branch: String,
+    /// Source directory for skills to provision into worktrees.
+    /// If None, no skills provisioning is performed.
+    skills_dir: Option<PathBuf>,
     /// Next numeric session ID to use for output file naming.
     /// Ensures worker output files follow the `{N}.jsonl` convention
     /// expected by compress, retention/gc, and metrics subsystems.
@@ -140,11 +143,15 @@ impl WorkerPool {
     /// `initial_session_id` should be loaded from the global iteration counter file
     /// so that worker output files continue the numeric `{N}.jsonl` sequence expected
     /// by compress, retention/gc, and metrics subsystems.
+    ///
+    /// `skills_dir` is the source directory for skills to provision into worktrees.
+    /// If the directory doesn't exist at spawn time, provisioning is silently skipped.
     pub fn new(
         config: &WorkersConfig,
         repo_dir: PathBuf,
         worktrees_base: PathBuf,
         initial_session_id: u64,
+        skills_dir: Option<PathBuf>,
     ) -> Self {
         let workers = (0..config.max)
             .map(|id| Worker {
@@ -162,6 +169,7 @@ impl WorkerPool {
             repo_dir,
             worktrees_dir: worktrees_base,
             base_branch: config.base_branch.clone(),
+            skills_dir,
             next_session_id: initial_session_id,
         }
     }
@@ -229,6 +237,11 @@ impl WorkerPool {
             bead_id,
             &self.base_branch,
         )?;
+
+        // Provision skills into the worktree
+        if let Some(ref skills_src) = self.skills_dir {
+            worktree::provision(&wt_path, skills_src)?;
+        }
 
         // Insert assignment into DB
         let assignment_id = db::insert_worker_assignment(
@@ -402,6 +415,14 @@ impl WorkerPool {
 
         // Clean up worktree
         if let Some(ref wt_path) = worker.worktree_path {
+            // Deprovision (remove .claude/ dir) before git worktree remove
+            if let Err(e) = worktree::deprovision(wt_path) {
+                tracing::warn!(
+                    worker_id,
+                    error = %e,
+                    "failed to deprovision worktree during reset"
+                );
+            }
             if let Err(e) = worktree::remove(&self.repo_dir, wt_path) {
                 tracing::warn!(
                     worker_id,
@@ -632,7 +653,7 @@ mod tests {
         let dir = init_test_repo();
         let wt_dir = dir.path().join("worktrees");
         let config = test_workers_config(3);
-        let pool = WorkerPool::new(&config, dir.path().to_path_buf(), wt_dir, 0);
+        let pool = WorkerPool::new(&config, dir.path().to_path_buf(), wt_dir, 0, None);
 
         assert_eq!(pool.capacity(), 3);
         assert_eq!(pool.idle_count(), 3);
@@ -652,7 +673,7 @@ mod tests {
         let dir = init_test_repo();
         let wt_dir = dir.path().join("worktrees");
         let config = test_workers_config(2);
-        let pool = WorkerPool::new(&config, dir.path().to_path_buf(), wt_dir, 0);
+        let pool = WorkerPool::new(&config, dir.path().to_path_buf(), wt_dir, 0, None);
 
         assert!(pool.completed_workers().is_empty());
     }
@@ -662,7 +683,7 @@ mod tests {
         let dir = init_test_repo();
         let wt_dir = dir.path().join("worktrees");
         let config = test_workers_config(2);
-        let pool = WorkerPool::new(&config, dir.path().to_path_buf(), wt_dir, 0);
+        let pool = WorkerPool::new(&config, dir.path().to_path_buf(), wt_dir, 0, None);
 
         assert!(pool.active_worktree_paths().is_empty());
     }
@@ -676,7 +697,7 @@ mod tests {
         std::fs::create_dir_all(&output_dir).unwrap();
 
         let workers_config = test_workers_config(2);
-        let mut pool = WorkerPool::new(&workers_config, dir.path().to_path_buf(), wt_dir, 0);
+        let mut pool = WorkerPool::new(&workers_config, dir.path().to_path_buf(), wt_dir, 0, None);
 
         let db_path = dir.path().join("test.db");
         let conn = db::open_or_create(&db_path).unwrap();
@@ -727,7 +748,7 @@ mod tests {
         std::fs::create_dir_all(&output_dir).unwrap();
 
         let workers_config = test_workers_config(1);
-        let mut pool = WorkerPool::new(&workers_config, dir.path().to_path_buf(), wt_dir, 0);
+        let mut pool = WorkerPool::new(&workers_config, dir.path().to_path_buf(), wt_dir, 0, None);
 
         let db_path = dir.path().join("test.db");
         let conn = db::open_or_create(&db_path).unwrap();
@@ -774,7 +795,7 @@ mod tests {
         std::fs::create_dir_all(&output_dir).unwrap();
 
         let workers_config = test_workers_config(1);
-        let mut pool = WorkerPool::new(&workers_config, dir.path().to_path_buf(), wt_dir, 0);
+        let mut pool = WorkerPool::new(&workers_config, dir.path().to_path_buf(), wt_dir, 0, None);
 
         let db_path = dir.path().join("test.db");
         let conn = db::open_or_create(&db_path).unwrap();
@@ -804,7 +825,7 @@ mod tests {
 
         // Pool with 1 worker
         let workers_config = test_workers_config(1);
-        let mut pool = WorkerPool::new(&workers_config, dir.path().to_path_buf(), wt_dir, 0);
+        let mut pool = WorkerPool::new(&workers_config, dir.path().to_path_buf(), wt_dir, 0, None);
 
         let db_path = dir.path().join("test.db");
         let conn = db::open_or_create(&db_path).unwrap();
@@ -839,7 +860,7 @@ mod tests {
         std::fs::create_dir_all(&output_dir).unwrap();
 
         let workers_config = test_workers_config(1);
-        let mut pool = WorkerPool::new(&workers_config, dir.path().to_path_buf(), wt_dir, 0);
+        let mut pool = WorkerPool::new(&workers_config, dir.path().to_path_buf(), wt_dir, 0, None);
 
         let db_path = dir.path().join("test.db");
         let conn = db::open_or_create(&db_path).unwrap();
@@ -868,7 +889,7 @@ mod tests {
         std::fs::create_dir_all(&output_dir).unwrap();
 
         let workers_config = test_workers_config(3);
-        let mut pool = WorkerPool::new(&workers_config, dir.path().to_path_buf(), wt_dir, 0);
+        let mut pool = WorkerPool::new(&workers_config, dir.path().to_path_buf(), wt_dir, 0, None);
 
         let db_path = dir.path().join("test.db");
         let conn = db::open_or_create(&db_path).unwrap();
@@ -911,7 +932,7 @@ mod tests {
 
         let workers_config = test_workers_config(2);
         // Start counter at 42 to verify it's respected
-        let mut pool = WorkerPool::new(&workers_config, dir.path().to_path_buf(), wt_dir, 42);
+        let mut pool = WorkerPool::new(&workers_config, dir.path().to_path_buf(), wt_dir, 42, None);
         let db_path = dir.path().join("test.db");
         let conn = db::open_or_create(&db_path).unwrap();
         let agent = test_agent_config();
