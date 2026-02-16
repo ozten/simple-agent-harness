@@ -1063,7 +1063,8 @@ pub fn upsert_bead_metrics(
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) \
          ON CONFLICT(bead_id) DO UPDATE SET \
          sessions = ?2, wall_time_secs = ?3, total_turns = ?4, \
-         total_output_tokens = ?5, integration_time_secs = ?6, completed_at = ?7",
+         total_output_tokens = ?5, integration_time_secs = ?6, \
+         completed_at = COALESCE(?7, bead_metrics.completed_at)",
         rusqlite::params![
             bead_id,
             sessions,
@@ -1125,6 +1126,19 @@ fn map_bead_metrics(row: &rusqlite::Row) -> Result<BeadMetrics> {
         integration_time_secs: row.get(5)?,
         completed_at: row.get(6)?,
     })
+}
+
+/// Mark a bead as completed by setting completed_at to the current UTC timestamp.
+///
+/// Returns `Ok(true)` if a row was updated, `Ok(false)` if the bead doesn't exist
+/// or was already completed.
+pub fn mark_bead_completed(conn: &Connection, bead_id: &str) -> Result<bool> {
+    let updated = conn.execute(
+        "UPDATE bead_metrics SET completed_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') \
+         WHERE bead_id = ?1 AND completed_at IS NULL",
+        rusqlite::params![bead_id],
+    )?;
+    Ok(updated > 0)
 }
 
 fn map_observation(row: &rusqlite::Row) -> Result<Observation> {
@@ -2953,5 +2967,91 @@ mod tests {
         // Threshold=5: should return nothing
         let results = high_iteration_integrations(&conn, 5).unwrap();
         assert!(results.is_empty());
+    }
+
+    // ── upsert_bead_metrics completed_at preservation tests ──────────
+
+    // ── mark_bead_completed tests ──────────────────────────────────────
+
+    #[test]
+    fn test_mark_bead_completed() {
+        let (_dir, conn) = test_db();
+
+        // Insert bead with NULL completed_at
+        upsert_bead_metrics(&conn, "beads-abc", 1, 60.0, 10, Some(100), None, None)
+            .unwrap();
+
+        let result = mark_bead_completed(&conn, "beads-abc").unwrap();
+        assert!(result, "should return true when updating a bead");
+
+        let bm = get_bead_metrics(&conn, "beads-abc").unwrap().unwrap();
+        assert!(bm.completed_at.is_some(), "completed_at should now be set");
+        assert!(bm.completed_at.unwrap().contains('T'), "should be ISO timestamp");
+    }
+
+    #[test]
+    fn test_mark_bead_completed_idempotent() {
+        let (_dir, conn) = test_db();
+
+        upsert_bead_metrics(&conn, "beads-abc", 1, 60.0, 10, Some(100), None, None)
+            .unwrap();
+
+        let first = mark_bead_completed(&conn, "beads-abc").unwrap();
+        assert!(first, "first call should return true");
+
+        let second = mark_bead_completed(&conn, "beads-abc").unwrap();
+        assert!(!second, "second call should return false (already completed)");
+    }
+
+    #[test]
+    fn test_mark_bead_completed_nonexistent() {
+        let (_dir, conn) = test_db();
+
+        let result = mark_bead_completed(&conn, "beads-nonexistent").unwrap();
+        assert!(!result, "should return false for unknown bead_id");
+    }
+
+    // ── upsert_bead_metrics completed_at preservation tests ──────────
+
+    #[test]
+    fn test_upsert_bead_metrics_preserves_completed_at() {
+        let (_dir, conn) = test_db();
+
+        // Insert with completed_at set
+        upsert_bead_metrics(&conn, "beads-abc", 1, 60.0, 10, Some(100), None, Some("2026-02-16T12:00:00Z"))
+            .unwrap();
+
+        // Upsert with completed_at=None — should preserve existing value
+        upsert_bead_metrics(&conn, "beads-abc", 2, 120.0, 20, Some(200), None, None)
+            .unwrap();
+
+        let bm = get_bead_metrics(&conn, "beads-abc").unwrap().unwrap();
+        assert_eq!(bm.sessions, 2);
+        assert_eq!(bm.wall_time_secs, 120.0);
+        assert_eq!(
+            bm.completed_at.as_deref(),
+            Some("2026-02-16T12:00:00Z"),
+            "completed_at should be preserved when upserting with None"
+        );
+    }
+
+    #[test]
+    fn test_upsert_bead_metrics_updates_completed_at() {
+        let (_dir, conn) = test_db();
+
+        // Insert without completed_at
+        upsert_bead_metrics(&conn, "beads-abc", 1, 60.0, 10, Some(100), None, None)
+            .unwrap();
+
+        // Upsert with a new completed_at value
+        upsert_bead_metrics(&conn, "beads-abc", 2, 120.0, 20, Some(200), None, Some("2026-02-16T14:00:00Z"))
+            .unwrap();
+
+        let bm = get_bead_metrics(&conn, "beads-abc").unwrap().unwrap();
+        assert_eq!(
+            bm.completed_at.as_deref(),
+            Some("2026-02-16T14:00:00Z"),
+            "completed_at should be updated when a new value is provided"
+        );
     }
 }

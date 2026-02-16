@@ -1062,12 +1062,19 @@ pub fn handle_beads(db_path: &Path) -> Result<(), String> {
 
     let conn = db::open_or_create(db_path).map_err(|e| format!("Failed to open database: {e}"))?;
 
-    let all =
+    let mut all =
         db::all_bead_metrics(&conn).map_err(|e| format!("Failed to query bead metrics: {e}"))?;
 
     if all.is_empty() {
         println!("No bead metrics recorded yet.");
         return Ok(());
+    }
+
+    // Reconcile stale completed_at values with bd
+    let reconciled = reconcile_bead_status(&conn, &all);
+    if reconciled > 0 {
+        all = db::all_bead_metrics(&conn)
+            .map_err(|e| format!("Failed to re-query bead metrics: {e}"))?;
     }
 
     // Print header
@@ -1296,6 +1303,55 @@ fn format_duration(seconds: u64) -> String {
     } else {
         format!("{}s", secs)
     }
+}
+
+/// Parse bead IDs from JSON output of `bd list --status=closed --json`.
+fn parse_closed_bead_ids(json_str: &str) -> Vec<String> {
+    let parsed: Result<Vec<serde_json::Value>, _> = serde_json::from_str(json_str);
+    match parsed {
+        Ok(beads) => beads
+            .iter()
+            .filter_map(|b| b.get("id").and_then(|v| v.as_str()).map(|s| s.to_string()))
+            .collect(),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// Reconcile bead status by cross-referencing with `bd list --status=closed --json`.
+///
+/// For any bead in `all` that has `completed_at == None`, checks if `bd` reports it
+/// as closed and calls `mark_bead_completed()` to set the timestamp. Returns the
+/// number of beads updated. Gracefully returns 0 if `bd` is not available.
+fn reconcile_bead_status(conn: &Connection, all: &[db::BeadMetrics]) -> usize {
+    let stale: Vec<&str> = all
+        .iter()
+        .filter(|bm| bm.completed_at.is_none())
+        .map(|bm| bm.bead_id.as_str())
+        .collect();
+
+    if stale.is_empty() {
+        return 0;
+    }
+
+    let closed_ids = match std::process::Command::new("bd")
+        .args(["list", "--status=closed", "--json"])
+        .output()
+    {
+        Ok(output) if output.status.success() => {
+            parse_closed_bead_ids(&String::from_utf8_lossy(&output.stdout))
+        }
+        _ => return 0,
+    };
+
+    let mut updated = 0;
+    for id in &closed_ids {
+        if stale.contains(&id.as_str()) {
+            if let Ok(true) = db::mark_bead_completed(conn, id) {
+                updated += 1;
+            }
+        }
+    }
+    updated
 }
 
 #[cfg(test)]
@@ -2957,6 +3013,67 @@ label = "Avg turns per session"
     #[test]
     fn truncate_bead_id_short() {
         assert_eq!(truncate_bead_id("proj-abc", 27), "proj-abc");
+    }
+
+    // ── parse_closed_bead_ids / reconcile tests ────────────────────────
+
+    #[test]
+    fn test_query_closed_bead_ids_parses_json() {
+        let json = r#"[
+            {"id": "beads-abc", "title": "Do thing", "status": "closed"},
+            {"id": "beads-def", "title": "Another", "status": "closed"},
+            {"id": "beads-ghi"}
+        ]"#;
+        let ids = parse_closed_bead_ids(json);
+        assert_eq!(ids, vec!["beads-abc", "beads-def", "beads-ghi"]);
+    }
+
+    #[test]
+    fn test_query_closed_bead_ids_empty_array() {
+        let ids = parse_closed_bead_ids("[]");
+        assert!(ids.is_empty());
+    }
+
+    #[test]
+    fn test_query_closed_bead_ids_invalid_json() {
+        let ids = parse_closed_bead_ids("not json");
+        assert!(ids.is_empty());
+    }
+
+    #[test]
+    fn test_reconcile_updates_stale_beads() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("blacksmith.db");
+        let conn = db::open_or_create(&path).unwrap();
+
+        // Insert two beads: one with completed_at=None, one already completed
+        db::upsert_bead_metrics(&conn, "beads-stale", 1, 60.0, 10, None, None, None).unwrap();
+        db::upsert_bead_metrics(
+            &conn,
+            "beads-done",
+            1,
+            30.0,
+            5,
+            None,
+            None,
+            Some("2026-02-16T10:00:00Z"),
+        )
+        .unwrap();
+
+        // Simulate reconciliation by calling mark_bead_completed directly
+        // (since we can't control the bd command in tests)
+        let result = db::mark_bead_completed(&conn, "beads-stale").unwrap();
+        assert!(result, "stale bead should be marked as completed");
+
+        let bm = db::get_bead_metrics(&conn, "beads-stale").unwrap().unwrap();
+        assert!(
+            bm.completed_at.is_some(),
+            "completed_at should now be set for stale bead"
+        );
+
+        // The already-completed bead should remain unchanged
+        let bm2 = db::get_bead_metrics(&conn, "beads-done").unwrap().unwrap();
+        assert_eq!(bm2.completed_at.as_deref(), Some("2026-02-16T10:00:00Z"));
     }
 
     #[test]
