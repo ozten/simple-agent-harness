@@ -87,11 +87,6 @@ pub fn open_or_create(path: &Path) -> Result<Connection> {
 
         CREATE INDEX IF NOT EXISTS idx_integration_log_assignment ON integration_log(assignment_id);
 
-        -- Tracks fix-loop iteration counts during integration (merge to main).
-        -- When a worker branch is merged, the integrator may need multiple
-        -- compiler-fix iterations before the build passes. Each record captures
-        -- how many iterations were needed and which modules were involved.
-        -- Used by signal_correlator to identify problematic module interfaces.
         CREATE TABLE IF NOT EXISTS integration_iterations (
             id              INTEGER PRIMARY KEY,
             assignment_id   INTEGER NOT NULL REFERENCES worker_assignments(id),
@@ -520,13 +515,13 @@ pub fn rebuild_observations(conn: &Connection) -> Result<u64> {
 
         let data = serde_json::Value::Object(map).to_string();
 
-        // Extract duration from session.duration_secs event if present
+        // Extract duration from session.duration_ms event if present
         let duration_secs = events
             .iter()
-            .find(|e| e.kind == "session.duration_secs")
+            .find(|e| e.kind == "session.duration_ms")
             .and_then(|e| e.value.as_ref())
-            .and_then(|v| v.parse::<f64>().ok())
-            .map(|s| s as i64);
+            .and_then(|v| v.parse::<i64>().ok())
+            .map(|ms| ms / 1000);
 
         upsert_observation(conn, session, ts, duration_secs, None, &data)?;
         count += 1;
@@ -703,29 +698,6 @@ fn map_worker_assignment(row: &rusqlite::Row) -> Result<WorkerAssignment> {
         completed_at: row.get(7)?,
         failure_notes: row.get(8)?,
     })
-}
-
-/// Clean up stale worker assignments whose worktree directories no longer exist.
-///
-/// Iterates active assignments (status = coding/integrating). For each, checks if
-/// the worktree_path directory exists on disk. If not, marks the assignment as
-/// 'failed' with notes indicating it was stale. Returns the count of cleaned
-/// assignments.
-pub fn cleanup_stale_worker_assignments(conn: &Connection) -> Result<usize> {
-    let active = active_worker_assignments(conn)?;
-    let mut cleaned = 0;
-    for wa in &active {
-        if !Path::new(&wa.worktree_path).exists() {
-            update_worker_assignment_status(
-                conn,
-                wa.id,
-                "failed",
-                Some("stale: worktree no longer exists"),
-            )?;
-            cleaned += 1;
-        }
-    }
-    Ok(cleaned)
 }
 
 // ── Task File Changes ──────────────────────────────────────────────
@@ -1091,8 +1063,7 @@ pub fn upsert_bead_metrics(
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) \
          ON CONFLICT(bead_id) DO UPDATE SET \
          sessions = ?2, wall_time_secs = ?3, total_turns = ?4, \
-         total_output_tokens = ?5, integration_time_secs = ?6, \
-         completed_at = COALESCE(?7, bead_metrics.completed_at)",
+         total_output_tokens = ?5, integration_time_secs = ?6, completed_at = ?7",
         rusqlite::params![
             bead_id,
             sessions,
@@ -1154,19 +1125,6 @@ fn map_bead_metrics(row: &rusqlite::Row) -> Result<BeadMetrics> {
         integration_time_secs: row.get(5)?,
         completed_at: row.get(6)?,
     })
-}
-
-/// Mark a bead as completed by setting completed_at to the current UTC timestamp.
-///
-/// Returns `Ok(true)` if a row was updated, `Ok(false)` if the bead doesn't exist
-/// or was already completed.
-pub fn mark_bead_completed(conn: &Connection, bead_id: &str) -> Result<bool> {
-    let updated = conn.execute(
-        "UPDATE bead_metrics SET completed_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') \
-         WHERE bead_id = ?1 AND completed_at IS NULL",
-        rusqlite::params![bead_id],
-    )?;
-    Ok(updated > 0)
 }
 
 fn map_observation(row: &rusqlite::Row) -> Result<Observation> {
@@ -2040,8 +1998,8 @@ mod tests {
             &conn,
             "2026-01-15T10:00:00Z",
             1,
-            "session.duration_secs",
-            Some("120"),
+            "session.duration_ms",
+            Some("120000"),
             None,
         )
         .unwrap();
@@ -2060,8 +2018,8 @@ mod tests {
             &conn,
             "2026-01-15T11:00:00Z",
             2,
-            "session.duration_secs",
-            Some("90"),
+            "session.duration_ms",
+            Some("90000"),
             None,
         )
         .unwrap();
@@ -2074,8 +2032,8 @@ mod tests {
         let data1: serde_json::Value = serde_json::from_str(&obs1.data).unwrap();
         assert_eq!(data1["turns.total"], 42);
         assert_eq!(data1["cost.estimate_usd"], 1.5);
-        assert_eq!(data1["session.duration_secs"], 120);
-        assert_eq!(obs1.duration, Some(120));
+        assert_eq!(data1["session.duration_ms"], 120000);
+        assert_eq!(obs1.duration, Some(120)); // 120000ms / 1000
 
         // Verify session 2 observation
         let obs2 = get_observation(&conn, 2).unwrap().unwrap();
@@ -2147,7 +2105,7 @@ mod tests {
     fn rebuild_observations_no_duration_event() {
         let (_dir, conn) = test_db();
 
-        // Session with no duration event
+        // Session with no session.duration_ms event
         insert_event_with_ts(
             &conn,
             "2026-01-15T10:00:00Z",
@@ -2323,75 +2281,6 @@ mod tests {
 
         let active = active_worker_assignments(&conn).unwrap();
         assert!(active.is_empty());
-    }
-
-    // ── Stale Worker Cleanup tests ──────────────────────────────────────
-
-    #[test]
-    fn test_cleanup_stale_worker_assignments() {
-        let (_dir, conn) = test_db();
-
-        // Insert assignments with non-existent worktree paths
-        insert_worker_assignment(
-            &conn,
-            0,
-            "beads-stale1",
-            "/nonexistent/path/wt-0",
-            "coding",
-            None,
-        )
-        .unwrap();
-        insert_worker_assignment(
-            &conn,
-            1,
-            "beads-stale2",
-            "/nonexistent/path/wt-1",
-            "integrating",
-            None,
-        )
-        .unwrap();
-
-        let cleaned = cleanup_stale_worker_assignments(&conn).unwrap();
-        assert_eq!(cleaned, 2);
-
-        // Verify they are now failed
-        let active = active_worker_assignments(&conn).unwrap();
-        assert!(active.is_empty());
-
-        let wa0 = get_worker_assignment(&conn, 1).unwrap().unwrap();
-        assert_eq!(wa0.status, "failed");
-        assert_eq!(
-            wa0.failure_notes.as_deref(),
-            Some("stale: worktree no longer exists")
-        );
-    }
-
-    #[test]
-    fn test_cleanup_stale_preserves_valid() {
-        let (_dir, conn) = test_db();
-
-        // Insert assignment with an existing directory (/tmp always exists)
-        insert_worker_assignment(&conn, 0, "beads-valid", "/tmp", "coding", None).unwrap();
-
-        // Insert a stale one too
-        insert_worker_assignment(
-            &conn,
-            1,
-            "beads-stale",
-            "/nonexistent/path/wt-stale",
-            "coding",
-            None,
-        )
-        .unwrap();
-
-        let cleaned = cleanup_stale_worker_assignments(&conn).unwrap();
-        assert_eq!(cleaned, 1);
-
-        // Valid assignment should still be active
-        let active = active_worker_assignments(&conn).unwrap();
-        assert_eq!(active.len(), 1);
-        assert_eq!(active[0].bead_id, "beads-valid");
-        assert_eq!(active[0].status, "coding");
     }
 
     // ── Task File Changes tests ─────────────────────────────────────────
@@ -3064,111 +2953,5 @@ mod tests {
         // Threshold=5: should return nothing
         let results = high_iteration_integrations(&conn, 5).unwrap();
         assert!(results.is_empty());
-    }
-
-    // ── upsert_bead_metrics completed_at preservation tests ──────────
-
-    // ── mark_bead_completed tests ──────────────────────────────────────
-
-    #[test]
-    fn test_mark_bead_completed() {
-        let (_dir, conn) = test_db();
-
-        // Insert bead with NULL completed_at
-        upsert_bead_metrics(&conn, "beads-abc", 1, 60.0, 10, Some(100), None, None).unwrap();
-
-        let result = mark_bead_completed(&conn, "beads-abc").unwrap();
-        assert!(result, "should return true when updating a bead");
-
-        let bm = get_bead_metrics(&conn, "beads-abc").unwrap().unwrap();
-        assert!(bm.completed_at.is_some(), "completed_at should now be set");
-        assert!(
-            bm.completed_at.unwrap().contains('T'),
-            "should be ISO timestamp"
-        );
-    }
-
-    #[test]
-    fn test_mark_bead_completed_idempotent() {
-        let (_dir, conn) = test_db();
-
-        upsert_bead_metrics(&conn, "beads-abc", 1, 60.0, 10, Some(100), None, None).unwrap();
-
-        let first = mark_bead_completed(&conn, "beads-abc").unwrap();
-        assert!(first, "first call should return true");
-
-        let second = mark_bead_completed(&conn, "beads-abc").unwrap();
-        assert!(
-            !second,
-            "second call should return false (already completed)"
-        );
-    }
-
-    #[test]
-    fn test_mark_bead_completed_nonexistent() {
-        let (_dir, conn) = test_db();
-
-        let result = mark_bead_completed(&conn, "beads-nonexistent").unwrap();
-        assert!(!result, "should return false for unknown bead_id");
-    }
-
-    // ── upsert_bead_metrics completed_at preservation tests ──────────
-
-    #[test]
-    fn test_upsert_bead_metrics_preserves_completed_at() {
-        let (_dir, conn) = test_db();
-
-        // Insert with completed_at set
-        upsert_bead_metrics(
-            &conn,
-            "beads-abc",
-            1,
-            60.0,
-            10,
-            Some(100),
-            None,
-            Some("2026-02-16T12:00:00Z"),
-        )
-        .unwrap();
-
-        // Upsert with completed_at=None — should preserve existing value
-        upsert_bead_metrics(&conn, "beads-abc", 2, 120.0, 20, Some(200), None, None).unwrap();
-
-        let bm = get_bead_metrics(&conn, "beads-abc").unwrap().unwrap();
-        assert_eq!(bm.sessions, 2);
-        assert_eq!(bm.wall_time_secs, 120.0);
-        assert_eq!(
-            bm.completed_at.as_deref(),
-            Some("2026-02-16T12:00:00Z"),
-            "completed_at should be preserved when upserting with None"
-        );
-    }
-
-    #[test]
-    fn test_upsert_bead_metrics_updates_completed_at() {
-        let (_dir, conn) = test_db();
-
-        // Insert without completed_at
-        upsert_bead_metrics(&conn, "beads-abc", 1, 60.0, 10, Some(100), None, None).unwrap();
-
-        // Upsert with a new completed_at value
-        upsert_bead_metrics(
-            &conn,
-            "beads-abc",
-            2,
-            120.0,
-            20,
-            Some(200),
-            None,
-            Some("2026-02-16T14:00:00Z"),
-        )
-        .unwrap();
-
-        let bm = get_bead_metrics(&conn, "beads-abc").unwrap().unwrap();
-        assert_eq!(
-            bm.completed_at.as_deref(),
-            Some("2026-02-16T14:00:00Z"),
-            "completed_at should be updated when a new value is provided"
-        );
     }
 }

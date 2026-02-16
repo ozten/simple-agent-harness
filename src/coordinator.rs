@@ -5,21 +5,20 @@
 /// spawns workers in git worktrees, and polls for completions.
 /// Completed workers are queued for sequential integration into main.
 use crate::adapters;
-use crate::config::{ArchitectureConfig, HarnessConfig};
+use crate::config::HarnessConfig;
 use crate::cycle_detect;
 use crate::data_dir::DataDir;
 use crate::db;
 use crate::estimation::BeadNode;
-use crate::expansion_event;
+use crate::improve;
 use crate::ingest;
-use crate::integrator::{CircuitBreaker, IntegrationQueue, IntegrationResult, TrippedFailure};
+use crate::integrator::{CircuitBreaker, IntegrationQueue, TrippedFailure};
 use crate::pool::{PoolError, SessionOutcome, WorkerPool};
+use crate::prompt;
 use crate::runner;
 use crate::scheduler::{self, InProgressAssignment, ReadyBead};
-use crate::signal_correlator;
 use crate::signals::SignalHandler;
 use crate::status::{HarnessState, StatusTracker};
-use crate::structural_metrics;
 use crate::worktree;
 use rusqlite::Connection;
 use std::collections::HashSet;
@@ -121,12 +120,6 @@ pub async fn run(
     let mut consecutive_no_work = 0u32;
     const MAX_CONSECUTIVE_NO_WORK: u32 = 3;
 
-    // Handle for the background integration task (at most one at a time).
-    let mut integration_handle: Option<
-        tokio::task::JoinHandle<(IntegrationResult, CircuitBreaker)>,
-    > = None;
-    let db_path = data_dir.db();
-
     // StatusTracker: write state transitions so `--status` works
     let status_path = data_dir.status();
     let mut status = StatusTracker::new(status_path, 0, initial_session_id);
@@ -175,20 +168,6 @@ pub async fn run(
         }
         Err(e) => {
             tracing::warn!(error = %e, "failed to clean up stale worktrees");
-        }
-        _ => {}
-    }
-
-    // Clean up stale worker assignments whose worktree directories no longer exist.
-    match db::cleanup_stale_worker_assignments(&db_conn) {
-        Ok(count) if count > 0 => {
-            tracing::info!(
-                count,
-                "cleaned up stale worker assignments from previous run"
-            );
-        }
-        Err(e) => {
-            tracing::warn!(error = %e, "failed to clean up stale worker assignments");
         }
         _ => {}
     }
@@ -262,114 +241,80 @@ pub async fn run(
             }
         }
 
-        // Integration: process one completed worker at a time (sequential).
-        // The actual integrate() call runs in a background thread so the
-        // coordinator loop can continue polling/scheduling while it runs.
-
-        // Poll the in-flight integration handle (if any)
-        if let Some(handle) = integration_handle.as_mut() {
-            if handle.is_finished() {
-                let handle = integration_handle.take().unwrap();
-                match handle.await {
-                    Ok((result, updated_cb)) => {
-                        // Merge circuit breaker state back from the background task
-                        circuit_breaker = updated_cb;
-
-                        let worker_id = result.worker_id;
-                        let bead_id = result.bead_id.clone();
-                        let worktree_path = pool
-                            .worker_worktree_path(worker_id)
-                            .unwrap_or_else(|| PathBuf::from("<unknown>"));
-
-                        if result.success {
-                            completed_beads += 1;
-
-                            print_coordinator_integration_progress(
-                                worker_id,
-                                &bead_id,
-                                completed_beads,
-                                failed_beads,
-                                &db_conn,
-                                config.workers.max,
-                            );
-
-                            tracing::info!(
-                                worker_id,
-                                bead_id = %bead_id,
-                                commit = ?result.merge_commit,
-                                "integration succeeded"
-                            );
-                            if let Err(e) = pool.reset_worker(worker_id) {
-                                tracing::warn!(error = %e, worker_id, "failed to reset worker after integration");
-                            }
-
-                            // Check architecture review triggers
-                            maybe_run_architecture_review(
-                                &config.architecture,
-                                &db_conn,
-                                &repo_dir,
-                                completed_beads,
-                            );
-                        } else {
-                            let error_summary =
-                                result.failure_reason.as_deref().unwrap_or("unknown error");
-
-                            if let Some(tripped) = circuit_breaker.check_tripped(
-                                &bead_id,
-                                error_summary,
-                                &worktree_path,
-                            ) {
-                                failed_beads += 1;
-                                handle_tripped_failure(&tripped);
-                            } else {
-                                tracing::warn!(
-                                    worker_id,
-                                    bead_id = %bead_id,
-                                    reason = ?result.failure_reason,
-                                    state = %circuit_breaker.state(&bead_id),
-                                    "integration failed, retries remain"
-                                );
-                                if let Err(e) = pool.reset_worker(worker_id) {
-                                    tracing::warn!(error = %e, worker_id, "failed to reset worker after integration failure");
-                                }
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        tracing::error!(error = %e, "integration task panicked");
-                    }
-                }
-            }
-        }
-
-        // Start a new integration if none is in-flight and a completed worker is ready
-        if integration_handle.is_none() && !pool.has_integrating() {
+        // Integration: process one completed worker at a time (sequential)
+        // Only integrate if no other worker is currently integrating
+        if !pool.has_integrating() {
             if let Some((worker_id, assignment_id, worktree_path, bead_id)) = pool.next_completed()
             {
+                // Mark the worker as integrating
                 pool.set_integrating(worker_id);
+
                 tracing::info!(worker_id, bead_id = %bead_id, "starting integration");
 
-                // Clone/own everything needed for the background task
-                let iq = integration_queue.clone();
-                let cb = circuit_breaker.clone();
                 let resolved_integration = config.agent.resolved_integration();
-                let db_path = db_path.clone();
+                let result = integration_queue.integrate(
+                    worker_id,
+                    assignment_id,
+                    &bead_id,
+                    &worktree_path,
+                    &db_conn,
+                    Some(&resolved_integration),
+                    &mut circuit_breaker,
+                );
 
-                integration_handle = Some(tokio::task::spawn_blocking(move || {
-                    let bg_conn =
-                        db::open_or_create(&db_path).expect("failed to open DB for integration");
-                    let mut cb = cb;
-                    let result = iq.integrate(
+                if result.success {
+                    completed_beads += 1;
+
+                    // Print progress using DB state (metrics already ingested during poll phase)
+                    print_coordinator_integration_progress(
                         worker_id,
-                        assignment_id,
                         &bead_id,
-                        &worktree_path,
-                        &bg_conn,
-                        Some(&resolved_integration),
-                        &mut cb,
+                        completed_beads,
+                        failed_beads,
+                        &db_conn,
+                        config.workers.max,
                     );
-                    (result, cb)
-                }));
+
+                    tracing::info!(
+                        worker_id,
+                        bead_id = %bead_id,
+                        commit = ?result.merge_commit,
+                        "integration succeeded"
+                    );
+
+                    // Run auto-promotion cycle after successful integration
+                    run_auto_promotion(config, &db_conn, &data_dir.db(), completed_beads);
+
+                    // Reset the worker back to idle after successful integration
+                    if let Err(e) = pool.reset_worker(worker_id) {
+                        tracing::warn!(error = %e, worker_id, "failed to reset worker after integration");
+                    }
+                } else {
+                    let error_summary = result.failure_reason.as_deref().unwrap_or("unknown error");
+
+                    // Check if the circuit breaker has tripped (integrate() already recorded attempts)
+                    if let Some(tripped) =
+                        circuit_breaker.check_tripped(&bead_id, error_summary, &worktree_path)
+                    {
+                        // Circuit breaker tripped — escalate to human review
+                        failed_beads += 1;
+                        handle_tripped_failure(&tripped);
+                        // Do NOT reset the worker — worktree is preserved for inspection
+                        // Do NOT clean up the worktree
+                    } else {
+                        tracing::warn!(
+                            worker_id,
+                            bead_id = %bead_id,
+                            reason = ?result.failure_reason,
+                            state = %circuit_breaker.state(&bead_id),
+                            "integration failed, retries remain"
+                        );
+                        // Reset the worker back to idle so it can retry
+                        if let Err(e) = pool.reset_worker(worker_id) {
+                            tracing::warn!(error = %e, worker_id, "failed to reset worker after integration failure");
+                        }
+                    }
+                }
             }
         }
 
@@ -385,7 +330,7 @@ pub async fn run(
             let bead_query = query_ready_beads();
             let ready_beads = bead_query.ready;
 
-            if ready_beads.is_empty() && pool.active_count() == 0 && integration_handle.is_none() {
+            if ready_beads.is_empty() && pool.active_count() == 0 {
                 consecutive_no_work += 1;
                 if consecutive_no_work >= MAX_CONSECUTIVE_NO_WORK {
                     tracing::info!("no work available and no active workers, exiting");
@@ -404,20 +349,21 @@ pub async fn run(
             // Schedule assignments for idle workers
             let assignable = scheduler::next_assignable_tasks(&ready_beads, &in_progress);
 
+            // Assemble the base prompt once (brief + improvements + PROMPT.md).
+            // Each worker gets this base prompt with a bead-specific suffix.
+            let base_prompt = assemble_base_prompt(config, data_dir);
+
             for bead_id in assignable.iter().take(pool.idle_count() as usize) {
                 // Find the bead to get its info for prompting and affected set
                 let bead = ready_beads.iter().find(|b| b.id == *bead_id);
                 let prompt = match bead {
-                    Some(b) => format!("Work on bead: {}", b.id),
+                    Some(b) => format!("{}\n\nWork on bead: {}", base_prompt, b.id),
                     None => continue,
                 };
 
-                // Serialize affected globs as JSON array for the DB
-                let affected_globs_str = bead.and_then(|b| {
-                    b.affected_globs
-                        .as_ref()
-                        .map(|globs| serde_json::to_string(globs).unwrap())
-                });
+                // Serialize affected globs as comma-separated string for the DB
+                let affected_globs_str =
+                    bead.and_then(|b| b.affected_globs.as_ref().map(|globs| globs.join(", ")));
 
                 let resolved_agent = config.agent.resolved_coding();
                 match pool
@@ -454,13 +400,157 @@ pub async fn run(
         }
 
         // Update status between poll cycles
-        if pool.active_count() == 0 && integration_handle.is_none() {
+        if pool.active_count() == 0 {
             status.update(HarnessState::Idle);
         }
 
         // Sleep before next poll cycle
         tokio::time::sleep(Duration::from_secs(2)).await;
     }
+}
+
+/// Assemble the base prompt with brief (performance feedback + improvements) and PROMPT.md.
+///
+/// Falls back to an empty string if prompt assembly fails (e.g., missing prompt file).
+fn assemble_base_prompt(config: &HarnessConfig, data_dir: &DataDir) -> String {
+    // Compile adapter to determine supported metrics
+    let resolved_agent = config.agent.resolved_coding();
+    let adapter_name =
+        adapters::resolve_adapter_name(resolved_agent.adapter.as_deref(), &resolved_agent.command);
+    let adapter = adapters::create_adapter(adapter_name);
+    let supported = adapter.supported_metrics();
+    let supported_opt = if supported.is_empty() {
+        None
+    } else {
+        Some(supported)
+    };
+    let targets_opt = if config.metrics.targets.rules.is_empty() {
+        None
+    } else {
+        Some(&config.metrics.targets)
+    };
+
+    match prompt::assemble(
+        &config.prompt,
+        &config.session.prompt_file,
+        &data_dir.db(),
+        targets_opt,
+        supported_opt,
+    ) {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to assemble prompt, using empty base");
+            String::new()
+        }
+    }
+}
+
+/// Run the self-improvement auto-promotion cycle after a successful integration.
+///
+/// Checks if any open improvements have been active for at least `auto_promote_after`
+/// successful sessions. If so, promotes them and appends to the configured prompt file.
+fn run_auto_promotion(
+    config: &HarnessConfig,
+    db_conn: &Connection,
+    db_path: &std::path::Path,
+    completed_beads: u32,
+) {
+    let auto_after = config.improvements.auto_promote_after;
+    if auto_after == 0 {
+        return; // auto-promotion disabled
+    }
+
+    // Only check every `auto_promote_after` completions to avoid DB churn
+    if !completed_beads.is_multiple_of(auto_after) {
+        return;
+    }
+
+    let open = match db::list_improvements(db_conn, Some("open"), None) {
+        Ok(list) => list,
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to list open improvements for auto-promotion");
+            return;
+        }
+    };
+
+    if open.is_empty() {
+        return;
+    }
+
+    for imp in &open {
+        // An improvement is eligible for promotion if there have been at least
+        // `auto_promote_after` successful sessions since it was created.
+        let sessions_since = sessions_since_improvement(db_conn, &imp.created);
+        if sessions_since < auto_after as i64 {
+            continue;
+        }
+
+        tracing::info!(
+            ref_id = %imp.ref_id,
+            title = %imp.title,
+            sessions_since,
+            threshold = auto_after,
+            "auto-promoting improvement"
+        );
+
+        // Promote in DB
+        if let Err(e) = improve::handle_promote(db_path, &imp.ref_id) {
+            tracing::warn!(
+                error = %e,
+                ref_id = %imp.ref_id,
+                "failed to auto-promote improvement"
+            );
+            continue;
+        }
+
+        // Append to PROMPT.md
+        if let Err(e) = append_promoted_to_prompt(&config.improvements.prompt_file, imp) {
+            tracing::warn!(
+                error = %e,
+                ref_id = %imp.ref_id,
+                "failed to append promoted improvement to prompt file"
+            );
+        }
+    }
+}
+
+/// Count sessions (observations) recorded after the given ISO timestamp.
+fn sessions_since_improvement(db_conn: &Connection, created_at: &str) -> i64 {
+    db_conn
+        .query_row(
+            "SELECT COUNT(*) FROM observations WHERE ts > ?1",
+            rusqlite::params![created_at],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap_or_default()
+}
+
+/// Append a promoted improvement's rule to the prompt file.
+fn append_promoted_to_prompt(
+    prompt_path: &std::path::Path,
+    imp: &db::Improvement,
+) -> Result<(), String> {
+    use std::io::Write;
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(prompt_path)
+        .map_err(|e| format!("failed to open {}: {}", prompt_path.display(), e))?;
+
+    let body_text = imp.body.as_deref().unwrap_or(&imp.title);
+    write!(
+        file,
+        "\n\n<!-- Promoted from {} [{}] -->\n- {}",
+        imp.ref_id, imp.category, body_text
+    )
+    .map_err(|e| format!("failed to write to {}: {}", prompt_path.display(), e))?;
+
+    tracing::info!(
+        ref_id = %imp.ref_id,
+        prompt_file = %prompt_path.display(),
+        "appended promoted improvement to prompt file"
+    );
+    Ok(())
 }
 
 /// Build the list of in-progress assignments from the worker pool's current state.
@@ -471,9 +561,7 @@ fn build_in_progress_list(pool: &WorkerPool, db_conn: &Connection) -> Vec<InProg
     pool.snapshot()
         .iter()
         .filter(|(_, state, bead_id)| {
-            (*state == crate::pool::WorkerState::Coding
-                || *state == crate::pool::WorkerState::Completed)
-                && bead_id.is_some()
+            *state == crate::pool::WorkerState::Coding && bead_id.is_some()
         })
         .map(|(worker_id, _, bead_id)| {
             let bead_id_str = bead_id.unwrap().to_string();
@@ -498,13 +586,15 @@ fn lookup_affected_globs_for_worker(
     let assignment_id = pool.worker_assignment_id(worker_id)?;
     let wa = db::get_worker_assignment(db_conn, assignment_id).ok()??;
     let globs_str = wa.affected_globs?;
-    parse_globs_json(&globs_str)
+    Some(parse_comma_separated_globs(&globs_str))
 }
 
-/// Parse a JSON array string of globs into a vector.
-/// Returns None if the string is not valid JSON.
-fn parse_globs_json(s: &str) -> Option<Vec<String>> {
-    serde_json::from_str(s).ok()
+/// Parse a comma-separated globs string into a vector.
+fn parse_comma_separated_globs(s: &str) -> Vec<String> {
+    s.split(',')
+        .map(|g| g.trim().to_string())
+        .filter(|g| !g.is_empty())
+        .collect()
 }
 
 /// Check all coding workers for `.blacksmith-expand` files and process them.
@@ -574,10 +664,9 @@ fn check_and_process_expand_files(pool: &WorkerPool, db_conn: &Connection) {
             .ok()
             .flatten()
             .and_then(|wa| wa.affected_globs)
-            .and_then(|g| parse_globs_json(&g))
+            .map(|g| parse_comma_separated_globs(&g))
             .unwrap_or_default();
 
-        let predicted = existing.clone();
         let mut merged = existing;
         for g in &new_globs {
             if !merged.contains(g) {
@@ -585,25 +674,7 @@ fn check_and_process_expand_files(pool: &WorkerPool, db_conn: &Connection) {
             }
         }
 
-        let merged_str = serde_json::to_string(&merged).unwrap();
-
-        // Record expansion event for architecture analysis tracking
-        let bead_id = pool
-            .snapshot()
-            .iter()
-            .find(|(id, _, _)| *id == worker_id)
-            .and_then(|(_, _, bid)| bid.map(|s| s.to_string()))
-            .unwrap_or_else(|| format!("worker-{worker_id}"));
-        let event = expansion_event::ExpansionEvent {
-            task_id: bead_id,
-            predicted_modules: predicted,
-            actual_modules: merged.clone(),
-            expansion_reason: format!("expand file: {} new globs", new_globs.len()),
-            timestamp: chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string(),
-        };
-        if let Err(e) = expansion_event::record(db_conn, &event) {
-            tracing::warn!(error = %e, worker_id, "failed to record expansion event");
-        }
+        let merged_str = merged.join(", ");
 
         // Update the DB
         match db::update_worker_assignment_affected_globs(db_conn, assignment_id, &merged_str) {
@@ -933,16 +1004,10 @@ fn load_counter(path: &std::path::Path) -> u64 {
     }
 }
 
-/// Save the global iteration counter to a file (atomic write-rename).
+/// Save the global iteration counter to a file.
 fn save_counter(path: &std::path::Path, value: u64) {
-    let dir = path.parent().unwrap_or(std::path::Path::new("."));
-    let tmp_path = dir.join(format!(".counter.tmp.{}", std::process::id()));
-    if let Err(e) = std::fs::write(&tmp_path, value.to_string()) {
-        tracing::error!(error = %e, path = %tmp_path.display(), "failed to write temp counter file");
-        return;
-    }
-    if let Err(e) = std::fs::rename(&tmp_path, path) {
-        tracing::error!(error = %e, path = %path.display(), "failed to rename temp counter file");
+    if let Err(e) = std::fs::write(path, value.to_string()) {
+        tracing::error!(error = %e, path = %path.display(), "failed to save iteration counter");
     }
 }
 
@@ -1053,95 +1118,6 @@ fn print_coordinator_integration_progress(
     }
 }
 
-/// Check if architecture review should be triggered and run it if so.
-///
-/// Triggers on two conditions:
-/// 1. Periodic: every `review_interval` completed tasks (if > 0)
-/// 2. Threshold: expansion events within the configured window exceed the threshold
-fn maybe_run_architecture_review(
-    arch_config: &ArchitectureConfig,
-    db_conn: &Connection,
-    repo_root: &std::path::Path,
-    completed_beads: u32,
-) {
-    let periodic_trigger = arch_config.review_interval > 0
-        && completed_beads > 0
-        && completed_beads.is_multiple_of(arch_config.review_interval);
-
-    let threshold_trigger = if arch_config.expansion_event_threshold > 0 {
-        match expansion_event::count_recent_expansions(db_conn, arch_config.expansion_event_window)
-        {
-            Ok(count) => count >= arch_config.expansion_event_threshold,
-            Err(e) => {
-                tracing::debug!(error = %e, "failed to count expansion events for arch review");
-                false
-            }
-        }
-    } else {
-        false
-    };
-
-    if !periodic_trigger && !threshold_trigger {
-        return;
-    }
-
-    let reason = match (periodic_trigger, threshold_trigger) {
-        (true, true) => format!(
-            "periodic (every {} tasks) + expansion threshold exceeded",
-            arch_config.review_interval
-        ),
-        (true, false) => format!("periodic (every {} tasks)", arch_config.review_interval),
-        (false, true) => "expansion event threshold exceeded".to_string(),
-        _ => unreachable!(),
-    };
-
-    tracing::info!(
-        completed_beads,
-        reason = %reason,
-        "triggering architecture review"
-    );
-
-    run_architecture_analysis(db_conn, repo_root);
-}
-
-/// Run structural + historical signal analysis and log results.
-fn run_architecture_analysis(db_conn: &Connection, repo_root: &std::path::Path) {
-    let report = structural_metrics::analyze(repo_root);
-
-    let candidate_count;
-    match signal_correlator::correlate(db_conn, &report, None) {
-        Ok(correlation) => {
-            candidate_count = correlation.candidates.len();
-            if correlation.candidates.is_empty() {
-                tracing::info!(
-                    modules = report.modules.len(),
-                    expansion_events = correlation.total_expansion_events,
-                    "architecture review: no refactoring candidates found"
-                );
-            } else {
-                for c in &correlation.candidates {
-                    tracing::warn!(
-                        module = %c.module,
-                        combined_score = format!("{:.1}", c.combined_score),
-                        confidence = format!("{:.2}", c.confidence),
-                        "architecture review: refactoring candidate identified"
-                    );
-                }
-                tracing::info!(
-                    candidates = candidate_count,
-                    modules = report.modules.len(),
-                    expansion_events = correlation.total_expansion_events,
-                    integration_records = correlation.total_integration_records,
-                    "architecture review complete"
-                );
-            }
-        }
-        Err(e) => {
-            tracing::warn!(error = %e, "architecture review: signal correlation failed");
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1195,6 +1171,7 @@ mod tests {
             reconciliation: ReconciliationConfig::default(),
             architecture: ArchitectureConfig::default(),
             quality_gates: QualityGatesConfig::default(),
+            improvements: ImprovementsConfig::default(),
         }
     }
 
@@ -1425,18 +1402,17 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_globs_json() {
+    fn test_parse_comma_separated_globs() {
         assert_eq!(
-            parse_globs_json(r#"["src/db.rs","src/config.rs"]"#),
-            Some(vec!["src/db.rs".to_string(), "src/config.rs".to_string()])
+            parse_comma_separated_globs("src/db.rs, src/config.rs"),
+            vec!["src/db.rs", "src/config.rs"]
         );
+        assert_eq!(parse_comma_separated_globs("src/db.rs"), vec!["src/db.rs"]);
+        assert!(parse_comma_separated_globs("").is_empty());
         assert_eq!(
-            parse_globs_json(r#"["src/db.rs"]"#),
-            Some(vec!["src/db.rs".to_string()])
+            parse_comma_separated_globs("  src/a.rs ,  src/b.rs  "),
+            vec!["src/a.rs", "src/b.rs"]
         );
-        assert_eq!(parse_globs_json(r#"[]"#), Some(vec![]));
-        assert_eq!(parse_globs_json(""), None);
-        assert_eq!(parse_globs_json("not json"), None);
     }
 
     #[test]
@@ -1496,14 +1472,14 @@ mod tests {
         let db_path = repo.join("test.db");
         let db_conn = db::open_or_create(&db_path).unwrap();
 
-        // Insert a worker assignment with initial affected_globs (JSON array)
+        // Insert a worker assignment with initial affected_globs
         let assignment_id = db::insert_worker_assignment(
             &db_conn,
             0,
             "beads-expand-test",
             &fake_worktree.to_string_lossy(),
             "coding",
-            Some(r#"["src/db.rs"]"#),
+            Some("src/db.rs"),
         )
         .unwrap();
 
@@ -1534,14 +1510,14 @@ mod tests {
         // Process expand files
         check_and_process_expand_files(&pool, &db_conn);
 
-        // Verify the affected_globs were updated in DB as JSON array
+        // Verify the affected_globs were updated in DB
         let wa = db::get_worker_assignment(&db_conn, assignment_id)
             .unwrap()
             .unwrap();
-        let globs: Vec<String> = serde_json::from_str(&wa.affected_globs.unwrap()).unwrap();
-        assert!(globs.contains(&"src/db.rs".to_string()));
-        assert!(globs.contains(&"src/config.rs".to_string()));
-        assert!(globs.contains(&"src/signals.rs".to_string()));
+        let globs = wa.affected_globs.unwrap();
+        assert!(globs.contains("src/db.rs"));
+        assert!(globs.contains("src/config.rs"));
+        assert!(globs.contains("src/signals.rs"));
 
         // Verify the expand file was deleted
         assert!(!fake_worktree.join(EXPAND_FILE_NAME).exists());
@@ -1562,7 +1538,7 @@ mod tests {
             "beads-nodup",
             &fake_worktree.to_string_lossy(),
             "coding",
-            Some(r#"["src/db.rs","src/config.rs"]"#),
+            Some("src/db.rs, src/config.rs"),
         )
         .unwrap();
 
@@ -1597,7 +1573,8 @@ mod tests {
         let wa = db::get_worker_assignment(&db_conn, assignment_id)
             .unwrap()
             .unwrap();
-        let globs: Vec<String> = serde_json::from_str(&wa.affected_globs.unwrap()).unwrap();
+        let globs_str = wa.affected_globs.unwrap();
+        let globs = parse_comma_separated_globs(&globs_str);
 
         // src/db.rs should appear only once
         assert_eq!(globs.iter().filter(|g| *g == "src/db.rs").count(), 1);
@@ -1620,7 +1597,7 @@ mod tests {
             "beads-empty",
             &fake_worktree.to_string_lossy(),
             "coding",
-            Some(r#"["src/db.rs"]"#),
+            Some("src/db.rs"),
         )
         .unwrap();
 
@@ -1652,7 +1629,7 @@ mod tests {
         let wa = db::get_worker_assignment(&db_conn, assignment_id)
             .unwrap()
             .unwrap();
-        assert_eq!(wa.affected_globs, Some(r#"["src/db.rs"]"#.to_string()));
+        assert_eq!(wa.affected_globs, Some("src/db.rs".to_string()));
 
         // But expand file should still be deleted
         assert!(!fake_worktree.join(EXPAND_FILE_NAME).exists());
@@ -1708,7 +1685,7 @@ mod tests {
         let wa = db::get_worker_assignment(&db_conn, assignment_id)
             .unwrap()
             .unwrap();
-        let globs: Vec<String> = serde_json::from_str(&wa.affected_globs.unwrap()).unwrap();
+        let globs = parse_comma_separated_globs(&wa.affected_globs.unwrap());
         assert_eq!(globs, vec!["src/config.rs", "src/signals.rs"]);
     }
 
@@ -1727,7 +1704,7 @@ mod tests {
             "beads-noop",
             &fake_worktree.to_string_lossy(),
             "coding",
-            Some(r#"["src/db.rs"]"#),
+            Some("src/db.rs"),
         )
         .unwrap();
 
@@ -1756,7 +1733,7 @@ mod tests {
         let wa = db::get_worker_assignment(&db_conn, assignment_id)
             .unwrap()
             .unwrap();
-        assert_eq!(wa.affected_globs, Some(r#"["src/db.rs"]"#.to_string()));
+        assert_eq!(wa.affected_globs, Some("src/db.rs".to_string()));
     }
 
     #[test]
@@ -1795,89 +1772,284 @@ mod tests {
         recover_orphaned_beads();
     }
 
-    #[test]
-    fn test_periodic_trigger_fires_at_interval() {
-        let config = ArchitectureConfig {
-            review_interval: 5,
-            ..Default::default()
-        };
-        // Should trigger at multiples of 5
-        assert!(config.review_interval > 0 && 5 % config.review_interval == 0);
-        assert!(config.review_interval > 0 && 10 % config.review_interval == 0);
-        // Should NOT trigger at non-multiples
-        assert!(3 % config.review_interval != 0);
-        assert!(7 % config.review_interval != 0);
-    }
+    // ── Auto-promotion tests ───────────────────────────────────────────
 
     #[test]
-    fn test_periodic_trigger_disabled_when_zero() {
-        let config = ArchitectureConfig {
-            review_interval: 0,
-            ..Default::default()
-        };
-        // review_interval == 0 means disabled
-        assert_eq!(config.review_interval, 0);
-    }
-
-    #[test]
-    fn test_expansion_threshold_trigger() {
+    fn test_run_auto_promotion_disabled_when_zero() {
         let dir = tempdir().unwrap();
         let db_path = dir.path().join("test.db");
         let db_conn = db::open_or_create(&db_path).unwrap();
-        expansion_event::create_table(&db_conn).unwrap();
 
-        let config = ArchitectureConfig {
-            expansion_event_threshold: 3,
-            expansion_event_window: 10,
-            review_interval: 0, // disable periodic
-            ..Default::default()
-        };
+        db::insert_improvement(&db_conn, "workflow", "Test", None, None, None).unwrap();
 
-        // Below threshold: 2 events < 3
-        for i in 0..2 {
-            let event = expansion_event::ExpansionEvent {
-                task_id: format!("task-{i}"),
-                predicted_modules: vec!["a".to_string()],
-                actual_modules: vec!["a".to_string(), "b".to_string()],
-                expansion_reason: "test".to_string(),
-                timestamp: format!("2026-01-{:02}T10:00:00Z", 10 + i),
-            };
-            expansion_event::record(&db_conn, &event).unwrap();
+        let mut config = test_config(dir.path());
+        config.improvements.auto_promote_after = 0; // disabled
+
+        // Should be a no-op even with completed beads
+        run_auto_promotion(&config, &db_conn, &db_path, 10);
+
+        let imp = db::get_improvement(&db_conn, "R1").unwrap().unwrap();
+        assert_eq!(imp.status, "open");
+    }
+
+    #[test]
+    fn test_run_auto_promotion_not_ready_yet() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let db_conn = db::open_or_create(&db_path).unwrap();
+
+        db::insert_improvement(&db_conn, "workflow", "Test improvement", None, None, None).unwrap();
+
+        // Only 2 observations — below threshold of 5
+        for i in 1..=2 {
+            db::upsert_observation(
+                &db_conn,
+                i,
+                "2026-02-16T10:00:00Z",
+                None,
+                None,
+                r#"{"turns.total": 50}"#,
+            )
+            .unwrap();
         }
-        let count =
-            expansion_event::count_recent_expansions(&db_conn, config.expansion_event_window)
-                .unwrap();
-        assert!(count < config.expansion_event_threshold);
 
-        // At threshold: add one more event (3 total across 3 tasks)
-        let event = expansion_event::ExpansionEvent {
-            task_id: "task-2".to_string(),
-            predicted_modules: vec!["c".to_string()],
-            actual_modules: vec!["c".to_string(), "d".to_string()],
-            expansion_reason: "test".to_string(),
-            timestamp: "2026-01-12T10:00:00Z".to_string(),
-        };
-        expansion_event::record(&db_conn, &event).unwrap();
+        let config = test_config(dir.path());
+        run_auto_promotion(&config, &db_conn, &db_path, 5);
 
-        let count =
-            expansion_event::count_recent_expansions(&db_conn, config.expansion_event_window)
-                .unwrap();
-        assert!(count >= config.expansion_event_threshold);
+        let imp = db::get_improvement(&db_conn, "R1").unwrap().unwrap();
+        assert_eq!(imp.status, "open"); // not promoted yet
     }
 
     #[test]
-    fn test_maybe_run_architecture_review_does_not_panic() {
-        // Verify the function doesn't panic with empty DB and repo
+    fn test_run_auto_promotion_promotes_after_threshold() {
         let dir = tempdir().unwrap();
         let db_path = dir.path().join("test.db");
         let db_conn = db::open_or_create(&db_path).unwrap();
 
-        let config = ArchitectureConfig {
-            review_interval: 1, // trigger on every completion
-            ..Default::default()
+        // Create improvement with an early timestamp
+        db::insert_improvement(
+            &db_conn,
+            "workflow",
+            "Batch file reads",
+            Some("Always batch independent file reads"),
+            None,
+            None,
+        )
+        .unwrap();
+
+        // Verify improvement was created
+        let _imp = db::get_improvement(&db_conn, "R1").unwrap().unwrap();
+
+        // Add 6 observations after the improvement was created (threshold is 5)
+        for i in 1..=6 {
+            // Use a timestamp after creation
+            db::upsert_observation(
+                &db_conn,
+                i,
+                "2099-01-01T00:00:00Z",
+                None,
+                None,
+                r#"{"turns.total": 50}"#,
+            )
+            .unwrap();
+        }
+
+        let prompt_file = dir.path().join("PROMPT.md");
+        std::fs::write(&prompt_file, "# Original Prompt\n").unwrap();
+
+        let mut config = test_config(dir.path());
+        config.improvements.auto_promote_after = 5;
+        config.improvements.prompt_file = prompt_file.clone();
+
+        run_auto_promotion(&config, &db_conn, &db_path, 5);
+
+        // Check the improvement was promoted
+        let imp = db::get_improvement(&db_conn, "R1").unwrap().unwrap();
+        assert_eq!(imp.status, "promoted");
+
+        // Check PROMPT.md was updated with the body text
+        let prompt_content = std::fs::read_to_string(&prompt_file).unwrap();
+        assert!(prompt_content.contains("Always batch independent file reads"));
+        assert!(prompt_content.contains("Promoted from R1"));
+    }
+
+    #[test]
+    fn test_run_auto_promotion_only_runs_on_interval() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let db_conn = db::open_or_create(&db_path).unwrap();
+
+        db::insert_improvement(&db_conn, "workflow", "Test", None, None, None).unwrap();
+
+        // Add enough observations
+        for i in 1..=10 {
+            db::upsert_observation(
+                &db_conn,
+                i,
+                "2099-01-01T00:00:00Z",
+                None,
+                None,
+                r#"{"turns.total": 50}"#,
+            )
+            .unwrap();
+        }
+
+        let prompt_file = dir.path().join("PROMPT.md");
+        std::fs::write(&prompt_file, "").unwrap();
+
+        let mut config = test_config(dir.path());
+        config.improvements.auto_promote_after = 5;
+        config.improvements.prompt_file = prompt_file;
+
+        // completed_beads=3 is not a multiple of 5, so no promotion
+        run_auto_promotion(&config, &db_conn, &db_path, 3);
+
+        let imp = db::get_improvement(&db_conn, "R1").unwrap().unwrap();
+        assert_eq!(imp.status, "open"); // not promoted
+    }
+
+    #[test]
+    fn test_append_promoted_to_prompt_creates_file() {
+        let dir = tempdir().unwrap();
+        let prompt_path = dir.path().join("PROMPT.md");
+
+        let imp = db::Improvement {
+            ref_id: "R1".to_string(),
+            created: "2026-02-16".to_string(),
+            category: "workflow".to_string(),
+            status: "open".to_string(),
+            title: "Batch reads".to_string(),
+            body: Some("Always batch independent file reads".to_string()),
+            context: None,
+            tags: None,
         };
 
-        // Should not panic even with no real repo structure
-        maybe_run_architecture_review(&config, &db_conn, dir.path(), 1);
+        append_promoted_to_prompt(&prompt_path, &imp).unwrap();
+
+        let content = std::fs::read_to_string(&prompt_path).unwrap();
+        assert!(content.contains("Promoted from R1 [workflow]"));
+        assert!(content.contains("Always batch independent file reads"));
+    }
+
+    #[test]
+    fn test_append_promoted_to_prompt_uses_title_when_no_body() {
+        let dir = tempdir().unwrap();
+        let prompt_path = dir.path().join("PROMPT.md");
+
+        let imp = db::Improvement {
+            ref_id: "R2".to_string(),
+            created: "2026-02-16".to_string(),
+            category: "cost".to_string(),
+            status: "open".to_string(),
+            title: "Skip redundant lints".to_string(),
+            body: None,
+            context: None,
+            tags: None,
+        };
+
+        append_promoted_to_prompt(&prompt_path, &imp).unwrap();
+
+        let content = std::fs::read_to_string(&prompt_path).unwrap();
+        assert!(content.contains("Skip redundant lints"));
+    }
+
+    #[test]
+    fn test_sessions_since_improvement() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let db_conn = db::open_or_create(&db_path).unwrap();
+
+        // Add observations at various timestamps
+        db::upsert_observation(
+            &db_conn,
+            1,
+            "2026-01-01T00:00:00Z",
+            None,
+            None,
+            r#"{"turns.total": 50}"#,
+        )
+        .unwrap();
+        db::upsert_observation(
+            &db_conn,
+            2,
+            "2026-01-15T00:00:00Z",
+            None,
+            None,
+            r#"{"turns.total": 50}"#,
+        )
+        .unwrap();
+        db::upsert_observation(
+            &db_conn,
+            3,
+            "2026-02-01T00:00:00Z",
+            None,
+            None,
+            r#"{"turns.total": 50}"#,
+        )
+        .unwrap();
+
+        // Improvement created on Jan 10 — should see 2 sessions after it
+        assert_eq!(
+            sessions_since_improvement(&db_conn, "2026-01-10T00:00:00Z"),
+            2
+        );
+
+        // Improvement created on Feb 01 — 0 sessions after it
+        assert_eq!(
+            sessions_since_improvement(&db_conn, "2026-02-01T00:00:00Z"),
+            0
+        );
+
+        // Improvement created before all sessions — 3 sessions after it
+        assert_eq!(
+            sessions_since_improvement(&db_conn, "2025-12-01T00:00:00Z"),
+            3
+        );
+    }
+
+    #[test]
+    fn test_assemble_base_prompt_graceful_on_missing_prompt_file() {
+        let dir = tempdir().unwrap();
+        let mut config = test_config(dir.path());
+        config.session.prompt_file = dir.path().join("nonexistent.md");
+        let data_dir = test_data_dir(dir.path());
+
+        // Should return empty string, not panic
+        let prompt = assemble_base_prompt(&config, &data_dir);
+        assert!(prompt.is_empty());
+    }
+
+    #[test]
+    fn test_assemble_base_prompt_includes_prompt_file() {
+        let dir = tempdir().unwrap();
+        let mut config = test_config(dir.path());
+        let prompt_path = dir.path().join("prompt.md");
+        std::fs::write(&prompt_path, "You are a coding agent.").unwrap();
+        config.session.prompt_file = prompt_path;
+        let data_dir = test_data_dir(dir.path());
+
+        let prompt = assemble_base_prompt(&config, &data_dir);
+        assert!(prompt.contains("You are a coding agent."));
+    }
+
+    #[test]
+    fn test_assemble_base_prompt_includes_open_improvements() {
+        let dir = tempdir().unwrap();
+        let mut config = test_config(dir.path());
+        let prompt_path = dir.path().join("prompt.md");
+        std::fs::write(&prompt_path, "Main prompt").unwrap();
+        config.session.prompt_file = prompt_path;
+        let data_dir = test_data_dir(dir.path());
+
+        // Add an open improvement to the DB
+        let db_path = data_dir.db();
+        let conn = db::open_or_create(&db_path).unwrap();
+        db::insert_improvement(&conn, "workflow", "Batch file reads", None, None, None).unwrap();
+        drop(conn);
+
+        let prompt = assemble_base_prompt(&config, &data_dir);
+        assert!(prompt.contains("OPEN IMPROVEMENTS"));
+        assert!(prompt.contains("Batch file reads"));
+        assert!(prompt.contains("Main prompt"));
     }
 }

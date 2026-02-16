@@ -86,8 +86,10 @@ pub fn output_file_path(session_config: &SessionConfig, global_iteration: u64) -
 /// - `{prompt}` is replaced with the inline prompt text (used with `prompt_via = "arg"`)
 /// - `{prompt_file}` is replaced with the path to a temp file containing the prompt
 ///   (used with `prompt_via = "file"`)
-fn build_args(args: &[String], prompt: &str, prompt_file: Option<&Path>) -> Vec<String> {
-    args.iter()
+fn build_args(agent_config: &AgentConfig, prompt: &str, prompt_file: Option<&Path>) -> Vec<String> {
+    agent_config
+        .args
+        .iter()
         .map(|arg| {
             let mut result = arg.replace("{prompt}", prompt);
             if let Some(pf) = prompt_file {
@@ -98,37 +100,20 @@ fn build_args(args: &[String], prompt: &str, prompt_file: Option<&Path>) -> Vec<
         .collect()
 }
 
-/// A running agent subprocess, ready to be waited on.
-///
-/// Created by [`spawn_agent`]; the caller decides how to wait (simple `.wait()`
-/// vs `tokio::select!` with a watchdog).
-pub struct SpawnedAgent {
-    /// The child process handle.
-    pub child: tokio::process::Child,
-    /// The child PID (0 if unavailable).
-    pub pid: u32,
-    /// When the child was spawned (for duration measurement).
-    pub start: Instant,
-    /// Temp file holding the prompt (kept alive so the child can read it).
-    _prompt_file: Option<tempfile::NamedTempFile>,
-}
-
-/// Spawn the agent subprocess with stdout+stderr redirected to `output_path`.
+/// Spawn the agent subprocess, capture stdout+stderr to a file, and return the result.
 ///
 /// The subprocess is spawned in its own process group (via `process_group(0)`)
-/// so it can later be killed cleanly.
+/// so the watchdog can later kill the entire group if needed.
 ///
-/// Prompt delivery depends on `prompt_via`:
-/// - `Arg`: substitute `{prompt}` in args (default)
+/// Prompt delivery depends on `agent_config.prompt_via`:
+/// - `Arg`: substitute `{prompt}` in args (default, existing behavior)
 /// - `Stdin`: write prompt to the agent's stdin
 /// - `File`: write prompt to a temp file, substitute `{prompt_file}` in args
-pub async fn spawn_agent(
-    command: &str,
-    args: &[String],
-    prompt_via: PromptVia,
+pub async fn run_session(
+    agent_config: &AgentConfig,
     output_path: &Path,
     prompt: &str,
-) -> Result<SpawnedAgent, SessionError> {
+) -> Result<SessionResult, SessionError> {
     // Create/truncate the output file
     let output_file = std::fs::File::create(output_path).map_err(|e| SessionError::OutputFile {
         path: output_path.to_path_buf(),
@@ -143,7 +128,7 @@ pub async fn spawn_agent(
         })?;
 
     // For file mode: write prompt to a temp file
-    let prompt_file = if prompt_via == PromptVia::File {
+    let prompt_file = if agent_config.prompt_via == PromptVia::File {
         let tmp = tempfile::NamedTempFile::new().map_err(|e| SessionError::Io { source: e })?;
         std::fs::write(tmp.path(), prompt).map_err(|e| SessionError::Io { source: e })?;
         Some(tmp)
@@ -151,27 +136,27 @@ pub async fn spawn_agent(
         None
     };
 
-    let resolved_args = build_args(args, prompt, prompt_file.as_ref().map(|f| f.path()));
+    let args = build_args(agent_config, prompt, prompt_file.as_ref().map(|f| f.path()));
 
-    // For stdin mode, pipe stdin instead of null
-    let stdin_mode = if prompt_via == PromptVia::Stdin {
+    // For stdin mode, don't pipe stdin from null
+    let stdin_mode = if agent_config.prompt_via == PromptVia::Stdin {
         Stdio::piped()
     } else {
         Stdio::null()
     };
 
     tracing::info!(
-        command = %command,
-        args = ?resolved_args,
-        prompt_via = %prompt_via,
+        command = %agent_config.command,
+        args = ?args,
+        prompt_via = %agent_config.prompt_via,
         output = %output_path.display(),
         "spawning agent session"
     );
 
     let start = Instant::now();
 
-    let mut child = Command::new(command)
-        .args(&resolved_args)
+    let mut child = Command::new(&agent_config.command)
+        .args(&args)
         .stdin(stdin_mode)
         .stdout(Stdio::from(output_file))
         .stderr(Stdio::from(output_file_stderr))
@@ -180,7 +165,7 @@ pub async fn spawn_agent(
         .map_err(|e| SessionError::Spawn { source: e })?;
 
     // For stdin mode: write the prompt to the child's stdin, then close it
-    if prompt_via == PromptVia::Stdin {
+    if agent_config.prompt_via == PromptVia::Stdin {
         if let Some(mut stdin) = child.stdin.take() {
             stdin
                 .write_all(prompt.as_bytes())
@@ -193,23 +178,21 @@ pub async fn spawn_agent(
     let pid = child.id().unwrap_or(0);
     tracing::info!(pid, "agent subprocess started");
 
-    Ok(SpawnedAgent {
-        child,
-        pid,
-        start,
-        _prompt_file: prompt_file,
-    })
-}
+    // Wait for the child to exit
+    let status = child
+        .wait()
+        .await
+        .map_err(|e| SessionError::Io { source: e })?;
 
-/// Collect the final [`SessionResult`] after a child has exited.
-pub fn finish_session(
-    spawned: SpawnedAgent,
-    exit_code: Option<i32>,
-    output_path: &Path,
-) -> SessionResult {
-    let duration = spawned.start.elapsed();
+    let duration = start.elapsed();
+
+    // Clean up temp file (NamedTempFile auto-deletes on drop, but be explicit)
+    drop(prompt_file);
+
+    // Read the output file size
     let output_bytes = std::fs::metadata(output_path).map(|m| m.len()).unwrap_or(0);
 
+    let exit_code = status.code();
     tracing::info!(
         exit_code = ?exit_code,
         output_bytes,
@@ -217,41 +200,13 @@ pub fn finish_session(
         "agent session completed"
     );
 
-    SessionResult {
+    Ok(SessionResult {
         exit_code,
         output_bytes,
         duration,
         output_file: output_path.to_path_buf(),
-        pid: spawned.pid,
-    }
-}
-
-/// Spawn the agent subprocess, wait for it to exit, and return the result.
-///
-/// This is the simple path without watchdog monitoring. For watchdog support,
-/// use [`spawn_agent`] directly and race the child against the watchdog.
-pub async fn run_session(
-    agent_config: &AgentConfig,
-    output_path: &Path,
-    prompt: &str,
-) -> Result<SessionResult, SessionError> {
-    let mut spawned = spawn_agent(
-        &agent_config.command,
-        &agent_config.args,
-        agent_config.prompt_via,
-        output_path,
-        prompt,
-    )
-    .await?;
-
-    // Wait for the child to exit
-    let status = spawned
-        .child
-        .wait()
-        .await
-        .map_err(|e| SessionError::Io { source: e })?;
-
-    Ok(finish_session(spawned, status.code(), output_path))
+        pid,
+    })
 }
 
 #[cfg(test)]
@@ -279,37 +234,53 @@ mod tests {
 
     #[test]
     fn test_build_args_replaces_prompt_placeholder() {
-        let args_template = vec![
-            "-p".to_string(),
-            "{prompt}".to_string(),
-            "--verbose".to_string(),
-        ];
-        let args = build_args(&args_template, "hello world", None);
+        let agent = AgentConfig {
+            command: "claude".to_string(),
+            args: vec![
+                "-p".to_string(),
+                "{prompt}".to_string(),
+                "--verbose".to_string(),
+            ],
+            ..Default::default()
+        };
+        let args = build_args(&agent, "hello world", None);
         assert_eq!(args, vec!["-p", "hello world", "--verbose"]);
     }
 
     #[test]
     fn test_build_args_no_placeholder() {
-        let args_template = vec!["hello".to_string()];
-        let args = build_args(&args_template, "anything", None);
+        let agent = AgentConfig {
+            command: "echo".to_string(),
+            args: vec!["hello".to_string()],
+            ..Default::default()
+        };
+        let args = build_args(&agent, "anything", None);
         assert_eq!(args, vec!["hello"]);
     }
 
     #[test]
     fn test_build_args_multiple_placeholders() {
-        let args_template = vec![
-            "{prompt}".to_string(),
-            "mid".to_string(),
-            "{prompt}".to_string(),
-        ];
-        let args = build_args(&args_template, "X", None);
+        let agent = AgentConfig {
+            command: "test".to_string(),
+            args: vec![
+                "{prompt}".to_string(),
+                "mid".to_string(),
+                "{prompt}".to_string(),
+            ],
+            ..Default::default()
+        };
+        let args = build_args(&agent, "X", None);
         assert_eq!(args, vec!["X", "mid", "X"]);
     }
 
     #[test]
     fn test_build_args_prompt_file_placeholder() {
-        let args_template = vec!["--message-file".to_string(), "{prompt_file}".to_string()];
-        let args = build_args(&args_template, "unused", Some(Path::new("/tmp/prompt.txt")));
+        let agent = AgentConfig {
+            command: "aider".to_string(),
+            args: vec!["--message-file".to_string(), "{prompt_file}".to_string()],
+            ..Default::default()
+        };
+        let args = build_args(&agent, "unused", Some(Path::new("/tmp/prompt.txt")));
         assert_eq!(args, vec!["--message-file", "/tmp/prompt.txt"]);
     }
 

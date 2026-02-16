@@ -31,7 +31,7 @@ tools/self-improvement improvement list --status open
 | `tools/self-improvement targets` | Show efficiency targets and last 5 sessions vs targets |
 | `tools/self-improvement improvement list [--status open]` | List improvement records |
 | `tools/self-improvement improvement search <query>` | Search improvements by keyword |
-| `tools/self-improvement improvement add --title "..." [--severity high\|medium\|low] [--category CAT] [--desc "..."] [--rec "..."] [--tags "..."]` | Add new improvement |
+| `tools/self-improvement improvement add --title "..." --severity high\|medium\|low [--desc "..."] [--rec "..."] [--tags "..."]` | Add new improvement |
 | `tools/self-improvement improvement fix <ref_id> [--impact "..."]` | Mark improvement as fixed with measured impact |
 | `tools/self-improvement log <jsonl-file>` | Parse one iteration JSONL file into DB |
 | `tools/self-improvement backfill [--from N] [--to N]` | Bulk-parse iteration files |
@@ -66,6 +66,5 @@ If the user passes `$ARGUMENTS`, run that as a subcommand. Otherwise:
 
 ## Database Location
 
-Improvement commands use `.blacksmith/blacksmith.db` (shared with `blacksmith improve`).
-Session commands (once available) will use `tools/self-improvement.db`.
-Tables: `improvements` (in blacksmith.db), `sessions`, `analysis_runs` (in self-improvement.db).
+SQLite database at `tools/self-improvement.db`. Created automatically on first use.
+Tables: `sessions`, `improvements`, `analysis_runs`.

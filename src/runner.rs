@@ -699,9 +699,6 @@ pub(crate) fn format_duration_secs(secs: u64) -> String {
 }
 
 /// Spawn a session and its watchdog concurrently, handling force-kill.
-///
-/// Uses [`session::spawn_agent`] for the subprocess lifecycle, then races the
-/// child against the watchdog monitor and force-kill signal.
 async fn run_session_with_watchdog(
     config: &HarnessConfig,
     output_path: &PathBuf,
@@ -710,26 +707,149 @@ async fn run_session_with_watchdog(
 ) -> Result<SessionResult, session::SessionError> {
     let resolved_agent = config.agent.resolved_coding();
 
-    let mut spawned = session::spawn_agent(
-        &resolved_agent.command,
-        &resolved_agent.args,
-        resolved_agent.prompt_via,
-        output_path,
-        prompt,
-    )
-    .await?;
+    // We need to create the output file first for the watchdog to monitor
+    let session_fut = session::run_session(&config.agent, output_path, prompt);
+
+    // Pin the session future so we can use it in select!
+    tokio::pin!(session_fut);
+
+    // We can't start the watchdog until we know the child PID, but run_session
+    // internally spawns and waits. So we run session and watchdog concurrently
+    // using select! — the watchdog monitors the output file for growth.
+    //
+    // However, we don't know the PID before run_session starts internally.
+    // The simplest approach: run_session handles spawn+wait, watchdog monitors
+    // the file. If watchdog kills the process group, run_session's wait() will
+    // return with a signal exit code.
+    //
+    // We use a dummy PID for the watchdog since the child creates its own
+    // process group. We need to get the PID from the session...
+    //
+    // Actually, let's just run the session. If the output grows, the watchdog
+    // resets. If stale, the watchdog kills the process group.
+    // Since run_session spawns with process_group(0), the child PID IS the PGID.
+    //
+    // For the MVP, we run session in a way where we start monitoring the output
+    // file after spawn. But run_session encapsulates the whole lifecycle.
+    // The correct approach: tokio::select! between session completion and
+    // watchdog kill, using the output file as the shared state.
+
+    // Start a separate task that will begin watching as soon as the file exists
+    let watchdog_config = config.watchdog.clone();
+    let watchdog_path = output_path.clone();
+
+    // We need to know when the session is done to stop the watchdog.
+    // Use select!: session finishes → cancel watchdog, or watchdog kills → session returns with signal.
+
+    // First, actually start session and watchdog concurrently.
+    // The challenge: we need child PID for watchdog, but run_session encapsulates spawning.
+    // Solution: use a "file-only" watchdog that doesn't need the PID to monitor,
+    // but does need it to kill. Since run_session spawns with process_group(0),
+    // the child is its own PGID.
+    //
+    // For now, we accept that the watchdog monitors via the output file and kills
+    // via the PID. We'll refactor session to return PID early if needed.
+    //
+    // Pragmatic approach for MVP: run session, let the watchdog run alongside
+    // using a spawned task that reads the output file. The session future completes
+    // when the child exits (naturally or killed by watchdog).
+
+    // Create output file so watchdog can start monitoring immediately
+    if !output_path.exists() {
+        let _ = std::fs::File::create(output_path);
+    }
+
+    // We need to run session and get PID. Let's refactor to a simpler approach:
+    // Just run the session. The watchdog needs a PID. We'll spawn the child
+    // ourselves here instead of delegating entirely to session::run_session.
+    //
+    // Actually, the simplest correct MVP: run_session blocks until done.
+    // We wrap it with a timeout based on stale_timeout_mins.
+    // But that's not the same as monitoring growth — it's just a hard timeout.
+    //
+    // Let's take the correct approach: spawn child, get PID, then select!
+    // between child.wait() and watchdog::monitor().
+
+    // Spawn the child directly (duplicating a bit of session logic for control)
+    let output_file =
+        std::fs::File::create(output_path).map_err(|e| session::SessionError::OutputFile {
+            path: output_path.to_path_buf(),
+            source: e,
+        })?;
+    let output_file_stderr =
+        output_file
+            .try_clone()
+            .map_err(|e| session::SessionError::OutputFile {
+                path: output_path.to_path_buf(),
+                source: e,
+            })?;
+
+    // For file mode: write prompt to a temp file
+    let prompt_file = if resolved_agent.prompt_via == crate::config::PromptVia::File {
+        let tmp =
+            tempfile::NamedTempFile::new().map_err(|e| session::SessionError::Io { source: e })?;
+        std::fs::write(tmp.path(), prompt).map_err(|e| session::SessionError::Io { source: e })?;
+        Some(tmp)
+    } else {
+        None
+    };
+
+    let args = resolved_agent
+        .args
+        .iter()
+        .map(|arg| {
+            let mut result = arg.replace("{prompt}", prompt);
+            if let Some(ref pf) = prompt_file {
+                result = result.replace("{prompt_file}", &pf.path().display().to_string());
+            }
+            result
+        })
+        .collect::<Vec<_>>();
+
+    // For stdin mode, pipe stdin instead of null
+    let stdin_mode = if resolved_agent.prompt_via == crate::config::PromptVia::Stdin {
+        std::process::Stdio::piped()
+    } else {
+        std::process::Stdio::null()
+    };
+
+    let start = std::time::Instant::now();
+
+    let mut child = tokio::process::Command::new(&resolved_agent.command)
+        .args(&args)
+        .stdin(stdin_mode)
+        .stdout(std::process::Stdio::from(output_file))
+        .stderr(std::process::Stdio::from(output_file_stderr))
+        .process_group(0)
+        .spawn()
+        .map_err(|e| session::SessionError::Spawn { source: e })?;
+
+    // For stdin mode: write the prompt to the child's stdin, then close it
+    if resolved_agent.prompt_via == crate::config::PromptVia::Stdin {
+        if let Some(mut stdin) = child.stdin.take() {
+            use tokio::io::AsyncWriteExt;
+            stdin
+                .write_all(prompt.as_bytes())
+                .await
+                .map_err(|e| session::SessionError::Io { source: e })?;
+            // Dropping stdin closes the pipe, signaling EOF to the child
+        }
+    }
+
+    let pid = child.id().unwrap_or(0);
+    tracing::info!(pid, "agent subprocess started");
 
     // Register PID with signal handler for force-kill
-    signals.set_child_pid(spawned.pid as i32);
+    signals.set_child_pid(pid as i32);
 
     // Race: child completion vs watchdog vs force-kill signal
-    let watchdog_fut = watchdog::monitor(&config.watchdog, output_path, spawned.pid);
+    let watchdog_fut = watchdog::monitor(&watchdog_config, &watchdog_path, pid);
 
     let exit_status;
     let was_killed;
 
     tokio::select! {
-        status = spawned.child.wait() => {
+        status = child.wait() => {
             // Child exited naturally (or was killed externally)
             exit_status = status.map_err(|e| session::SessionError::Io { source: e })?;
             was_killed = false;
@@ -738,20 +858,26 @@ async fn run_session_with_watchdog(
             // Watchdog triggered — child should be dead or dying
             was_killed = outcome == WatchdogOutcome::Killed;
             if was_killed {
-                tracing::warn!(spawned.pid, "watchdog killed session");
+                tracing::warn!(pid, "watchdog killed session");
             }
             // Collect the child's exit status
-            exit_status = spawned.child.wait().await.map_err(|e| session::SessionError::Io { source: e })?;
+            exit_status = child.wait().await.map_err(|e| session::SessionError::Io { source: e })?;
         }
         _ = signals.wait_for_force_kill() => {
             // Force-kill requested (double SIGINT)
-            tracing::warn!(spawned.pid, "force-kill requested, session terminated");
-            exit_status = spawned.child.wait().await.map_err(|e| session::SessionError::Io { source: e })?;
+            tracing::warn!(pid, "force-kill requested, session terminated");
+            exit_status = child.wait().await.map_err(|e| session::SessionError::Io { source: e })?;
             was_killed = true;
         }
     }
 
     signals.clear_child_pid();
+
+    // Clean up temp prompt file if created
+    drop(prompt_file);
+
+    let duration = start.elapsed();
+    let output_bytes = std::fs::metadata(output_path).map(|m| m.len()).unwrap_or(0);
 
     let exit_code = if was_killed && exit_status.code().is_none() {
         Some(124) // Timeout convention
@@ -759,15 +885,21 @@ async fn run_session_with_watchdog(
         exit_status.code()
     };
 
-    if was_killed {
-        tracing::info!(
-            exit_code = ?exit_code,
-            was_killed,
-            "session finished (killed)"
-        );
-    }
+    tracing::info!(
+        exit_code = ?exit_code,
+        output_bytes,
+        duration_secs = duration.as_secs(),
+        was_killed,
+        "session finished"
+    );
 
-    Ok(session::finish_session(spawned, exit_code, output_path))
+    Ok(SessionResult {
+        exit_code,
+        output_bytes,
+        duration,
+        output_file: output_path.to_path_buf(),
+        pid,
+    })
 }
 
 /// Load the global iteration counter from a file. Returns 0 if the file
@@ -779,16 +911,10 @@ fn load_counter(path: &std::path::Path) -> u64 {
     }
 }
 
-/// Save the global iteration counter to a file (atomic write-rename).
+/// Save the global iteration counter to a file.
 fn save_counter(path: &std::path::Path, value: u64) {
-    let dir = path.parent().unwrap_or(std::path::Path::new("."));
-    let tmp_path = dir.join(format!(".counter.tmp.{}", std::process::id()));
-    if let Err(e) = std::fs::write(&tmp_path, value.to_string()) {
-        tracing::error!(error = %e, path = %tmp_path.display(), "failed to write temp counter file");
-        return;
-    }
-    if let Err(e) = std::fs::rename(&tmp_path, path) {
-        tracing::error!(error = %e, path = %path.display(), "failed to rename temp counter file");
+    if let Err(e) = std::fs::write(path, value.to_string()) {
+        tracing::error!(error = %e, path = %path.display(), "failed to save iteration counter");
     }
 }
 
@@ -852,6 +978,7 @@ mod tests {
             reconciliation: ReconciliationConfig::default(),
             architecture: ArchitectureConfig::default(),
             quality_gates: QualityGatesConfig::default(),
+            improvements: ImprovementsConfig::default(),
         }
     }
 
@@ -1640,7 +1767,7 @@ printf '{"type":"result","duration_ms":5000,"total_cost_usd":0.42,"num_turns":2,
         let ingest = crate::ingest::IngestResult {
             turns_total: 65,
             cost_estimate_usd: 1.85,
-            session_duration_secs: 300.0,
+            session_duration_ms: 300000,
             bead_id: None,
         };
         // Should include turns in output

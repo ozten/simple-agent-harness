@@ -29,7 +29,9 @@ pub fn handle_log(db_path: &Path, file: &Path) -> Result<(), String> {
     println!("Ingested session {session} from {}", file.display());
     println!(
         "  turns: {}  cost: ${:.2}  duration: {}s",
-        result.turns_total, result.cost_estimate_usd, result.session_duration_secs as u64
+        result.turns_total,
+        result.cost_estimate_usd,
+        result.session_duration_ms / 1000
     );
 
     Ok(())
@@ -77,7 +79,8 @@ pub fn handle_status(db_path: &Path, last: i64) -> Result<(), String> {
         let narration = data["turns.narration_only"].as_u64().unwrap_or(0);
         let parallel = data["turns.parallel"].as_u64().unwrap_or(0);
         let cost = data["cost.estimate_usd"].as_f64().unwrap_or(0.0);
-        let duration_s = data["session.duration_secs"].as_f64().unwrap_or(0.0) as u64;
+        let duration_ms = data["session.duration_ms"].as_u64().unwrap_or(0);
+        let duration_s = duration_ms / 1000;
 
         total_turns += turns;
         total_cost += cost;
@@ -169,7 +172,7 @@ pub fn handle_targets(
 ) -> Result<(), String> {
     if targets_config.rules.is_empty() {
         println!("No target rules configured in [metrics.targets.rules].");
-        println!("Add rules to your .blacksmith/config.toml to track performance targets.");
+        println!("Add rules to your blacksmith.toml to track performance targets.");
         return Ok(());
     }
 
@@ -349,7 +352,7 @@ pub fn handle_reingest(
                     "  session {session}: turns={} cost=${:.2} duration={}s",
                     result.turns_total,
                     result.cost_estimate_usd,
-                    result.session_duration_secs as u64
+                    result.session_duration_ms / 1000
                 );
             }
             Err(e) => {
@@ -525,7 +528,7 @@ fn list_tables(conn: &Connection) -> rusqlite::Result<Vec<String>> {
 ///   cache_creation_tokens -> cost.cache_creation_tokens
 ///   cost_usd -> cost.estimate_usd
 ///   output_bytes -> session.output_bytes
-///   duration_secs -> session.duration_secs
+///   duration_secs -> session.duration_ms (* 1000)
 ///   exit_code -> session.exit_code
 fn migrate_sessions(v1: &Connection, v2: &Connection) -> rusqlite::Result<u64> {
     // Discover available columns in V1 sessions table
@@ -605,6 +608,8 @@ fn migrate_sessions(v1: &Connection, v2: &Connection) -> rusqlite::Result<u64> {
             .and_then(|i| row.get(i).ok())
             .unwrap_or(0);
         let exit_code: Option<i64> = col_index("exit_code").and_then(|i| row.get(i).ok());
+        let duration_ms = duration_secs * 1000;
+
         // Write events
         let event_mappings: Vec<(&str, String)> = vec![
             ("turns.total", turns_total.to_string()),
@@ -617,7 +622,7 @@ fn migrate_sessions(v1: &Connection, v2: &Connection) -> rusqlite::Result<u64> {
             ("cost.cache_creation_tokens", cache_creation.to_string()),
             ("cost.estimate_usd", format!("{cost_usd:.6}")),
             ("session.output_bytes", output_bytes.to_string()),
-            ("session.duration_secs", duration_secs.to_string()),
+            ("session.duration_ms", duration_ms.to_string()),
         ];
 
         for (kind, value) in &event_mappings {
@@ -667,10 +672,7 @@ fn migrate_sessions(v1: &Connection, v2: &Connection) -> rusqlite::Result<u64> {
             "session.output_bytes".into(),
             serde_json::json!(output_bytes),
         );
-        map.insert(
-            "session.duration_secs".into(),
-            serde_json::json!(duration_secs),
-        );
+        map.insert("session.duration_ms".into(), serde_json::json!(duration_ms));
         if let Some(code) = exit_code {
             map.insert("session.exit_code".into(), serde_json::json!(code));
         }
@@ -1063,19 +1065,12 @@ pub fn handle_beads(db_path: &Path) -> Result<(), String> {
 
     let conn = db::open_or_create(db_path).map_err(|e| format!("Failed to open database: {e}"))?;
 
-    let mut all =
+    let all =
         db::all_bead_metrics(&conn).map_err(|e| format!("Failed to query bead metrics: {e}"))?;
 
     if all.is_empty() {
         println!("No bead metrics recorded yet.");
         return Ok(());
-    }
-
-    // Reconcile stale completed_at values with bd
-    let reconciled = reconcile_bead_status(&conn, &all);
-    if reconciled > 0 {
-        all = db::all_bead_metrics(&conn)
-            .map_err(|e| format!("Failed to re-query bead metrics: {e}"))?;
     }
 
     // Print header
@@ -1306,55 +1301,6 @@ fn format_duration(seconds: u64) -> String {
     }
 }
 
-/// Parse bead IDs from JSON output of `bd list --status=closed --json`.
-fn parse_closed_bead_ids(json_str: &str) -> Vec<String> {
-    let parsed: Result<Vec<serde_json::Value>, _> = serde_json::from_str(json_str);
-    match parsed {
-        Ok(beads) => beads
-            .iter()
-            .filter_map(|b| b.get("id").and_then(|v| v.as_str()).map(|s| s.to_string()))
-            .collect(),
-        Err(_) => Vec::new(),
-    }
-}
-
-/// Reconcile bead status by cross-referencing with `bd list --status=closed --json`.
-///
-/// For any bead in `all` that has `completed_at == None`, checks if `bd` reports it
-/// as closed and calls `mark_bead_completed()` to set the timestamp. Returns the
-/// number of beads updated. Gracefully returns 0 if `bd` is not available.
-fn reconcile_bead_status(conn: &Connection, all: &[db::BeadMetrics]) -> usize {
-    let stale: Vec<&str> = all
-        .iter()
-        .filter(|bm| bm.completed_at.is_none())
-        .map(|bm| bm.bead_id.as_str())
-        .collect();
-
-    if stale.is_empty() {
-        return 0;
-    }
-
-    let closed_ids = match std::process::Command::new("bd")
-        .args(["list", "--status=closed", "--json"])
-        .output()
-    {
-        Ok(output) if output.status.success() => {
-            parse_closed_bead_ids(&String::from_utf8_lossy(&output.stdout))
-        }
-        _ => return 0,
-    };
-
-    let mut updated = 0;
-    for id in &closed_ids {
-        if stale.contains(&id.as_str()) {
-            if let Ok(true) = db::mark_bead_completed(conn, id) {
-                updated += 1;
-            }
-        }
-    }
-    updated
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1373,7 +1319,7 @@ mod tests {
         "cost.cache_creation_tokens",
         "cost.estimate_usd",
         "session.output_bytes",
-        "session.duration_secs",
+        "session.duration_ms",
         "commit.detected",
     ];
 
@@ -1417,7 +1363,7 @@ mod tests {
         let (_dir, path) = test_db_path();
         let conn = db::open_or_create(&path).unwrap();
 
-        let data = r#"{"turns.total":42,"turns.narration_only":3,"turns.parallel":5,"cost.estimate_usd":1.5,"session.duration_secs":120}"#;
+        let data = r#"{"turns.total":42,"turns.narration_only":3,"turns.parallel":5,"cost.estimate_usd":1.5,"session.duration_ms":120000}"#;
         db::upsert_observation(
             &conn,
             1,
@@ -1448,7 +1394,7 @@ mod tests {
 
         for i in 1..=5 {
             let data = format!(
-                r#"{{"turns.total":{},"turns.narration_only":0,"turns.parallel":0,"cost.estimate_usd":0.5,"session.duration_secs":60}}"#,
+                r#"{{"turns.total":{},"turns.narration_only":0,"turns.parallel":0,"cost.estimate_usd":0.5,"session.duration_ms":60000}}"#,
                 i * 10
             );
             db::upsert_observation(&conn, i, "2026-02-15T10:00:00Z", Some(60), None, &data)
@@ -1972,7 +1918,7 @@ mod tests {
         assert_eq!(data["cost.input_tokens"], 10000);
         assert_eq!(data["cost.output_tokens"], 5000);
         assert_eq!(data["cost.estimate_usd"], 1.5);
-        assert_eq!(data["session.duration_secs"], 120);
+        assert_eq!(data["session.duration_ms"], 120000);
         assert_eq!(data["session.output_bytes"], 50000);
         assert_eq!(data["session.exit_code"], 0);
         assert_eq!(obs1.duration, Some(120));
@@ -1986,7 +1932,7 @@ mod tests {
         let events = db::events_by_session(&v2, 1).unwrap();
         // Should have: turns.total, turns.narration_only, turns.parallel, turns.tool_calls,
         // cost.input_tokens, cost.output_tokens, cost.cache_read_tokens, cost.cache_creation_tokens,
-        // cost.estimate_usd, session.output_bytes, session.duration_secs, session.exit_code = 12
+        // cost.estimate_usd, session.output_bytes, session.duration_ms, session.exit_code = 12
         assert_eq!(events.len(), 12);
     }
 
@@ -2269,8 +2215,8 @@ label = "Avg turns per session"
             &conn,
             "2026-01-15T10:00:00Z",
             1,
-            "session.duration_secs",
-            Some("60"),
+            "session.duration_ms",
+            Some("60000"),
             None,
         )
         .unwrap();
@@ -2880,7 +2826,7 @@ label = "Avg turns per session"
         let obs = db::get_observation(&conn, 0).unwrap().unwrap();
         let data: serde_json::Value = serde_json::from_str(&obs.data).unwrap();
         assert_eq!(data["turns.total"], 1);
-        assert!((data["session.duration_secs"].as_f64().unwrap() - 3.0).abs() < 0.001);
+        assert_eq!(data["session.duration_ms"], 3000);
     }
 
     #[test]
@@ -3014,67 +2960,6 @@ label = "Avg turns per session"
     #[test]
     fn truncate_bead_id_short() {
         assert_eq!(truncate_bead_id("proj-abc", 27), "proj-abc");
-    }
-
-    // ── parse_closed_bead_ids / reconcile tests ────────────────────────
-
-    #[test]
-    fn test_query_closed_bead_ids_parses_json() {
-        let json = r#"[
-            {"id": "beads-abc", "title": "Do thing", "status": "closed"},
-            {"id": "beads-def", "title": "Another", "status": "closed"},
-            {"id": "beads-ghi"}
-        ]"#;
-        let ids = parse_closed_bead_ids(json);
-        assert_eq!(ids, vec!["beads-abc", "beads-def", "beads-ghi"]);
-    }
-
-    #[test]
-    fn test_query_closed_bead_ids_empty_array() {
-        let ids = parse_closed_bead_ids("[]");
-        assert!(ids.is_empty());
-    }
-
-    #[test]
-    fn test_query_closed_bead_ids_invalid_json() {
-        let ids = parse_closed_bead_ids("not json");
-        assert!(ids.is_empty());
-    }
-
-    #[test]
-    fn test_reconcile_updates_stale_beads() {
-        let dir = TempDir::new().unwrap();
-        let path = dir.path().join("blacksmith.db");
-        let conn = db::open_or_create(&path).unwrap();
-
-        // Insert two beads: one with completed_at=None, one already completed
-        db::upsert_bead_metrics(&conn, "beads-stale", 1, 60.0, 10, None, None, None).unwrap();
-        db::upsert_bead_metrics(
-            &conn,
-            "beads-done",
-            1,
-            30.0,
-            5,
-            None,
-            None,
-            Some("2026-02-16T10:00:00Z"),
-        )
-        .unwrap();
-
-        // Simulate reconciliation by calling mark_bead_completed directly
-        // (since we can't control the bd command in tests)
-        let result = db::mark_bead_completed(&conn, "beads-stale").unwrap();
-        assert!(result, "stale bead should be marked as completed");
-
-        let bm = db::get_bead_metrics(&conn, "beads-stale").unwrap().unwrap();
-        assert!(
-            bm.completed_at.is_some(),
-            "completed_at should now be set for stale bead"
-        );
-
-        // The already-completed bead should remain unchanged
-        let bm2 = db::get_bead_metrics(&conn, "beads-done").unwrap().unwrap();
-        assert_eq!(bm2.completed_at.as_deref(), Some("2026-02-16T10:00:00Z"));
     }
 
     #[test]

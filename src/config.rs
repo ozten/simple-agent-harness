@@ -2,8 +2,7 @@ use regex::Regex;
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
-/// Top-level configuration loaded from .blacksmith/config.toml (falls back to blacksmith.toml
-/// and harness.toml for backwards compat).
+/// Top-level configuration loaded from blacksmith.toml (or harness.toml for backwards compat).
 #[derive(Debug, Deserialize)]
 #[serde(default)]
 #[derive(Default, Clone)]
@@ -24,16 +23,13 @@ pub struct HarnessConfig {
     pub reconciliation: ReconciliationConfig,
     pub architecture: ArchitectureConfig,
     pub quality_gates: QualityGatesConfig,
+    pub improvements: ImprovementsConfig,
 }
 
 impl HarnessConfig {
-    /// Load configuration from a TOML file.
-    ///
-    /// Fallback chain when the primary path (`.blacksmith/config.toml`) is not found:
-    /// 1. `blacksmith.toml` in project root (deprecated, prints migration warning)
-    /// 2. `harness.toml` in project root (deprecated, prints migration warning)
-    /// 3. Compiled defaults
-    ///
+    /// Load configuration from a TOML file. If the file doesn't exist,
+    /// falls back to harness.toml for backwards compatibility.
+    /// If neither file exists, returns compiled defaults.
     /// Returns an error only if a file exists but can't be read or parsed.
     pub fn load(path: &Path) -> Result<Self, ConfigError> {
         match std::fs::read_to_string(path) {
@@ -46,44 +42,16 @@ impl HarnessConfig {
                 Ok(config)
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                let is_default_path = path
+                // Try harness.toml fallback for backwards compatibility
+                let fallback = Path::new("harness.toml");
+                if path
                     .file_name()
-                    .map(|f| f == "config.toml")
+                    .map(|f| f == "blacksmith.toml")
                     .unwrap_or(false)
-                    && path
-                        .parent()
-                        .and_then(|p| p.file_name())
-                        .map(|f| f == ".blacksmith")
-                        .unwrap_or(false);
-
-                if is_default_path {
-                    // Resolve fallback paths relative to the project root
-                    // (parent of .blacksmith/)
-                    let project_root = path
-                        .parent()
-                        .and_then(|p| p.parent())
-                        .unwrap_or_else(|| Path::new("."));
-
-                    // Try blacksmith.toml fallback (deprecated)
-                    let legacy = project_root.join("blacksmith.toml");
-                    if legacy.exists() {
-                        tracing::warn!(
-                            "Using deprecated config location blacksmith.toml — \
-                             please move to .blacksmith/config.toml: \
-                             mv blacksmith.toml .blacksmith/config.toml"
-                        );
-                        return Self::load(&legacy);
-                    }
-                    // Try harness.toml fallback (deprecated)
-                    let harness = project_root.join("harness.toml");
-                    if harness.exists() {
-                        tracing::warn!(
-                            "Using deprecated config location harness.toml — \
-                             please move to .blacksmith/config.toml: \
-                             mv harness.toml .blacksmith/config.toml"
-                        );
-                        return Self::load(&harness);
-                    }
+                    && fallback.exists()
+                {
+                    tracing::info!("blacksmith.toml not found, falling back to harness.toml");
+                    return Self::load(fallback);
                 }
                 Ok(Self::default())
             }
@@ -300,7 +268,7 @@ where
 }
 
 /// How the assembled prompt is delivered to the agent subprocess.
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub enum PromptVia {
     /// Substitute `{prompt}` placeholders in the agent args (default, existing behavior).
     #[default]
@@ -561,9 +529,6 @@ pub struct ArchitectureConfig {
     /// automatically approved and queued, or require human confirmation.
     /// Default: false
     pub refactor_auto_approve: bool,
-    /// Run architecture review after every N completed tasks. Set to 0 to
-    /// disable periodic reviews. Default: 10
-    pub review_interval: u32,
 }
 
 impl Default for ArchitectureConfig {
@@ -575,7 +540,6 @@ impl Default for ArchitectureConfig {
             expansion_event_window: 20,
             metadata_drift_sensitivity: 3.0,
             refactor_auto_approve: false,
-            review_interval: 10,
         }
     }
 }
@@ -591,7 +555,6 @@ impl ArchitectureConfig {
             expansion_event_window: 30,
             metadata_drift_sensitivity: 5.0,
             refactor_auto_approve: false,
-            review_interval: 20,
         }
     }
 
@@ -604,7 +567,6 @@ impl ArchitectureConfig {
             expansion_event_window: 15,
             metadata_drift_sensitivity: 2.0,
             refactor_auto_approve: true,
-            review_interval: 5,
         }
     }
 }
@@ -635,6 +597,29 @@ impl Default for QualityGatesConfig {
             test: vec!["cargo test".to_string()],
             lint: vec!["cargo clippy --fix --allow-dirty".to_string()],
             format: vec!["cargo fmt --check".to_string()],
+        }
+    }
+}
+
+/// Configuration for the self-improvement promotion cycle.
+///
+/// Controls how improvements are auto-promoted after a configurable number
+/// of successful sessions and where promoted rules are written.
+#[derive(Debug, Deserialize, Clone)]
+#[serde(default)]
+pub struct ImprovementsConfig {
+    /// Number of successful sessions before an open improvement is auto-promoted.
+    /// Set to 0 to disable auto-promotion. Default: 5
+    pub auto_promote_after: u32,
+    /// File to append promoted improvement rules to. Default: "PROMPT.md"
+    pub prompt_file: PathBuf,
+}
+
+impl Default for ImprovementsConfig {
+    fn default() -> Self {
+        Self {
+            auto_promote_after: 5,
+            prompt_file: PathBuf::from("PROMPT.md"),
         }
     }
 }
@@ -1063,68 +1048,6 @@ mod tests {
         let config = HarnessConfig::load(Path::new("/nonexistent/harness.toml")).unwrap();
         assert_eq!(config.session.max_iterations, 25);
         assert_eq!(config.watchdog.stale_timeout_mins, 20);
-    }
-
-    #[test]
-    fn test_load_falls_back_to_blacksmith_toml() {
-        let dir = tempfile::tempdir().unwrap();
-        let bs_dir = dir.path().join(".blacksmith");
-        std::fs::create_dir_all(&bs_dir).unwrap();
-        let primary = bs_dir.join("config.toml");
-        // Don't create primary — instead create legacy blacksmith.toml
-        let legacy = dir.path().join("blacksmith.toml");
-        std::fs::write(&legacy, "[session]\nmax_iterations = 99\n").unwrap();
-
-        let config = HarnessConfig::load(&primary).unwrap();
-        assert_eq!(config.session.max_iterations, 99);
-    }
-
-    #[test]
-    fn test_load_default_path_no_fallback_returns_defaults() {
-        let dir = tempfile::tempdir().unwrap();
-        let bs_dir = dir.path().join(".blacksmith");
-        std::fs::create_dir_all(&bs_dir).unwrap();
-        let primary = bs_dir.join("config.toml");
-
-        // No legacy files exist either — should return defaults
-        let config = HarnessConfig::load(&primary).unwrap();
-        assert_eq!(config.session.max_iterations, 25);
-    }
-
-    #[test]
-    fn test_load_falls_back_to_harness_toml() {
-        let dir = tempfile::tempdir().unwrap();
-        let bs_dir = dir.path().join(".blacksmith");
-        std::fs::create_dir_all(&bs_dir).unwrap();
-        let primary = bs_dir.join("config.toml");
-        // Create only harness.toml (oldest legacy format)
-        let harness = dir.path().join("harness.toml");
-        std::fs::write(&harness, "[session]\nmax_iterations = 42\n").unwrap();
-
-        let config = HarnessConfig::load(&primary).unwrap();
-        assert_eq!(config.session.max_iterations, 42);
-    }
-
-    #[test]
-    fn test_load_prefers_blacksmith_toml_over_harness_toml() {
-        let dir = tempfile::tempdir().unwrap();
-        let bs_dir = dir.path().join(".blacksmith");
-        std::fs::create_dir_all(&bs_dir).unwrap();
-        let primary = bs_dir.join("config.toml");
-        // Both legacy files exist — blacksmith.toml should win
-        std::fs::write(
-            dir.path().join("blacksmith.toml"),
-            "[session]\nmax_iterations = 99\n",
-        )
-        .unwrap();
-        std::fs::write(
-            dir.path().join("harness.toml"),
-            "[session]\nmax_iterations = 42\n",
-        )
-        .unwrap();
-
-        let config = HarnessConfig::load(&primary).unwrap();
-        assert_eq!(config.session.max_iterations, 99);
     }
 
     #[test]
@@ -2531,5 +2454,65 @@ max_iterations = 10
         let config = HarnessConfig::load(&path).unwrap();
         assert_eq!(config.quality_gates.check, vec!["cargo check"]);
         assert_eq!(config.quality_gates.test, vec!["cargo test"]);
+    }
+
+    // --- Improvements config tests ---
+
+    #[test]
+    fn test_default_improvements_config() {
+        let config = HarnessConfig::default();
+        assert_eq!(config.improvements.auto_promote_after, 5);
+        assert_eq!(config.improvements.prompt_file, PathBuf::from("PROMPT.md"));
+    }
+
+    #[test]
+    fn test_load_improvements_from_toml() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("blacksmith.toml");
+        std::fs::write(
+            &path,
+            r#"
+[improvements]
+auto_promote_after = 10
+prompt_file = "AGENTS.md"
+"#,
+        )
+        .unwrap();
+        let config = HarnessConfig::load(&path).unwrap();
+        assert_eq!(config.improvements.auto_promote_after, 10);
+        assert_eq!(config.improvements.prompt_file, PathBuf::from("AGENTS.md"));
+    }
+
+    #[test]
+    fn test_improvements_defaults_when_not_specified() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("blacksmith.toml");
+        std::fs::write(
+            &path,
+            r#"
+[session]
+max_iterations = 10
+"#,
+        )
+        .unwrap();
+        let config = HarnessConfig::load(&path).unwrap();
+        assert_eq!(config.improvements.auto_promote_after, 5);
+        assert_eq!(config.improvements.prompt_file, PathBuf::from("PROMPT.md"));
+    }
+
+    #[test]
+    fn test_improvements_auto_promote_disabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("blacksmith.toml");
+        std::fs::write(
+            &path,
+            r#"
+[improvements]
+auto_promote_after = 0
+"#,
+        )
+        .unwrap();
+        let config = HarnessConfig::load(&path).unwrap();
+        assert_eq!(config.improvements.auto_promote_after, 0);
     }
 }

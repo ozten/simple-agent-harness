@@ -16,7 +16,7 @@ blacksmith [OPTIONS] [MAX_ITERATIONS] [COMMAND]
 
 | Flag | Description |
 |---|---|
-| `-c, --config <PATH>` | Config file path (default: `.blacksmith/config.toml`) |
+| `-c, --config <PATH>` | Config file path (default: `blacksmith.toml`) |
 | `-p, --prompt <PATH>` | Prompt file (overrides config) |
 | `-o, --output-dir <PATH>` | Output directory (deprecated) |
 | `--timeout <MINUTES>` | Stale timeout in minutes (overrides config) |
@@ -236,54 +236,3 @@ blacksmith arch --json
 ```
 
 Computes structural metrics (fan-in hotspots, god files, circular dependencies, boundary violations, API surface width) and correlates them with historical operational signals from the metrics database if available. See [Architecture Analysis](architecture-analysis.md).
-
-### `finish`
-
-Close a bead with quality gates. Replaces the legacy `bd-finish.sh` script with a compiled subcommand available in any worktree.
-
-```bash
-blacksmith finish <BEAD_ID> "<MESSAGE>" [FILES...]
-```
-
-| Argument | Description |
-|---|---|
-| `BEAD_ID` | Bead ID to close (e.g. `simple-agent-harness-abc`) |
-| `MESSAGE` | Commit message describing the work done |
-| `FILES...` | Specific files to stage (default: `git add -u`) |
-
-**Protocol steps:**
-
-1. **[0a] Check gate** — runs configured check commands (default: `cargo check`). Aborts on failure.
-2. **[0b] Test gate** — runs configured test commands (default: `cargo test`). Aborts on failure.
-3. **[0c] Lint gate** — runs configured lint commands (default: `cargo clippy --fix --allow-dirty`). Aborts on failure.
-4. **[0d] Format gate** — runs configured format commands (default: `cargo fmt --check`). Aborts on failure.
-5. **[0e] Deliverable verification** — checks `## Affected files` and `## Verify` sections of bead description. Aborts on failure.
-6. **[1]** Append `PROGRESS.txt` to `PROGRESS_LOG.txt`
-7. **[2]** Stage files (specified or `git add -u`)
-8. **[3]** `git commit` with message `{bead-id}: {message}`
-9. **[4]** `bd close` the bead
-10. **[5]** `bd sync`
-11. **[6]** Auto-commit `.beads/` if dirty
-12. **[7]** `git push` (non-fatal on failure)
-
-**Quality gates configuration** (in `.blacksmith/config.toml`):
-
-```toml
-[quality_gates]
-check = ["cargo check"]
-test = ["cargo test"]
-lint = ["cargo clippy --fix --allow-dirty"]
-format = ["cargo fmt --check"]
-```
-
-Each gate is a list of shell commands. All must succeed for the gate to pass. Empty lists skip that gate.
-
-**Examples:**
-
-```bash
-# Close a bead, staging all modified files
-blacksmith finish simple-agent-harness-abc "Implement user auth"
-
-# Close a bead with specific files
-blacksmith finish simple-agent-harness-abc "Add login page" src/login.rs src/auth.rs
-```

@@ -4,14 +4,6 @@ version = "0.1.0"
 edition = "2021"
 description = "A Rust CLI tool that runs an AI coding agent in a supervised loop"
 
-[[bin]]
-name = "blacksmith"
-path = "src/main.rs"
-
-[[bin]]
-name = "self-improvement"
-path = "src/bin/self_improvement.rs"
-
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }

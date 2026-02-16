@@ -9,7 +9,6 @@ mod coordinator;
 mod cycle_detect;
 mod data_dir;
 mod db;
-mod defaults;
 mod estimation;
 mod expansion_event;
 mod fan_in;
@@ -63,7 +62,7 @@ pub struct Cli {
     max_iterations: Option<u32>,
 
     /// Config file path
-    #[arg(short, long, default_value = ".blacksmith/config.toml")]
+    #[arg(short, long, default_value = "blacksmith.toml")]
     config: PathBuf,
 
     /// Prompt file path (overrides config)
@@ -105,14 +104,9 @@ pub struct Cli {
 #[derive(Subcommand, Debug)]
 enum Commands {
     /// Initialize the .blacksmith/ data directory
-    Init {
-        /// Overwrite existing files with fresh defaults
-        #[arg(long)]
-        force: bool,
-        /// Copy PROMPT.md and skills to project root for git committing
-        #[arg(long)]
-        export: bool,
-    },
+    Init,
+    /// Generate performance brief for prompt injection
+    Brief,
     /// Manage improvement records (institutional memory)
     Improve {
         #[command(subcommand)]
@@ -239,8 +233,6 @@ enum MetricsAction {
     },
     /// Show per-bead timing report
     Beads,
-    /// Generate performance brief for prompt injection
-    Brief,
 }
 
 #[derive(Subcommand, Debug)]
@@ -564,18 +556,6 @@ fn handle_integration_rollback(
 /// Handle `blacksmith workers status` — show current worker pool state.
 fn handle_workers_status(db_path: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
     let conn = db::open_or_create(db_path)?;
-
-    // Clean up stale assignments whose worktrees no longer exist on disk.
-    match db::cleanup_stale_worker_assignments(&conn) {
-        Ok(count) if count > 0 => {
-            eprintln!("Cleaned up {} stale worker assignment(s).", count);
-        }
-        Err(e) => {
-            eprintln!("Warning: failed to clean up stale assignments: {e}");
-        }
-        _ => {}
-    }
-
     let assignments = db::active_worker_assignments(&conn)?;
 
     if assignments.is_empty() {
@@ -998,7 +978,7 @@ async fn main() {
     tracing::debug!(?cli, "parsed CLI arguments");
 
     // Handle subcommands that don't need the full config
-    if let Some(Commands::Init { force, export }) = &cli.command {
+    if let Some(Commands::Init) = &cli.command {
         let config = HarnessConfig::load(&cli.config).unwrap_or_default();
         let dd = data_dir::DataDir::new(&config.storage.data_dir);
         match dd.ensure_initialized() {
@@ -1013,53 +993,30 @@ async fn main() {
                 std::process::exit(1);
             }
         }
+        return;
+    }
 
-        // Extract internal assets (config.toml) into .blacksmith/
-        for (rel_path, content) in defaults::INTERNAL_ASSETS {
-            let dest = dd.root().join(rel_path);
-            if *force || !dest.exists() {
-                if let Some(parent) = dest.parent() {
-                    if let Err(e) = std::fs::create_dir_all(parent) {
-                        eprintln!("Error creating directory {}: {e}", parent.display());
-                        std::process::exit(1);
-                    }
-                }
-                if let Err(e) = std::fs::write(&dest, content) {
-                    eprintln!("Error writing {}: {e}", dest.display());
-                    std::process::exit(1);
-                }
-                let action = if *force { "Overwrote" } else { "Created" };
-                println!("  {action} {}", dest.display());
-            }
+    if let Some(Commands::Brief) = &cli.command {
+        let config_for_brief = HarnessConfig::load(&cli.config).unwrap_or_default();
+        let dd = data_dir::DataDir::new(&config_for_brief.storage.data_dir);
+        let db_path = dd.db();
+        let targets = &config_for_brief.metrics.targets;
+        let targets_opt = if targets.rules.is_empty() {
+            None
+        } else {
+            Some(targets)
+        };
+        let adapter_name = adapters::resolve_adapter_name(
+            config_for_brief.agent.adapter.as_deref(),
+            &config_for_brief.agent.command,
+        );
+        let adapter = adapters::create_adapter(adapter_name);
+        let supported = adapter.supported_metrics();
+
+        if let Err(e) = brief::handle_brief(&db_path, targets_opt, Some(supported)) {
+            eprintln!("Error: {e}");
+            std::process::exit(1);
         }
-
-        // --export: copy PROMPT.md and skills to project root
-        if *export {
-            let project_root = dd
-                .root()
-                .parent()
-                .unwrap_or_else(|| std::path::Path::new("."));
-            for (rel_path, content) in defaults::EXPORTABLE_ASSETS {
-                let dest = project_root.join(rel_path);
-                if *force || !dest.exists() {
-                    if let Some(parent) = dest.parent() {
-                        if let Err(e) = std::fs::create_dir_all(parent) {
-                            eprintln!("Error creating directory {}: {e}", parent.display());
-                            std::process::exit(1);
-                        }
-                    }
-                    if let Err(e) = std::fs::write(&dest, content) {
-                        eprintln!("Error writing {}: {e}", dest.display());
-                        std::process::exit(1);
-                    }
-                    let action = if *force { "Overwrote" } else { "Created" };
-                    println!("  {action} {}", dest.display());
-                } else {
-                    println!("  Skipped {} (already exists)", dest.display());
-                }
-            }
-        }
-
         return;
     }
 
@@ -1189,14 +1146,7 @@ async fn main() {
     }) = &cli.command
     {
         let config = HarnessConfig::load(&cli.config).unwrap_or_default();
-        let dd = data_dir::DataDir::new(&config.storage.data_dir);
-        let result = finish::handle_finish(
-            bead_id,
-            message,
-            files,
-            &config.quality_gates,
-            Some(&dd.db()),
-        );
+        let result = finish::handle_finish(bead_id, message, files, &config.quality_gates);
         if !result.success {
             eprintln!("Error: {}", result.message);
             std::process::exit(1);
@@ -1347,21 +1297,6 @@ async fn main() {
                 )
             }
             MetricsAction::Beads => metrics_cmd::handle_beads(&db_path),
-            MetricsAction::Brief => {
-                let targets = &config_for_metrics.metrics.targets;
-                let targets_opt = if targets.rules.is_empty() {
-                    None
-                } else {
-                    Some(targets)
-                };
-                let adapter_name = adapters::resolve_adapter_name(
-                    config_for_metrics.agent.adapter.as_deref(),
-                    &config_for_metrics.agent.command,
-                );
-                let adapter = adapters::create_adapter(adapter_name);
-                let supported = adapter.supported_metrics();
-                brief::handle_brief(&db_path, targets_opt, Some(supported))
-            }
         };
 
         if let Err(e) = result {

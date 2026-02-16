@@ -54,29 +54,22 @@ pub fn globs_overlap(a: &[String], b: &[String]) -> bool {
 
 /// Check if two individual glob patterns could match the same file.
 ///
-/// Goes beyond simple prefix matching by:
-/// 1. Respecting path component boundaries (so `src/analytics/` won't
-///    falsely overlap with `src/analytics_v2/`).
-/// 2. Comparing fixed file extensions when both globs end with a literal
-///    extension after a wildcard (e.g. `**/*.rs` vs `**/*.toml` → no overlap).
-///
-/// Still conservative: false positives are acceptable, false negatives are not.
+/// Uses a conservative heuristic: extract the literal prefix of each glob
+/// (everything before the first wildcard character) and check if one prefix
+/// is a prefix of the other. If so, they could overlap.
 ///
 /// Examples:
-/// - `src/analytics/**/*.rs` vs `src/analytics/mod.rs` → overlap (shared directory)
+/// - `src/analytics/**/*.rs` vs `src/analytics/mod.rs` → overlap (shared prefix)
 /// - `src/db.rs` vs `src/config.rs` → no overlap (exact files, different)
-/// - `src/**` vs `src/db.rs` → overlap (directory containment)
-/// - `tests/**` vs `src/**` → no overlap (different directories)
-/// - `src/analytics/**` vs `src/analytics_v2/**` → no overlap (different directories)
-/// - `src/**/*.rs` vs `src/**/*.toml` → no overlap (different extensions)
+/// - `src/**` vs `src/db.rs` → overlap (prefix containment)
+/// - `tests/**` vs `src/**` → no overlap (different prefixes)
 fn pair_overlaps(a: &str, b: &str) -> bool {
     let pa = literal_prefix(a);
     let pb = literal_prefix(b);
 
-    // If either glob is just a wildcard with no prefix, it could match anything —
-    // but we can still rule out overlap if the extensions are incompatible.
+    // If either glob is just a wildcard with no prefix, it matches everything
     if pa.is_empty() || pb.is_empty() {
-        return extensions_compatible(a, b);
+        return true;
     }
 
     // Two exact paths (no wildcards) only overlap if they're equal
@@ -84,112 +77,8 @@ fn pair_overlaps(a: &str, b: &str) -> bool {
         return a == b;
     }
 
-    // Compare path components instead of raw string prefixes so that
-    // "src/analytics/" doesn't falsely overlap with "src/analytics_v2/".
-    if !path_prefixes_overlap(pa, pb) {
-        return false;
-    }
-
-    // Prefixes overlap — check if extensions rule it out.
-    extensions_compatible(a, b)
-}
-
-/// Check whether two literal prefixes share a directory-boundary-aligned
-/// prefix relationship.
-///
-/// `"src/analytics/"` and `"src/analytics_v2/"` → false (component mismatch)
-/// `"src/analytics/"` and `"src/analytics/models/"` → true
-/// `"src/"` and `"src/analytics/"` → true
-fn path_prefixes_overlap(a: &str, b: &str) -> bool {
-    // Make `short` the shorter (or equal-length) prefix.
-    let (short, long) = if a.len() <= b.len() { (a, b) } else { (b, a) };
-
-    if long.starts_with(short) {
-        // Exact match
-        if short.len() == long.len() {
-            return true;
-        }
-        // Short already ends with `/` — clean directory containment
-        if short.ends_with('/') {
-            return true;
-        }
-        // The character right after the short prefix in the long string
-        // must be `/` to confirm a directory boundary. E.g. "src/analytics/"
-        // vs "src/analytics_v2/" — the `_` after "analytics" means these are
-        // different path components.
-        if long.as_bytes()[short.len()] == b'/' {
-            return true;
-        }
-        // The short prefix ends mid-component (e.g. "src/db" matching against
-        // "src/db_test"). Fall through to the directory-level comparison below
-        // so that wildcards in the same directory are treated conservatively
-        // as overlapping.
-    }
-
-    // Compare at directory level: if both prefixes share the same parent
-    // directory, wildcards within that directory could match overlapping files.
-    let da = dir_prefix(short);
-    let db = dir_prefix(long);
-    if da.is_empty() && db.is_empty() {
-        // Both are bare filenames / prefixes with no directory — could overlap
-        return true;
-    }
-    da.starts_with(db) || db.starts_with(da)
-}
-
-/// Return everything up to and including the last `/` in `s`.
-/// If there is no `/`, returns the empty string.
-fn dir_prefix(s: &str) -> &str {
-    match s.rfind('/') {
-        Some(i) => &s[..=i],
-        None => "",
-    }
-}
-
-/// Check if two globs have compatible file extensions.
-///
-/// If both patterns end with a literal extension after a wildcard (e.g.
-/// `**/*.rs` or `src/*.toml`), and the extensions differ, the patterns
-/// can never match the same file.
-///
-/// Returns `true` (compatible / might overlap) when in doubt.
-fn extensions_compatible(a: &str, b: &str) -> bool {
-    match (fixed_extension(a), fixed_extension(b)) {
-        (Some(ea), Some(eb)) => ea == eb,
-        _ => true, // can't determine → assume compatible
-    }
-}
-
-/// Extract the fixed file extension from a glob pattern, if the pattern
-/// always matches files with that extension.
-///
-/// Recognises patterns ending in `*.ext` or `*.ext` preceded by `/`, `*`, etc.
-/// Returns `None` for patterns like `src/**` or `src/foo` where the extension
-/// isn't constrained by the glob.
-fn fixed_extension(glob: &str) -> Option<&str> {
-    // We want patterns like "**/*.rs", "src/**/*.toml", "*.json"
-    // The pattern must end with ".<ext>" preceded by a `*`.
-    // Find last dot.
-    let dot = glob.rfind('.')?;
-    let ext = &glob[dot + 1..];
-    // Extension must be non-empty and purely alphanumeric (no wildcards in it).
-    if ext.is_empty() || ext.contains('*') || ext.contains('?') || ext.contains('[') {
-        return None;
-    }
-    // The character before the dot must be `*` (from `*.ext`).
-    if dot == 0 {
-        return None;
-    }
-    if glob.as_bytes()[dot - 1] == b'*' {
-        return Some(ext);
-    }
-    // For exact files like "src/db.rs" — still extract the extension so that
-    // an exact file can be compared against a glob with a fixed extension.
-    // Only do this if the glob has no wildcards (it's an exact file path).
-    if !has_wildcard(glob) {
-        return Some(ext);
-    }
-    None
+    // Check if one prefix starts with the other (either direction)
+    pa.starts_with(pb) || pb.starts_with(pa)
 }
 
 /// Extract the literal prefix of a glob pattern — everything before the first
@@ -531,159 +420,6 @@ mod tests {
     #[test]
     fn pair_both_wildcards_no_overlap() {
         assert!(!pair_overlaps("src/**", "tests/**"));
-    }
-
-    // ── path boundary tests (new in V3) ──
-
-    #[test]
-    fn pair_similar_dir_names_no_overlap() {
-        // "src/analytics/" prefix should NOT match "src/analytics_v2/"
-        assert!(!pair_overlaps("src/analytics/**", "src/analytics_v2/**"));
-    }
-
-    #[test]
-    fn pair_similar_dir_names_reversed() {
-        assert!(!pair_overlaps("src/analytics_v2/**", "src/analytics/**"));
-    }
-
-    #[test]
-    fn pair_nested_subdir_overlap() {
-        // A parent dir glob should still overlap with a child dir glob
-        assert!(pair_overlaps("src/analytics/**", "src/analytics/models/**"));
-    }
-
-    #[test]
-    fn pair_file_prefix_collision() {
-        // "src/db" prefix vs "src/db_test" — different exact files, no overlap
-        assert!(!pair_overlaps("src/db.rs", "src/db_test.rs"));
-    }
-
-    #[test]
-    fn pair_glob_file_prefix_collision() {
-        // "src/db*" vs "src/db_test*" — prefix "src/db" is a prefix of
-        // "src/db_test", but they share the same dir so this is conservative overlap
-        assert!(pair_overlaps("src/db*.rs", "src/db_test*.rs"));
-    }
-
-    // ── extension compatibility tests (new in V3) ──
-
-    #[test]
-    fn pair_different_extensions_no_overlap() {
-        assert!(!pair_overlaps("src/**/*.rs", "src/**/*.toml"));
-    }
-
-    #[test]
-    fn pair_same_extensions_overlap() {
-        assert!(pair_overlaps("src/**/*.rs", "src/**/*.rs"));
-    }
-
-    #[test]
-    fn pair_root_wildcard_different_ext_no_overlap() {
-        assert!(!pair_overlaps("**/*.rs", "**/*.toml"));
-    }
-
-    #[test]
-    fn pair_root_wildcard_different_ext_json() {
-        assert!(!pair_overlaps("**/*.rs", "**/*.json"));
-    }
-
-    #[test]
-    fn pair_extension_vs_no_extension_glob() {
-        // "src/**/*.rs" vs "src/**" — can't rule out overlap (src/** matches .rs files)
-        assert!(pair_overlaps("src/**/*.rs", "src/**"));
-    }
-
-    #[test]
-    fn pair_exact_file_vs_glob_different_ext() {
-        // "src/db.rs" (exact) vs "src/**/*.toml" — different extensions
-        assert!(!pair_overlaps("src/db.rs", "src/**/*.toml"));
-    }
-
-    #[test]
-    fn pair_exact_file_vs_glob_same_ext() {
-        assert!(pair_overlaps("src/db.rs", "src/**/*.rs"));
-    }
-
-    // ── path_prefixes_overlap tests ──
-
-    #[test]
-    fn path_prefix_same() {
-        assert!(path_prefixes_overlap("src/", "src/"));
-    }
-
-    #[test]
-    fn path_prefix_parent_child() {
-        assert!(path_prefixes_overlap("src/", "src/analytics/"));
-    }
-
-    #[test]
-    fn path_prefix_child_parent() {
-        assert!(path_prefixes_overlap("src/analytics/", "src/"));
-    }
-
-    #[test]
-    fn path_prefix_similar_names_no_overlap() {
-        assert!(!path_prefixes_overlap("src/analytics/", "src/analytics_v2/"));
-    }
-
-    #[test]
-    fn path_prefix_disjoint() {
-        assert!(!path_prefixes_overlap("src/", "tests/"));
-    }
-
-    #[test]
-    fn path_prefix_exact_file_in_same_dir() {
-        // Two exact files in the same dir — prefixes share dir boundary
-        assert!(path_prefixes_overlap("src/db.rs", "src/config.rs"));
-    }
-
-    // ── extensions_compatible tests ──
-
-    #[test]
-    fn ext_both_rs() {
-        assert!(extensions_compatible("**/*.rs", "src/**/*.rs"));
-    }
-
-    #[test]
-    fn ext_different() {
-        assert!(!extensions_compatible("**/*.rs", "**/*.toml"));
-    }
-
-    #[test]
-    fn ext_one_unspecified() {
-        assert!(extensions_compatible("src/**", "src/**/*.rs"));
-    }
-
-    #[test]
-    fn ext_neither_specified() {
-        assert!(extensions_compatible("src/**", "tests/**"));
-    }
-
-    // ── fixed_extension tests ──
-
-    #[test]
-    fn fixed_ext_glob_rs() {
-        assert_eq!(fixed_extension("**/*.rs"), Some("rs"));
-    }
-
-    #[test]
-    fn fixed_ext_glob_toml() {
-        assert_eq!(fixed_extension("src/**/*.toml"), Some("toml"));
-    }
-
-    #[test]
-    fn fixed_ext_exact_file() {
-        assert_eq!(fixed_extension("src/db.rs"), Some("rs"));
-    }
-
-    #[test]
-    fn fixed_ext_no_extension() {
-        assert_eq!(fixed_extension("src/**"), None);
-    }
-
-    #[test]
-    fn fixed_ext_wildcard_in_extension() {
-        assert_eq!(fixed_extension("src/**/*.*"), None);
     }
 
     // ── literal_prefix tests ──

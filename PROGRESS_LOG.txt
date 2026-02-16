@@ -2741,3 +2741,32 @@ Added step 0c to `bd-finish.sh` that verifies bead deliverables before allowing 
 ### Suggested next tasks
 - Consider adding `## Verify` sections to existing open beads that lack them
 - The beads simple-agent-harness-374 and simple-agent-harness-2kb mentioned in the bug report can now be re-attempted — the verification gate will prevent false closures
+
+--- 2026-02-16 20:22:32 | simple-agent-harness-ea2 ---
+## Completed: simple-agent-harness-ea2 — Wire self-improvement promotion cycle into coordinator
+
+### What was done
+Implemented three features for the self-improvement feedback loop:
+
+1. **Coordinator injects open improvements into agent prompt**: The coordinator now uses `prompt::assemble()` (which calls `brief::generate_brief()`) to build a base prompt that includes performance feedback, target warnings, and open improvements from the DB. Each worker gets this base prompt plus a bead-specific suffix. Previously the coordinator only sent "Work on bead: {id}" as the prompt.
+
+2. **Promoted improvements written to PROMPT.md**: When an improvement is auto-promoted, `append_promoted_to_prompt()` appends it to the configured prompt file with an HTML comment noting the source ref ID and category, plus the improvement body (or title as fallback) as a bullet point.
+
+3. **Auto-promotion after configurable session count**: New `[improvements]` config section with:
+   - `auto_promote_after` (default: 5) — number of successful sessions after creation before auto-promoting
+   - `prompt_file` (default: "PROMPT.md") — where to append promoted rules
+   - Set `auto_promote_after = 0` to disable
+   - Promotion runs after each successful integration at multiples of `auto_promote_after`
+
+### Files changed
+- `src/config.rs` (modified — added `ImprovementsConfig` struct with tests)
+- `src/coordinator.rs` (modified — added prompt assembly, auto-promotion logic, tests)
+- `src/runner.rs` (modified — added `improvements` field to test config)
+
+### Current state
+- All 1178 tests pass
+- `cargo check`, `cargo clippy`, `cargo fmt --check` all clean
+
+### Suggested next tasks
+- Consider adding auto-promotion to the serial runner path as well (currently only coordinator)
+- Add `blacksmith improve` CLI subcommand to view/manage promotion history

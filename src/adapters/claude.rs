@@ -30,7 +30,7 @@ struct RawMetrics {
     cost_cache_read_tokens: u64,
     cost_cache_creation_tokens: u64,
     cost_estimate_usd: f64,
-    session_duration_secs: f64,
+    session_duration_ms: u64,
     session_output_bytes: u64,
 }
 
@@ -144,7 +144,7 @@ fn count_assistant_turn(v: &Value, m: &mut RawMetrics) {
 
 fn extract_result(v: &Value, m: &mut RawMetrics) {
     if let Some(dur) = v.get("duration_ms").and_then(|d| d.as_u64()) {
-        m.session_duration_secs = dur as f64 / 1000.0;
+        m.session_duration_ms = dur;
     }
 
     if let Some(cost) = v.get("total_cost_usd").and_then(|c| c.as_f64()) {
@@ -184,7 +184,7 @@ const SUPPORTED_METRICS: &[&str] = &[
     "cost.cache_creation_tokens",
     "cost.estimate_usd",
     "session.output_bytes",
-    "session.duration_secs",
+    "session.duration_ms",
 ];
 
 impl AgentAdapter for ClaudeAdapter {
@@ -230,10 +230,8 @@ impl AgentAdapter for ClaudeAdapter {
                 Value::from(m.session_output_bytes),
             ),
             (
-                "session.duration_secs".into(),
-                serde_json::Number::from_f64(m.session_duration_secs)
-                    .map(Value::Number)
-                    .unwrap_or(Value::Null),
+                "session.duration_ms".into(),
+                Value::from(m.session_duration_ms),
             ),
         ];
 
@@ -327,7 +325,7 @@ mod tests {
         let metrics = adapter.extract_builtin_metrics(&path).unwrap();
 
         let get = |k: &str| metrics.iter().find(|(key, _)| key == k).unwrap().1.clone();
-        assert!((get("session.duration_secs").as_f64().unwrap() - 180.0).abs() < 0.001);
+        assert_eq!(get("session.duration_ms"), 180000);
         assert_eq!(get("cost.input_tokens"), 100);
         assert_eq!(get("cost.output_tokens"), 200);
         assert_eq!(get("cost.cache_read_tokens"), 300);
@@ -494,6 +492,6 @@ mod tests {
         assert_eq!(get("cost.input_tokens"), 24 + 47934);
         assert_eq!(get("cost.output_tokens"), 9407 + 947);
         assert!((get("cost.estimate_usd").as_f64().unwrap() - 0.99).abs() < 0.001);
-        assert!((get("session.duration_secs").as_f64().unwrap() - 229.857).abs() < 0.001);
+        assert_eq!(get("session.duration_ms"), 229857);
     }
 }

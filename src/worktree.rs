@@ -175,7 +175,7 @@ fn cleanup_temp_files(wt_path: &Path) {
             // Match dirs named after the worktree (e.g., "worker-0-beads-abc")
             name == wt_name
             // Match blacksmith-prefixed temp dirs for this bead
-            || bead_id.as_ref().is_some_and(|id| {
+            || bead_id.as_ref().map_or(false, |id| {
                 name.starts_with(&format!("blacksmith-{id}"))
             });
 

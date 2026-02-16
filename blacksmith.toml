@@ -1,5 +1,4 @@
-# blacksmith.toml — DEPRECATED location, move to .blacksmith/config.toml
-# Run: mv blacksmith.toml .blacksmith/config.toml
+# blacksmith.toml — default configuration for blacksmith
 
 [session]
 max_iterations = 25

@@ -8,7 +8,7 @@ A supervised agent harness that runs AI coding agents in a loop — dispatching 
 |---|---|
 | [Getting Started](getting-started.md) | Installation, first run, basic configuration |
 | [CLI Reference](cli-reference.md) | All commands, flags, and subcommands |
-| [Configuration Reference](configuration.md) | Complete `.blacksmith/config.toml` option reference |
+| [Configuration Reference](configuration.md) | Complete `blacksmith.toml` option reference |
 | [Core Loop](core-loop.md) | Session lifecycle, watchdog, retry, backoff, hooks |
 | [Metrics & Improvements](metrics.md) | Event storage, extraction rules, briefs, improvements |
 | [Agent Adapters](adapters.md) | Claude, Codex, OpenCode, Aider, Raw — setup and capabilities |

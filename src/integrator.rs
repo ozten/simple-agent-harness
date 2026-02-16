@@ -111,7 +111,7 @@ impl std::fmt::Display for CircuitState {
 /// Each bead gets up to `MAX_INTEGRATION_ATTEMPTS` fix iterations during
 /// integration. After that, the breaker trips and the task is escalated
 /// for human review.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default)]
 pub struct CircuitBreaker {
     /// Attempt counts keyed by bead ID.
     attempts: HashMap<String, u32>,
@@ -308,7 +308,6 @@ impl From<worktree::WorktreeError> for IntegrationError {
 }
 
 /// The integration queue manages sequential integration of completed worktrees.
-#[derive(Clone)]
 pub struct IntegrationQueue {
     /// Path to the main repository.
     repo_dir: PathBuf,

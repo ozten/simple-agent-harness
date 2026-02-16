@@ -6,7 +6,7 @@
 ///
 /// Rate limit patterns checked (only within error result events):
 /// - JSON: `"error":"rate_limit"` or `"error": "rate_limit"`
-/// - Text: `rate limit`, `rate_limit`, `usage limit`, `hit your limit`, `resets.*UTC` (case-insensitive)
+/// - Text: `rate limit`, `rate_limit`, `usage limit`, `hit your limit` (case-insensitive)
 use regex::Regex;
 use std::path::Path;
 use std::sync::LazyLock;
@@ -17,7 +17,6 @@ static RATE_LIMIT_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
         Regex::new(r"(?i)rate[_.\s]limit").unwrap(),
         Regex::new(r"(?i)usage limit").unwrap(),
         Regex::new(r"(?i)hit your limit").unwrap(),
-        Regex::new(r"(?i)resets.*UTC").unwrap(),
     ]
 });
 
@@ -170,16 +169,6 @@ mod tests {
     #[test]
     fn test_error_result_with_hit_your_limit() {
         let jsonl = result_event(true, "error", "You've hit your limit. Please wait.");
-        assert!(detect_rate_limit_in_result_event(&jsonl));
-    }
-
-    #[test]
-    fn test_error_result_with_resets_utc() {
-        let jsonl = result_event(
-            true,
-            "error",
-            "Your limit resets at 2026-02-17T00:00:00 UTC",
-        );
         assert!(detect_rate_limit_in_result_event(&jsonl));
     }
 
