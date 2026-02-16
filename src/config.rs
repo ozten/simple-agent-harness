@@ -561,6 +561,9 @@ pub struct ArchitectureConfig {
     /// automatically approved and queued, or require human confirmation.
     /// Default: false
     pub refactor_auto_approve: bool,
+    /// Run architecture review after every N completed tasks. Set to 0 to
+    /// disable periodic reviews. Default: 10
+    pub review_interval: u32,
 }
 
 impl Default for ArchitectureConfig {
@@ -572,6 +575,7 @@ impl Default for ArchitectureConfig {
             expansion_event_window: 20,
             metadata_drift_sensitivity: 3.0,
             refactor_auto_approve: false,
+            review_interval: 10,
         }
     }
 }
@@ -587,6 +591,7 @@ impl ArchitectureConfig {
             expansion_event_window: 30,
             metadata_drift_sensitivity: 5.0,
             refactor_auto_approve: false,
+            review_interval: 20,
         }
     }
 
@@ -599,6 +604,7 @@ impl ArchitectureConfig {
             expansion_event_window: 15,
             metadata_drift_sensitivity: 2.0,
             refactor_auto_approve: true,
+            review_interval: 5,
         }
     }
 }

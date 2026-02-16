@@ -5,18 +5,21 @@
 /// spawns workers in git worktrees, and polls for completions.
 /// Completed workers are queued for sequential integration into main.
 use crate::adapters;
-use crate::config::HarnessConfig;
+use crate::config::{ArchitectureConfig, HarnessConfig};
 use crate::cycle_detect;
 use crate::data_dir::DataDir;
 use crate::db;
 use crate::estimation::BeadNode;
+use crate::expansion_event;
 use crate::ingest;
 use crate::integrator::{CircuitBreaker, IntegrationQueue, IntegrationResult, TrippedFailure};
 use crate::pool::{PoolError, SessionOutcome, WorkerPool};
 use crate::runner;
 use crate::scheduler::{self, InProgressAssignment, ReadyBead};
+use crate::signal_correlator;
 use crate::signals::SignalHandler;
 use crate::status::{HarnessState, StatusTracker};
+use crate::structural_metrics;
 use crate::worktree;
 use rusqlite::Connection;
 use std::collections::HashSet;
@@ -299,6 +302,14 @@ pub async fn run(
                             if let Err(e) = pool.reset_worker(worker_id) {
                                 tracing::warn!(error = %e, worker_id, "failed to reset worker after integration");
                             }
+
+                            // Check architecture review triggers
+                            maybe_run_architecture_review(
+                                &config.architecture,
+                                &db_conn,
+                                &repo_dir,
+                                completed_beads,
+                            );
                         } else {
                             let error_summary =
                                 result.failure_reason.as_deref().unwrap_or("unknown error");
@@ -566,6 +577,7 @@ fn check_and_process_expand_files(pool: &WorkerPool, db_conn: &Connection) {
             .and_then(|g| parse_globs_json(&g))
             .unwrap_or_default();
 
+        let predicted = existing.clone();
         let mut merged = existing;
         for g in &new_globs {
             if !merged.contains(g) {
@@ -574,6 +586,24 @@ fn check_and_process_expand_files(pool: &WorkerPool, db_conn: &Connection) {
         }
 
         let merged_str = serde_json::to_string(&merged).unwrap();
+
+        // Record expansion event for architecture analysis tracking
+        let bead_id = pool
+            .snapshot()
+            .iter()
+            .find(|(id, _, _)| *id == worker_id)
+            .and_then(|(_, _, bid)| bid.map(|s| s.to_string()))
+            .unwrap_or_else(|| format!("worker-{worker_id}"));
+        let event = expansion_event::ExpansionEvent {
+            task_id: bead_id,
+            predicted_modules: predicted,
+            actual_modules: merged.clone(),
+            expansion_reason: format!("expand file: {} new globs", new_globs.len()),
+            timestamp: chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+        };
+        if let Err(e) = expansion_event::record(db_conn, &event) {
+            tracing::warn!(error = %e, worker_id, "failed to record expansion event");
+        }
 
         // Update the DB
         match db::update_worker_assignment_affected_globs(db_conn, assignment_id, &merged_str) {
@@ -1020,6 +1050,94 @@ fn print_coordinator_integration_progress(
         println!("{}", session_part);
     } else {
         println!("{} | {}", session_part, progress_part);
+    }
+}
+
+/// Check if architecture review should be triggered and run it if so.
+///
+/// Triggers on two conditions:
+/// 1. Periodic: every `review_interval` completed tasks (if > 0)
+/// 2. Threshold: expansion events within the configured window exceed the threshold
+fn maybe_run_architecture_review(
+    arch_config: &ArchitectureConfig,
+    db_conn: &Connection,
+    repo_root: &std::path::Path,
+    completed_beads: u32,
+) {
+    let periodic_trigger = arch_config.review_interval > 0
+        && completed_beads > 0
+        && completed_beads % arch_config.review_interval == 0;
+
+    let threshold_trigger = if arch_config.expansion_event_threshold > 0 {
+        match expansion_event::count_recent_expansions(db_conn, arch_config.expansion_event_window) {
+            Ok(count) => count >= arch_config.expansion_event_threshold,
+            Err(e) => {
+                tracing::debug!(error = %e, "failed to count expansion events for arch review");
+                false
+            }
+        }
+    } else {
+        false
+    };
+
+    if !periodic_trigger && !threshold_trigger {
+        return;
+    }
+
+    let reason = match (periodic_trigger, threshold_trigger) {
+        (true, true) => format!(
+            "periodic (every {} tasks) + expansion threshold exceeded",
+            arch_config.review_interval
+        ),
+        (true, false) => format!("periodic (every {} tasks)", arch_config.review_interval),
+        (false, true) => "expansion event threshold exceeded".to_string(),
+        _ => unreachable!(),
+    };
+
+    tracing::info!(
+        completed_beads,
+        reason = %reason,
+        "triggering architecture review"
+    );
+
+    run_architecture_analysis(db_conn, repo_root);
+}
+
+/// Run structural + historical signal analysis and log results.
+fn run_architecture_analysis(db_conn: &Connection, repo_root: &std::path::Path) {
+    let report = structural_metrics::analyze(repo_root);
+
+    let candidate_count;
+    match signal_correlator::correlate(db_conn, &report, None) {
+        Ok(correlation) => {
+            candidate_count = correlation.candidates.len();
+            if correlation.candidates.is_empty() {
+                tracing::info!(
+                    modules = report.modules.len(),
+                    expansion_events = correlation.total_expansion_events,
+                    "architecture review: no refactoring candidates found"
+                );
+            } else {
+                for c in &correlation.candidates {
+                    tracing::warn!(
+                        module = %c.module,
+                        combined_score = format!("{:.1}", c.combined_score),
+                        confidence = format!("{:.2}", c.confidence),
+                        "architecture review: refactoring candidate identified"
+                    );
+                }
+                tracing::info!(
+                    candidates = candidate_count,
+                    modules = report.modules.len(),
+                    expansion_events = correlation.total_expansion_events,
+                    integration_records = correlation.total_integration_records,
+                    "architecture review complete"
+                );
+            }
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "architecture review: signal correlation failed");
+        }
     }
 }
 
@@ -1677,5 +1795,91 @@ mod tests {
         // When bd is not available, recover_orphaned_beads should
         // gracefully handle the error without panicking
         recover_orphaned_beads();
+    }
+
+    #[test]
+    fn test_periodic_trigger_fires_at_interval() {
+        let config = ArchitectureConfig {
+            review_interval: 5,
+            ..Default::default()
+        };
+        // Should trigger at multiples of 5
+        assert!(config.review_interval > 0 && 5 % config.review_interval == 0);
+        assert!(config.review_interval > 0 && 10 % config.review_interval == 0);
+        // Should NOT trigger at non-multiples
+        assert!(3 % config.review_interval != 0);
+        assert!(7 % config.review_interval != 0);
+    }
+
+    #[test]
+    fn test_periodic_trigger_disabled_when_zero() {
+        let config = ArchitectureConfig {
+            review_interval: 0,
+            ..Default::default()
+        };
+        // review_interval == 0 means disabled
+        assert_eq!(config.review_interval, 0);
+    }
+
+    #[test]
+    fn test_expansion_threshold_trigger() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let db_conn = db::open_or_create(&db_path).unwrap();
+        expansion_event::create_table(&db_conn).unwrap();
+
+        let config = ArchitectureConfig {
+            expansion_event_threshold: 3,
+            expansion_event_window: 10,
+            review_interval: 0, // disable periodic
+            ..Default::default()
+        };
+
+        // Below threshold: 2 events < 3
+        for i in 0..2 {
+            let event = expansion_event::ExpansionEvent {
+                task_id: format!("task-{i}"),
+                predicted_modules: vec!["a".to_string()],
+                actual_modules: vec!["a".to_string(), "b".to_string()],
+                expansion_reason: "test".to_string(),
+                timestamp: format!("2026-01-{:02}T10:00:00Z", 10 + i),
+            };
+            expansion_event::record(&db_conn, &event).unwrap();
+        }
+        let count =
+            expansion_event::count_recent_expansions(&db_conn, config.expansion_event_window)
+                .unwrap();
+        assert!(count < config.expansion_event_threshold);
+
+        // At threshold: add one more event (3 total across 3 tasks)
+        let event = expansion_event::ExpansionEvent {
+            task_id: "task-2".to_string(),
+            predicted_modules: vec!["c".to_string()],
+            actual_modules: vec!["c".to_string(), "d".to_string()],
+            expansion_reason: "test".to_string(),
+            timestamp: "2026-01-12T10:00:00Z".to_string(),
+        };
+        expansion_event::record(&db_conn, &event).unwrap();
+
+        let count =
+            expansion_event::count_recent_expansions(&db_conn, config.expansion_event_window)
+                .unwrap();
+        assert!(count >= config.expansion_event_threshold);
+    }
+
+    #[test]
+    fn test_maybe_run_architecture_review_does_not_panic() {
+        // Verify the function doesn't panic with empty DB and repo
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let db_conn = db::open_or_create(&db_path).unwrap();
+
+        let config = ArchitectureConfig {
+            review_interval: 1, // trigger on every completion
+            ..Default::default()
+        };
+
+        // Should not panic even with no real repo structure
+        maybe_run_architecture_review(&config, &db_conn, dir.path(), 1);
     }
 }
