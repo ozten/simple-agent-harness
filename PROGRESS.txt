@@ -1,22 +1,21 @@
-## Last Session: Implement ensure_fresh_metadata for scheduler integration (2026-02-16)
+## Last Session: Add metadata drift detection between regenerations (2026-02-16)
 
 ### What Was Done
-- Implemented bead simple-agent-harness-90v: ensure_fresh_metadata for scheduler integration
+- Implemented bead simple-agent-harness-buv: metadata drift detection
 - Added to src/metadata_regen.rs:
-  - `TaskMetadata` struct combining IntentAnalysis (Layer 1) + FileResolution (Layer 2)
-  - `TaskMetadata::affected_globs()` — extracts file paths from resolution for scheduler conflict detection
-  - `ensure_fresh_metadata()` — orchestrates both layers, returning combined TaskMetadata or None if no intent exists
-  - 5 new tests: returns None without intent, combined on cache hit, combined on regeneration, affected_globs from resolution, empty globs when no matches
-- Added to src/scheduler.rs:
-  - `enrich_with_metadata()` — enriches a ReadyBead's affected_globs from metadata when no explicit `affected:` line in design field. Explicit declarations take precedence over inferred metadata.
-  - 3 new tests: skips bead with existing globs, populates from metadata, leaves None when no intent
+  - `DEFAULT_DRIFT_THRESHOLD` constant (3.0x)
+  - `ConceptDrift` struct: tracks per-concept file count changes
+  - `DriftReport` struct: full drift analysis with `has_drift()` and `summary()` methods
+  - `detect_drift()`: compares latest cached resolution against new resolution, flags concepts where resolved file count grew by >= threshold (configurable, default 3x)
+  - `count_unique_files()`: helper to count deduplicated files across mappings
+  - 12 new tests covering: no previous resolution, same-entry skip, below/above/at threshold, 0→N drift, new concepts, custom threshold, multiple concepts mixed, summary formatting
 
 ### Current State
 - Compilation clean (only pre-existing dead_code warnings for not-yet-wired modules)
-- Full test suite: 1089 passed, 0 failed, 1 ignored
-- ensure_fresh_metadata + enrich_with_metadata ready for coordinator to call during scheduling loop
+- Full test suite: 1100 passed, 0 failed, 1 ignored
+- Drift detection ready to be called after any `ensure_fresh()` regeneration
 
 ### Suggested Next Tasks
-- simple-agent-harness-buv (P2): Add metadata drift detection between regenerations
 - simple-agent-harness-a9n (P2): Implement structural metrics aggregator for architecture analysis
-- Wire enrich_with_metadata into coordinator.rs scheduling loop (could be a follow-up task)
+- simple-agent-harness-4wc (P2): Implement historical signal correlator (was blocked by buv, now unblocked)
+- Wire detect_drift into regenerate_after_refactor to emit drift reports during bulk regeneration

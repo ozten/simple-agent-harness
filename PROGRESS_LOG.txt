@@ -2529,3 +2529,26 @@
 - simple-agent-harness-buv (P2): Add metadata drift detection between regenerations
 - simple-agent-harness-a9n (P2): Implement structural metrics aggregator for architecture analysis
 - Wire enrich_with_metadata into coordinator.rs scheduling loop (could be a follow-up task)
+
+--- 2026-02-16 00:26:29 | simple-agent-harness-buv ---
+## Last Session: Add metadata drift detection between regenerations (2026-02-16)
+
+### What Was Done
+- Implemented bead simple-agent-harness-buv: metadata drift detection
+- Added to src/metadata_regen.rs:
+  - `DEFAULT_DRIFT_THRESHOLD` constant (3.0x)
+  - `ConceptDrift` struct: tracks per-concept file count changes
+  - `DriftReport` struct: full drift analysis with `has_drift()` and `summary()` methods
+  - `detect_drift()`: compares latest cached resolution against new resolution, flags concepts where resolved file count grew by >= threshold (configurable, default 3x)
+  - `count_unique_files()`: helper to count deduplicated files across mappings
+  - 12 new tests covering: no previous resolution, same-entry skip, below/above/at threshold, 0→N drift, new concepts, custom threshold, multiple concepts mixed, summary formatting
+
+### Current State
+- Compilation clean (only pre-existing dead_code warnings for not-yet-wired modules)
+- Full test suite: 1100 passed, 0 failed, 1 ignored
+- Drift detection ready to be called after any `ensure_fresh()` regeneration
+
+### Suggested Next Tasks
+- simple-agent-harness-a9n (P2): Implement structural metrics aggregator for architecture analysis
+- simple-agent-harness-4wc (P2): Implement historical signal correlator (was blocked by buv, now unblocked)
+- Wire detect_drift into regenerate_after_refactor to emit drift reports during bulk regeneration

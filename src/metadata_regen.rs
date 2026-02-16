@@ -183,6 +183,151 @@ pub struct RegenerationReport {
     pub skipped_no_intent: usize,
 }
 
+/// Default multiplier threshold: flag drift when new file count >= 3x old count.
+const DEFAULT_DRIFT_THRESHOLD: f64 = 3.0;
+
+/// A single concept whose resolved file count changed significantly.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConceptDrift {
+    /// The concept name (e.g. `"auth_endpoints"`).
+    pub concept: String,
+    /// Number of resolved files in the previous resolution.
+    pub old_file_count: usize,
+    /// Number of resolved files in the new resolution.
+    pub new_file_count: usize,
+}
+
+/// Result of comparing two file resolutions for the same task.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DriftReport {
+    /// The task that was checked.
+    pub task_id: String,
+    /// The multiplier threshold that was used.
+    pub threshold: f64,
+    /// Concepts that drifted above the threshold.
+    pub drifted_concepts: Vec<ConceptDrift>,
+    /// Overall file count in the old resolution.
+    pub old_total_files: usize,
+    /// Overall file count in the new resolution.
+    pub new_total_files: usize,
+}
+
+impl DriftReport {
+    /// Whether any drift was detected (at concept or total level).
+    pub fn has_drift(&self) -> bool {
+        !self.drifted_concepts.is_empty()
+    }
+
+    /// Human-readable summary suitable for logging or architecture agent input.
+    pub fn summary(&self) -> String {
+        if !self.has_drift() {
+            return format!("{}: no metadata drift detected", self.task_id);
+        }
+        let mut parts = vec![format!(
+            "{}: metadata drift detected (total files {} → {})",
+            self.task_id, self.old_total_files, self.new_total_files,
+        )];
+        for cd in &self.drifted_concepts {
+            parts.push(format!(
+                "  concept '{}': {} → {} files ({}x)",
+                cd.concept,
+                cd.old_file_count,
+                cd.new_file_count,
+                if cd.old_file_count > 0 {
+                    format!("{:.1}", cd.new_file_count as f64 / cd.old_file_count as f64)
+                } else {
+                    "∞".to_string()
+                },
+            ));
+        }
+        parts.join("\n")
+    }
+}
+
+/// Detect metadata drift between the previous and current file resolution for a task.
+///
+/// Compares the most recent cached resolution (any commit) against `new_resolution`.
+/// A concept is flagged as drifted if its resolved file count grew by >= `threshold`
+/// (default 3x). A concept going from 0 files to any positive count is always flagged.
+///
+/// Returns `None` if there is no previous resolution to compare against (first time).
+pub fn detect_drift(
+    conn: &Connection,
+    new_resolution: &file_resolution::FileResolution,
+    threshold: Option<f64>,
+) -> Result<Option<DriftReport>> {
+    let threshold = threshold.unwrap_or(DEFAULT_DRIFT_THRESHOLD);
+
+    // Get the most recent previous resolution for this task (any commit)
+    let old = match file_resolution::get_latest_for_task(conn, &new_resolution.task_id)? {
+        Some(old) => {
+            // Skip if the "latest" is actually the same entry we just stored
+            if old.base_commit == new_resolution.base_commit
+                && old.intent_hash == new_resolution.intent_hash
+            {
+                return Ok(None);
+            }
+            old
+        }
+        None => return Ok(None),
+    };
+
+    // Build concept → file count map for old resolution
+    let old_counts: std::collections::HashMap<&str, usize> = old
+        .mappings
+        .iter()
+        .map(|m| (m.concept.as_str(), m.resolved_files.len()))
+        .collect();
+
+    let mut drifted_concepts = Vec::new();
+
+    for new_mapping in &new_resolution.mappings {
+        let new_count = new_mapping.resolved_files.len();
+        let old_count = old_counts
+            .get(new_mapping.concept.as_str())
+            .copied()
+            .unwrap_or(0);
+
+        let drifted = if old_count == 0 {
+            // 0 → N is always drift (if N > 0)
+            new_count > 0
+        } else {
+            new_count as f64 >= old_count as f64 * threshold
+        };
+
+        if drifted {
+            drifted_concepts.push(ConceptDrift {
+                concept: new_mapping.concept.clone(),
+                old_file_count: old_count,
+                new_file_count: new_count,
+            });
+        }
+    }
+
+    // Count total unique files in each resolution
+    let old_total: usize = count_unique_files(&old);
+    let new_total: usize = count_unique_files(new_resolution);
+
+    Ok(Some(DriftReport {
+        task_id: new_resolution.task_id.clone(),
+        threshold,
+        drifted_concepts,
+        old_total_files: old_total,
+        new_total_files: new_total,
+    }))
+}
+
+/// Count unique files across all mappings in a resolution.
+fn count_unique_files(resolution: &file_resolution::FileResolution) -> usize {
+    let mut files = std::collections::HashSet::new();
+    for mapping in &resolution.mappings {
+        for file in &mapping.resolved_files {
+            files.insert(file.as_str());
+        }
+    }
+    files.len()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -537,6 +682,275 @@ mod tests {
         let globs = meta.affected_globs();
         assert!(!globs.is_empty());
         assert!(globs.iter().any(|g| g.contains("config")));
+    }
+
+    // --- detect_drift tests ---
+
+    fn make_resolution(
+        task_id: &str,
+        base_commit: &str,
+        intent_hash: &str,
+        mappings: Vec<(&str, Vec<&str>)>,
+    ) -> FileResolution {
+        FileResolution {
+            task_id: task_id.to_string(),
+            base_commit: base_commit.to_string(),
+            intent_hash: intent_hash.to_string(),
+            mappings: mappings
+                .into_iter()
+                .map(|(concept, files)| FileResolutionMapping {
+                    concept: concept.to_string(),
+                    resolved_files: files.into_iter().map(|f| f.to_string()).collect(),
+                    resolved_modules: vec![],
+                })
+                .collect(),
+            derived: DerivedFields::default(),
+        }
+    }
+
+    #[test]
+    fn drift_no_previous_resolution_returns_none() {
+        let conn = setup_db();
+        let new_res = make_resolution("task-1", "commit-b", "hash1", vec![("auth", vec!["a.rs"])]);
+        let report = detect_drift(&conn, &new_res, None).unwrap();
+        assert!(report.is_none());
+    }
+
+    #[test]
+    fn drift_same_commit_and_hash_returns_none() {
+        let conn = setup_db();
+        // Store a resolution then compare against one with same commit+hash
+        let res = make_resolution("task-1", "commit-a", "hash1", vec![("auth", vec!["a.rs"])]);
+        file_resolution::store(&conn, &res).unwrap();
+
+        let new_res = make_resolution("task-1", "commit-a", "hash1", vec![("auth", vec!["a.rs"])]);
+        let report = detect_drift(&conn, &new_res, None).unwrap();
+        assert!(report.is_none()); // same entry, skip
+    }
+
+    #[test]
+    fn drift_below_threshold_no_drift() {
+        let conn = setup_db();
+        // Old: auth -> 3 files
+        let old = make_resolution(
+            "task-1",
+            "commit-a",
+            "hash1",
+            vec![("auth", vec!["a.rs", "b.rs", "c.rs"])],
+        );
+        file_resolution::store(&conn, &old).unwrap();
+
+        // New: auth -> 5 files (1.67x, below 3x threshold)
+        let new_res = make_resolution(
+            "task-1",
+            "commit-b",
+            "hash1",
+            vec![("auth", vec!["a.rs", "b.rs", "c.rs", "d.rs", "e.rs"])],
+        );
+        let report = detect_drift(&conn, &new_res, None).unwrap().unwrap();
+        assert!(!report.has_drift());
+        assert_eq!(report.old_total_files, 3);
+        assert_eq!(report.new_total_files, 5);
+    }
+
+    #[test]
+    fn drift_above_threshold_flags_concept() {
+        let conn = setup_db();
+        // Old: auth -> 3 files
+        let old = make_resolution(
+            "task-1",
+            "commit-a",
+            "hash1",
+            vec![("auth", vec!["a.rs", "b.rs", "c.rs"])],
+        );
+        file_resolution::store(&conn, &old).unwrap();
+
+        // New: auth -> 11 files (3.67x, above 3x threshold)
+        let new_res = make_resolution(
+            "task-1",
+            "commit-b",
+            "hash1",
+            vec![(
+                "auth",
+                vec![
+                    "a.rs", "b.rs", "c.rs", "d.rs", "e.rs", "f.rs", "g.rs", "h.rs", "i.rs", "j.rs",
+                    "k.rs",
+                ],
+            )],
+        );
+        let report = detect_drift(&conn, &new_res, None).unwrap().unwrap();
+        assert!(report.has_drift());
+        assert_eq!(report.drifted_concepts.len(), 1);
+        assert_eq!(report.drifted_concepts[0].concept, "auth");
+        assert_eq!(report.drifted_concepts[0].old_file_count, 3);
+        assert_eq!(report.drifted_concepts[0].new_file_count, 11);
+    }
+
+    #[test]
+    fn drift_exactly_at_threshold() {
+        let conn = setup_db();
+        // Old: auth -> 2 files, New: auth -> 6 files (3.0x, exactly at threshold)
+        let old = make_resolution(
+            "task-1",
+            "commit-a",
+            "hash1",
+            vec![("auth", vec!["a.rs", "b.rs"])],
+        );
+        file_resolution::store(&conn, &old).unwrap();
+
+        let new_res = make_resolution(
+            "task-1",
+            "commit-b",
+            "hash1",
+            vec![("auth", vec!["a.rs", "b.rs", "c.rs", "d.rs", "e.rs", "f.rs"])],
+        );
+        let report = detect_drift(&conn, &new_res, None).unwrap().unwrap();
+        assert!(report.has_drift()); // >= 3x triggers
+    }
+
+    #[test]
+    fn drift_from_zero_to_positive_always_flags() {
+        let conn = setup_db();
+        // Old: auth -> 0 files (concept existed but no matches)
+        let old = make_resolution("task-1", "commit-a", "hash1", vec![("auth", vec![])]);
+        file_resolution::store(&conn, &old).unwrap();
+
+        // New: auth -> 2 files
+        let new_res = make_resolution(
+            "task-1",
+            "commit-b",
+            "hash1",
+            vec![("auth", vec!["a.rs", "b.rs"])],
+        );
+        let report = detect_drift(&conn, &new_res, None).unwrap().unwrap();
+        assert!(report.has_drift());
+        assert_eq!(report.drifted_concepts[0].old_file_count, 0);
+        assert_eq!(report.drifted_concepts[0].new_file_count, 2);
+    }
+
+    #[test]
+    fn drift_new_concept_not_in_old_flags() {
+        let conn = setup_db();
+        // Old: only "auth" concept
+        let old = make_resolution("task-1", "commit-a", "hash1", vec![("auth", vec!["a.rs"])]);
+        file_resolution::store(&conn, &old).unwrap();
+
+        // New: has "auth" + "db" (db is new, was 0 → 3)
+        let new_res = make_resolution(
+            "task-1",
+            "commit-b",
+            "hash2",
+            vec![("auth", vec!["a.rs"]), ("db", vec!["d.rs", "e.rs", "f.rs"])],
+        );
+        let report = detect_drift(&conn, &new_res, None).unwrap().unwrap();
+        assert!(report.has_drift());
+        assert_eq!(report.drifted_concepts.len(), 1);
+        assert_eq!(report.drifted_concepts[0].concept, "db");
+    }
+
+    #[test]
+    fn drift_custom_threshold() {
+        let conn = setup_db();
+        // Old: auth -> 2 files
+        let old = make_resolution(
+            "task-1",
+            "commit-a",
+            "hash1",
+            vec![("auth", vec!["a.rs", "b.rs"])],
+        );
+        file_resolution::store(&conn, &old).unwrap();
+
+        // New: auth -> 3 files (1.5x)
+        let new_res = make_resolution(
+            "task-1",
+            "commit-b",
+            "hash1",
+            vec![("auth", vec!["a.rs", "b.rs", "c.rs"])],
+        );
+
+        // At 1.5x threshold: 3/2 = 1.5 which is >= 1.5, so flags
+        let report = detect_drift(&conn, &new_res, Some(1.5)).unwrap().unwrap();
+        assert!(report.has_drift());
+
+        // At 2.0x threshold: 3/2 = 1.5 which is < 2.0, so no drift
+        // Need to re-store old since it was consumed
+        file_resolution::store(&conn, &old).unwrap();
+        let report = detect_drift(&conn, &new_res, Some(2.0)).unwrap().unwrap();
+        assert!(!report.has_drift());
+    }
+
+    #[test]
+    fn drift_multiple_concepts_mixed() {
+        let conn = setup_db();
+        // Old: auth -> 2, config -> 5
+        let old = make_resolution(
+            "task-1",
+            "commit-a",
+            "hash1",
+            vec![
+                ("auth", vec!["a1.rs", "a2.rs"]),
+                ("config", vec!["c1.rs", "c2.rs", "c3.rs", "c4.rs", "c5.rs"]),
+            ],
+        );
+        file_resolution::store(&conn, &old).unwrap();
+
+        // New: auth -> 8 (4x, drifted), config -> 7 (1.4x, not drifted)
+        let new_res = make_resolution(
+            "task-1",
+            "commit-b",
+            "hash1",
+            vec![
+                (
+                    "auth",
+                    vec![
+                        "a1.rs", "a2.rs", "a3.rs", "a4.rs", "a5.rs", "a6.rs", "a7.rs", "a8.rs",
+                    ],
+                ),
+                (
+                    "config",
+                    vec![
+                        "c1.rs", "c2.rs", "c3.rs", "c4.rs", "c5.rs", "c6.rs", "c7.rs",
+                    ],
+                ),
+            ],
+        );
+        let report = detect_drift(&conn, &new_res, None).unwrap().unwrap();
+        assert!(report.has_drift());
+        assert_eq!(report.drifted_concepts.len(), 1);
+        assert_eq!(report.drifted_concepts[0].concept, "auth");
+        assert_eq!(report.old_total_files, 7); // 2 + 5
+        assert_eq!(report.new_total_files, 15); // 8 + 7
+    }
+
+    #[test]
+    fn drift_summary_no_drift() {
+        let report = DriftReport {
+            task_id: "task-1".to_string(),
+            threshold: 3.0,
+            drifted_concepts: vec![],
+            old_total_files: 3,
+            new_total_files: 4,
+        };
+        assert!(report.summary().contains("no metadata drift detected"));
+    }
+
+    #[test]
+    fn drift_summary_with_drift() {
+        let report = DriftReport {
+            task_id: "task-1".to_string(),
+            threshold: 3.0,
+            drifted_concepts: vec![ConceptDrift {
+                concept: "auth".to_string(),
+                old_file_count: 3,
+                new_file_count: 11,
+            }],
+            old_total_files: 3,
+            new_total_files: 11,
+        };
+        let s = report.summary();
+        assert!(s.contains("metadata drift detected"));
+        assert!(s.contains("3 → 11"));
+        assert!(s.contains("auth"));
     }
 
     #[test]
