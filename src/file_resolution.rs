@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use crate::import_graph;
 use crate::intent::TargetArea;
 use crate::module_detect;
+use crate::public_api;
 
 /// A single concept-to-files mapping: which files and modules correspond to a concept.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -322,6 +323,17 @@ pub fn resolve(
     let mut affected_modules: Vec<String> = all_affected_modules.into_iter().collect();
     affected_modules.sort();
 
+    // Extract boundary signatures for affected modules
+    let apis = public_api::extract_public_apis(&modules);
+    let mut boundary_signatures = Vec::new();
+    for module_name in &affected_modules {
+        if let Some(api) = apis.get(module_name) {
+            boundary_signatures.extend(public_api::format_boundary_signatures(api));
+        }
+    }
+    boundary_signatures.sort();
+    boundary_signatures.dedup();
+
     FileResolution {
         task_id: task_id.to_string(),
         base_commit: base_commit.to_string(),
@@ -330,7 +342,7 @@ pub fn resolve(
         derived: DerivedFields {
             affected_modules,
             blast_radius,
-            boundary_signatures: Vec::new(), // Populated by the public API extractor (separate bead)
+            boundary_signatures,
         },
     }
 }
@@ -962,6 +974,86 @@ mod tests {
         let result = compute_blast_radius(&graph, &sources);
         assert!(!result.contains(&a)); // source not in blast radius
         assert!(result.contains(&b));
+    }
+
+    #[test]
+    fn test_boundary_signatures_populated() {
+        let tmp = setup_project(&[
+            ("main.rs", "mod config;\nfn main() {}"),
+            ("config.rs", "pub struct Config;\npub fn load_config() -> Config { Config }\n"),
+        ]);
+        let areas = vec![TargetArea {
+            concept: "config".to_string(),
+            reasoning: "needs config".to_string(),
+        }];
+        let res = resolve(tmp.path(), "task-1", "commit", "hash", &areas);
+        // boundary_signatures should contain pub items from config.rs
+        assert!(
+            !res.derived.boundary_signatures.is_empty(),
+            "boundary_signatures should be populated for resolved modules"
+        );
+        assert!(
+            res.derived
+                .boundary_signatures
+                .iter()
+                .any(|s| s.contains("Config")),
+            "should contain Config struct signature"
+        );
+        assert!(
+            res.derived
+                .boundary_signatures
+                .iter()
+                .any(|s| s.contains("load_config")),
+            "should contain load_config function signature"
+        );
+    }
+
+    #[test]
+    fn test_boundary_signatures_empty_when_no_pub_items() {
+        let tmp = setup_project(&[
+            ("main.rs", "mod internal;\nfn main() {}"),
+            ("internal.rs", "fn private_fn() {}\nstruct PrivateStruct;\n"),
+        ]);
+        let areas = vec![TargetArea {
+            concept: "internal".to_string(),
+            reasoning: "internal changes".to_string(),
+        }];
+        let res = resolve(tmp.path(), "task-1", "commit", "hash", &areas);
+        // No pub items → empty boundary_signatures
+        assert!(
+            res.derived.boundary_signatures.is_empty(),
+            "boundary_signatures should be empty when resolved files have no pub items"
+        );
+    }
+
+    #[test]
+    fn test_boundary_signatures_only_from_affected_modules() {
+        // Use subdirectory modules so they are separate modules (not both in "crate")
+        let tmp = setup_project(&[
+            ("main.rs", "mod auth;\nmod db;\nfn main() {}"),
+            ("auth/mod.rs", "pub fn login() {}"),
+            ("db/mod.rs", "pub fn query() {}"),
+        ]);
+        // Only resolve "auth", not "db"
+        let areas = vec![TargetArea {
+            concept: "auth".to_string(),
+            reasoning: "auth changes".to_string(),
+        }];
+        let res = resolve(tmp.path(), "task-1", "commit", "hash", &areas);
+        assert!(
+            res.derived
+                .boundary_signatures
+                .iter()
+                .any(|s| s.contains("login")),
+            "should include auth signatures"
+        );
+        assert!(
+            !res.derived
+                .boundary_signatures
+                .iter()
+                .any(|s| s.contains("query")),
+            "should NOT include db signatures (not an affected module)"
+        );
     }
 
     #[test]
