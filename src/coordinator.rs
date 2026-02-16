@@ -410,7 +410,9 @@ fn build_in_progress_list(pool: &WorkerPool, db_conn: &Connection) -> Vec<InProg
     pool.snapshot()
         .iter()
         .filter(|(_, state, bead_id)| {
-            *state == crate::pool::WorkerState::Coding && bead_id.is_some()
+            (*state == crate::pool::WorkerState::Coding
+                || *state == crate::pool::WorkerState::Completed)
+                && bead_id.is_some()
         })
         .map(|(worker_id, _, bead_id)| {
             let bead_id_str = bead_id.unwrap().to_string();
