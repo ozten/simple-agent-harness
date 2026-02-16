@@ -5,7 +5,7 @@
 /// blacksmith database, and prepends non-empty outputs to the prompt content
 /// separated by "\n---\n". Empty command output and empty briefs are silently skipped.
 use crate::brief;
-use crate::config::PromptConfig;
+use crate::config::{MetricsTargetsConfig, PromptConfig};
 use std::path::Path;
 use std::process::Command;
 
@@ -73,6 +73,8 @@ pub fn assemble(
     prompt_config: &PromptConfig,
     fallback_prompt_file: &Path,
     db_path: &Path,
+    targets_config: Option<&MetricsTargetsConfig>,
+    supported_metrics: Option<&[&str]>,
 ) -> Result<String, PromptError> {
     // Determine prompt file path
     let prompt_path = prompt_config
@@ -103,7 +105,7 @@ pub fn assemble(
     }
 
     // 2. Generate brief from blacksmith.db (silently skipped if no DB or no improvements)
-    match brief::generate_brief(db_path, None, None) {
+    match brief::generate_brief(db_path, targets_config, supported_metrics) {
         Ok(text) if !text.is_empty() => {
             tracing::debug!(bytes = text.len(), "brief injected into prompt");
             prefix_parts.push(text);
@@ -163,7 +165,7 @@ mod tests {
             prepend_commands: vec![],
         };
 
-        let result = assemble(&config, &prompt_path, &dir.path().join("blacksmith.db")).unwrap();
+        let result = assemble(&config, &prompt_path, &dir.path().join("blacksmith.db"), None, None).unwrap();
         assert_eq!(result, "Hello, world!");
     }
 
@@ -180,7 +182,7 @@ mod tests {
             prepend_commands: vec![],
         };
 
-        let result = assemble(&config, &fallback, dir.path()).unwrap();
+        let result = assemble(&config, &fallback, dir.path(), None, None).unwrap();
         assert_eq!(result, "custom content");
     }
 
@@ -195,7 +197,7 @@ mod tests {
             prepend_commands: vec![],
         };
 
-        let result = assemble(&config, &fallback, dir.path()).unwrap();
+        let result = assemble(&config, &fallback, dir.path(), None, None).unwrap();
         assert_eq!(result, "fallback content");
     }
 
@@ -210,7 +212,7 @@ mod tests {
             prepend_commands: vec!["echo 'prepended text'".to_string()],
         };
 
-        let result = assemble(&config, &prompt_path, &dir.path().join("blacksmith.db")).unwrap();
+        let result = assemble(&config, &prompt_path, &dir.path().join("blacksmith.db"), None, None).unwrap();
         assert_eq!(result, "prepended text\n---\nmain prompt");
     }
 
@@ -225,7 +227,7 @@ mod tests {
             prepend_commands: vec!["echo 'first'".to_string(), "echo 'second'".to_string()],
         };
 
-        let result = assemble(&config, &prompt_path, &dir.path().join("blacksmith.db")).unwrap();
+        let result = assemble(&config, &prompt_path, &dir.path().join("blacksmith.db"), None, None).unwrap();
         assert_eq!(result, "first\n---\nsecond\n---\nmain prompt");
     }
 
@@ -244,7 +246,7 @@ mod tests {
             ],
         };
 
-        let result = assemble(&config, &prompt_path, &dir.path().join("blacksmith.db")).unwrap();
+        let result = assemble(&config, &prompt_path, &dir.path().join("blacksmith.db"), None, None).unwrap();
         assert_eq!(result, "visible\n---\nalso visible\n---\nmain prompt");
     }
 
@@ -259,7 +261,7 @@ mod tests {
             prepend_commands: vec!["true".to_string(), "true".to_string()],
         };
 
-        let result = assemble(&config, &prompt_path, &dir.path().join("blacksmith.db")).unwrap();
+        let result = assemble(&config, &prompt_path, &dir.path().join("blacksmith.db"), None, None).unwrap();
         assert_eq!(result, "main prompt");
     }
 
@@ -274,7 +276,7 @@ mod tests {
             prepend_commands: vec!["echo 'partial'; exit 1".to_string()],
         };
 
-        let result = assemble(&config, &prompt_path, &dir.path().join("blacksmith.db")).unwrap();
+        let result = assemble(&config, &prompt_path, &dir.path().join("blacksmith.db"), None, None).unwrap();
         assert_eq!(result, "partial\n---\nmain prompt");
     }
 
@@ -290,6 +292,8 @@ mod tests {
             &config,
             Path::new("/nonexistent/prompt.md"),
             &dir.path().join("blacksmith.db"),
+            None,
+            None,
         );
         assert!(result.is_err());
         let err = result.unwrap_err();
@@ -308,7 +312,7 @@ mod tests {
             prepend_commands: vec!["echo ''".to_string()],
         };
 
-        let result = assemble(&config, &prompt_path, &dir.path().join("blacksmith.db")).unwrap();
+        let result = assemble(&config, &prompt_path, &dir.path().join("blacksmith.db"), None, None).unwrap();
         assert_eq!(result, "main prompt");
     }
 
@@ -323,7 +327,7 @@ mod tests {
             prepend_commands: vec!["printf 'line1\\nline2\\nline3'".to_string()],
         };
 
-        let result = assemble(&config, &prompt_path, &dir.path().join("blacksmith.db")).unwrap();
+        let result = assemble(&config, &prompt_path, &dir.path().join("blacksmith.db"), None, None).unwrap();
         assert_eq!(result, "line1\nline2\nline3\n---\nmain prompt");
     }
 
@@ -351,7 +355,7 @@ mod tests {
             prepend_commands: vec![],
         };
 
-        let result = assemble(&config, &prompt_path, &dir.path().join("blacksmith.db")).unwrap();
+        let result = assemble(&config, &prompt_path, &dir.path().join("blacksmith.db"), None, None).unwrap();
         assert_eq!(result, "main prompt");
     }
 
@@ -369,7 +373,7 @@ mod tests {
             prepend_commands: vec![],
         };
 
-        let result = assemble(&config, &prompt_path, &dir.path().join("blacksmith.db")).unwrap();
+        let result = assemble(&config, &prompt_path, &dir.path().join("blacksmith.db"), None, None).unwrap();
         assert_eq!(result, "main prompt");
     }
 
@@ -391,7 +395,7 @@ mod tests {
             prepend_commands: vec!["echo 'prepend output'".to_string()],
         };
 
-        let result = assemble(&config, &prompt_path, &dir.path().join("blacksmith.db")).unwrap();
+        let result = assemble(&config, &prompt_path, &dir.path().join("blacksmith.db"), None, None).unwrap();
         // Sequence: prepend output, then brief, then prompt
         assert!(result.starts_with("prepend output\n---\n## OPEN IMPROVEMENTS"));
         assert!(result.contains("R1 [workflow] Batch file reads"));
@@ -415,10 +419,49 @@ mod tests {
             prepend_commands: vec![],
         };
 
-        let result = assemble(&config, &prompt_path, &dir.path().join("blacksmith.db")).unwrap();
+        let result = assemble(&config, &prompt_path, &dir.path().join("blacksmith.db"), None, None).unwrap();
         // Brief should be prepended to prompt
         assert!(result.starts_with("## OPEN IMPROVEMENTS (1 of 1)"));
         assert!(result.contains("R1 [cost] Reduce API calls"));
+        assert!(result.ends_with("\n---\nmain prompt"));
+    }
+
+    #[test]
+    fn test_assemble_passes_targets_config_to_brief() {
+        use crate::config::{MetricsTargetsConfig, TargetRule};
+
+        let dir = tempfile::tempdir().unwrap();
+        let prompt_path = dir.path().join("prompt.md");
+        std::fs::write(&prompt_path, "main prompt").unwrap();
+
+        // Create DB with an observation that misses a target
+        let db_path = dir.path().join("blacksmith.db");
+        let conn = crate::db::open_or_create(&db_path).unwrap();
+        let data = serde_json::json!({"cost.estimate_usd": 5.0});
+        crate::db::upsert_observation(&conn, 1, "2026-01-01T00:00:00Z", None, None, &data.to_string()).unwrap();
+        drop(conn);
+
+        let targets = MetricsTargetsConfig {
+            rules: vec![TargetRule {
+                kind: "cost.estimate_usd".to_string(),
+                compare: "avg".to_string(),
+                relative_to: None,
+                threshold: 1.0,
+                direction: "below".to_string(),
+                label: "Cost per session".to_string(),
+                unit: Some("$".to_string()),
+            }],
+            streak_threshold: 3,
+        };
+
+        let config = PromptConfig {
+            file: None,
+            prepend_commands: vec![],
+        };
+
+        let result = assemble(&config, &prompt_path, &db_path, Some(&targets), None).unwrap();
+        assert!(result.contains("TARGET WARNING"), "Expected target warning in brief, got: {result}");
+        assert!(result.contains("Cost per session"));
         assert!(result.ends_with("\n---\nmain prompt"));
     }
 }
