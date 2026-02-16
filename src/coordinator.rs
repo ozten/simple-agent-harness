@@ -84,7 +84,15 @@ pub async fn run(
         };
     }
 
-    let mut pool = WorkerPool::new(&config.workers, repo_dir.clone(), worktrees_dir);
+    // Load global iteration counter so worker output files use numeric naming
+    let counter_path = data_dir.counter();
+    let initial_session_id = load_counter(&counter_path);
+    let mut pool = WorkerPool::new(
+        &config.workers,
+        repo_dir.clone(),
+        worktrees_dir,
+        initial_session_id,
+    );
     let output_dir = data_dir.sessions_dir();
     let integration_queue = IntegrationQueue::new(repo_dir, config.workers.base_branch.clone());
     let mut circuit_breaker = CircuitBreaker::new();
@@ -270,6 +278,9 @@ pub async fn run(
                     .await
                 {
                     Ok((worker_id, assignment_id)) => {
+                        // Persist session counter so other subsystems see
+                        // the updated value if the coordinator crashes/restarts.
+                        save_counter(&counter_path, pool.next_session_id());
                         tracing::info!(
                             worker_id,
                             assignment_id,
@@ -733,6 +744,21 @@ impl StopFileStatusExt for crate::signals::StopFileStatus {
     }
 }
 
+/// Load the global iteration counter from a file. Returns 0 if not found.
+fn load_counter(path: &std::path::Path) -> u64 {
+    match std::fs::read_to_string(path) {
+        Ok(contents) => contents.trim().parse().unwrap_or(0),
+        Err(_) => 0,
+    }
+}
+
+/// Save the global iteration counter to a file.
+fn save_counter(path: &std::path::Path, value: u64) {
+    if let Err(e) = std::fs::write(path, value.to_string()) {
+        tracing::error!(error = %e, path = %path.display(), "failed to save iteration counter");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -913,7 +939,7 @@ mod tests {
             base_branch: "main".to_string(),
             worktrees_dir: "worktrees".to_string(),
         };
-        let pool = WorkerPool::new(&config, dir.path().to_path_buf(), wt_dir);
+        let pool = WorkerPool::new(&config, dir.path().to_path_buf(), wt_dir, 0);
         let db_path = dir.path().join("test.db");
         let db_conn = db::open_or_create(&db_path).unwrap();
         let in_progress = build_in_progress_list(&pool, &db_conn);
@@ -1102,7 +1128,7 @@ mod tests {
             base_branch: "main".to_string(),
             worktrees_dir: "worktrees".to_string(),
         };
-        let mut pool = WorkerPool::new(&workers_config, repo.to_path_buf(), wt_dir);
+        let mut pool = WorkerPool::new(&workers_config, repo.to_path_buf(), wt_dir, 0);
 
         // Use set_worker_for_test to set up the coding state
         pool.set_worker_state_for_test(
@@ -1164,6 +1190,7 @@ mod tests {
             &workers_config,
             dir.path().to_path_buf(),
             dir.path().join("wt"),
+            0,
         );
         pool.set_worker_state_for_test(
             0,
@@ -1222,6 +1249,7 @@ mod tests {
             &workers_config,
             dir.path().to_path_buf(),
             dir.path().join("wt"),
+            0,
         );
         pool.set_worker_state_for_test(
             0,
@@ -1274,6 +1302,7 @@ mod tests {
             &workers_config,
             dir.path().to_path_buf(),
             dir.path().join("wt"),
+            0,
         );
         pool.set_worker_state_for_test(
             0,
@@ -1327,6 +1356,7 @@ mod tests {
             &workers_config,
             dir.path().to_path_buf(),
             dir.path().join("wt"),
+            0,
         );
         pool.set_worker_state_for_test(
             0,

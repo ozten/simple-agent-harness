@@ -2685,3 +2685,29 @@
 - simple-agent-harness-cgo (P2): Add refactor proposal generation from architecture analysis
 - simple-agent-harness-83g (P3): Add migration map generation for refactor tasks
 - simple-agent-harness-34d (P3): Add architecture agent configuration knobs
+
+--- 2026-02-16 00:50:35 | simple-agent-harness-82c ---
+## Last Session: Fix session file naming for parallel workers (2026-02-16)
+
+### What Was Done
+- Fixed bead simple-agent-harness-82c (P0): Worker output files now use numeric `{N}.jsonl` naming
+- Changed `pool.rs` to use a `next_session_id` counter instead of `worker-{id}-{bead_id}.jsonl` naming
+- The counter is initialized from the global iteration counter file (`data_dir.counter()`) in `coordinator.rs`
+- Counter is persisted back to the counter file after each successful spawn
+- No changes needed to compress.rs, retention.rs, gc.rs, or metrics_cmd.rs — their existing numeric parsers now correctly find worker output files
+- Added `test_session_files_use_numeric_naming` test verifying the fix
+- All 1124 tests pass, clippy and fmt clean
+
+### Files Changed
+- `src/pool.rs`: Added `next_session_id` field to `WorkerPool`, updated `new()` to accept initial counter, changed `spawn_worker` to use numeric naming, added `next_session_id()` getter, added new test
+- `src/coordinator.rs`: Added `load_counter`/`save_counter` helper functions, loads counter on startup and saves after each spawn, updated all test call sites
+
+### Current State
+- Worker session files now follow the same `{N}.jsonl` convention as serial mode
+- Compress, retention/gc, and metrics subsystems will correctly discover and process parallel worker output files
+- Counter is shared between serial runner (runner.rs) and parallel coordinator (coordinator.rs) via the same counter file
+
+### Suggested Next Tasks
+- simple-agent-harness-cgo (P2): Add refactor proposal generation from architecture analysis
+- simple-agent-harness-83g (P3): Add migration map generation for refactor tasks
+- simple-agent-harness-34d (P3): Add architecture agent configuration knobs

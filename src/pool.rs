@@ -87,6 +87,10 @@ pub struct WorkerPool {
     repo_dir: PathBuf,
     worktrees_dir: PathBuf,
     base_branch: String,
+    /// Next numeric session ID to use for output file naming.
+    /// Ensures worker output files follow the `{N}.jsonl` convention
+    /// expected by compress, retention/gc, and metrics subsystems.
+    next_session_id: u64,
 }
 
 /// Errors from worker pool operations.
@@ -132,7 +136,16 @@ impl From<rusqlite::Error> for PoolError {
 
 impl WorkerPool {
     /// Create a new worker pool with `max` slots.
-    pub fn new(config: &WorkersConfig, repo_dir: PathBuf, worktrees_base: PathBuf) -> Self {
+    ///
+    /// `initial_session_id` should be loaded from the global iteration counter file
+    /// so that worker output files continue the numeric `{N}.jsonl` sequence expected
+    /// by compress, retention/gc, and metrics subsystems.
+    pub fn new(
+        config: &WorkersConfig,
+        repo_dir: PathBuf,
+        worktrees_base: PathBuf,
+        initial_session_id: u64,
+    ) -> Self {
         let workers = (0..config.max)
             .map(|id| Worker {
                 id,
@@ -149,6 +162,7 @@ impl WorkerPool {
             repo_dir,
             worktrees_dir: worktrees_base,
             base_branch: config.base_branch.clone(),
+            next_session_id: initial_session_id,
         }
     }
 
@@ -156,6 +170,11 @@ impl WorkerPool {
     #[allow(dead_code)]
     pub fn capacity(&self) -> u32 {
         self.workers.len() as u32
+    }
+
+    /// Current value of the session counter (for persisting back to the counter file).
+    pub fn next_session_id(&self) -> u64 {
+        self.next_session_id
     }
 
     /// Number of idle workers.
@@ -221,8 +240,11 @@ impl WorkerPool {
             None,
         )?;
 
-        // Build the output file path for this worker
-        let output_file = output_dir.join(format!("worker-{}-{}.jsonl", worker_id, bead_id));
+        // Build the output file path using numeric naming convention ({N}.jsonl)
+        // so that compress, retention/gc, and metrics subsystems can find it.
+        let session_id = self.next_session_id;
+        self.next_session_id += 1;
+        let output_file = output_dir.join(format!("{}.jsonl", session_id));
 
         // Spawn the agent process in the worktree
         let handle =
@@ -591,7 +613,7 @@ mod tests {
         let dir = init_test_repo();
         let wt_dir = dir.path().join("worktrees");
         let config = test_workers_config(3);
-        let pool = WorkerPool::new(&config, dir.path().to_path_buf(), wt_dir);
+        let pool = WorkerPool::new(&config, dir.path().to_path_buf(), wt_dir, 0);
 
         assert_eq!(pool.capacity(), 3);
         assert_eq!(pool.idle_count(), 3);
@@ -611,7 +633,7 @@ mod tests {
         let dir = init_test_repo();
         let wt_dir = dir.path().join("worktrees");
         let config = test_workers_config(2);
-        let pool = WorkerPool::new(&config, dir.path().to_path_buf(), wt_dir);
+        let pool = WorkerPool::new(&config, dir.path().to_path_buf(), wt_dir, 0);
 
         assert!(pool.completed_workers().is_empty());
     }
@@ -621,7 +643,7 @@ mod tests {
         let dir = init_test_repo();
         let wt_dir = dir.path().join("worktrees");
         let config = test_workers_config(2);
-        let pool = WorkerPool::new(&config, dir.path().to_path_buf(), wt_dir);
+        let pool = WorkerPool::new(&config, dir.path().to_path_buf(), wt_dir, 0);
 
         assert!(pool.active_worktree_paths().is_empty());
     }
@@ -635,7 +657,7 @@ mod tests {
         std::fs::create_dir_all(&output_dir).unwrap();
 
         let workers_config = test_workers_config(2);
-        let mut pool = WorkerPool::new(&workers_config, dir.path().to_path_buf(), wt_dir);
+        let mut pool = WorkerPool::new(&workers_config, dir.path().to_path_buf(), wt_dir, 0);
 
         let db_path = dir.path().join("test.db");
         let conn = db::open_or_create(&db_path).unwrap();
@@ -686,7 +708,7 @@ mod tests {
         std::fs::create_dir_all(&output_dir).unwrap();
 
         let workers_config = test_workers_config(1);
-        let mut pool = WorkerPool::new(&workers_config, dir.path().to_path_buf(), wt_dir);
+        let mut pool = WorkerPool::new(&workers_config, dir.path().to_path_buf(), wt_dir, 0);
 
         let db_path = dir.path().join("test.db");
         let conn = db::open_or_create(&db_path).unwrap();
@@ -733,7 +755,7 @@ mod tests {
         std::fs::create_dir_all(&output_dir).unwrap();
 
         let workers_config = test_workers_config(1);
-        let mut pool = WorkerPool::new(&workers_config, dir.path().to_path_buf(), wt_dir);
+        let mut pool = WorkerPool::new(&workers_config, dir.path().to_path_buf(), wt_dir, 0);
 
         let db_path = dir.path().join("test.db");
         let conn = db::open_or_create(&db_path).unwrap();
@@ -763,7 +785,7 @@ mod tests {
 
         // Pool with 1 worker
         let workers_config = test_workers_config(1);
-        let mut pool = WorkerPool::new(&workers_config, dir.path().to_path_buf(), wt_dir);
+        let mut pool = WorkerPool::new(&workers_config, dir.path().to_path_buf(), wt_dir, 0);
 
         let db_path = dir.path().join("test.db");
         let conn = db::open_or_create(&db_path).unwrap();
@@ -798,7 +820,7 @@ mod tests {
         std::fs::create_dir_all(&output_dir).unwrap();
 
         let workers_config = test_workers_config(1);
-        let mut pool = WorkerPool::new(&workers_config, dir.path().to_path_buf(), wt_dir);
+        let mut pool = WorkerPool::new(&workers_config, dir.path().to_path_buf(), wt_dir, 0);
 
         let db_path = dir.path().join("test.db");
         let conn = db::open_or_create(&db_path).unwrap();
@@ -827,7 +849,7 @@ mod tests {
         std::fs::create_dir_all(&output_dir).unwrap();
 
         let workers_config = test_workers_config(3);
-        let mut pool = WorkerPool::new(&workers_config, dir.path().to_path_buf(), wt_dir);
+        let mut pool = WorkerPool::new(&workers_config, dir.path().to_path_buf(), wt_dir, 0);
 
         let db_path = dir.path().join("test.db");
         let conn = db::open_or_create(&db_path).unwrap();
@@ -858,6 +880,49 @@ mod tests {
         }
 
         assert_eq!(pool.completed_workers().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_session_files_use_numeric_naming() {
+        let dir = init_test_repo();
+        let wt_dir = dir.path().join("worktrees");
+        std::fs::create_dir_all(&wt_dir).unwrap();
+        let output_dir = dir.path().join("output");
+        std::fs::create_dir_all(&output_dir).unwrap();
+
+        let workers_config = test_workers_config(2);
+        // Start counter at 42 to verify it's respected
+        let mut pool = WorkerPool::new(&workers_config, dir.path().to_path_buf(), wt_dir, 42);
+        let db_path = dir.path().join("test.db");
+        let conn = db::open_or_create(&db_path).unwrap();
+        let agent = test_agent_config();
+
+        // Spawn two workers
+        pool.spawn_worker("beads-num-a", &agent, "test", &output_dir, &conn)
+            .await
+            .unwrap();
+        pool.spawn_worker("beads-num-b", &agent, "test", &output_dir, &conn)
+            .await
+            .unwrap();
+
+        // Counter should have advanced
+        assert_eq!(pool.next_session_id(), 44);
+
+        // Output files should be named 42.jsonl and 43.jsonl
+        assert!(output_dir.join("42.jsonl").exists());
+        assert!(output_dir.join("43.jsonl").exists());
+        // No worker-prefixed files should exist
+        let entries: Vec<_> = std::fs::read_dir(&output_dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .collect();
+        for name in &entries {
+            assert!(
+                !name.starts_with("worker-"),
+                "found worker-prefixed file: {name}"
+            );
+        }
     }
 
     #[test]
