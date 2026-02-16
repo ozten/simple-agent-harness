@@ -32,6 +32,8 @@ mod retention;
 mod retry;
 mod runner;
 mod scheduler;
+#[cfg(feature = "serve")]
+mod serve;
 mod session;
 mod signal_correlator;
 mod signals;
@@ -148,6 +150,16 @@ enum Commands {
     Adapter {
         #[command(subcommand)]
         action: AdapterAction,
+    },
+    /// Start the HTTP API server (requires --features serve)
+    #[cfg(feature = "serve")]
+    Serve {
+        /// Port to listen on (default: from config or 8420)
+        #[arg(long)]
+        port: Option<u16>,
+        /// Bind address (default: from config or 0.0.0.0)
+        #[arg(long)]
+        bind: Option<String>,
     },
     /// Run architecture analysis on the codebase
     Arch {
@@ -1089,6 +1101,22 @@ async fn main() {
                     std::process::exit(1);
                 }
             }
+        }
+        return;
+    }
+
+    #[cfg(feature = "serve")]
+    if let Some(Commands::Serve { port, bind }) = &cli.command {
+        let mut config = HarnessConfig::load(&cli.config).unwrap_or_default();
+        if let Some(p) = port {
+            config.serve.port = *p;
+        }
+        if let Some(b) = bind {
+            config.serve.bind = b.clone();
+        }
+        if let Err(e) = serve::run(&config.serve).await {
+            eprintln!("Serve error: {e}");
+            std::process::exit(1);
         }
         return;
     }

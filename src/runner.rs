@@ -979,6 +979,7 @@ mod tests {
             architecture: ArchitectureConfig::default(),
             quality_gates: QualityGatesConfig::default(),
             improvements: ImprovementsConfig::default(),
+            serve: ServeConfig::default(),
         }
     }
 

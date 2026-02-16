@@ -1,11 +1,22 @@
-## Session 177: No work available, queue empty
+## Session 178: Scaffold serve subcommand with feature gate and health endpoint
 
-### Status
-- Ready queue is empty (0 open beads)
-- All 195 beads closed
-- Codebase is clean: all tests pass, zero clippy warnings, formatting clean
+### Completed
+- Bead simple-agent-harness-72hv: Scaffold serve subcommand
+- Added axum + tower-http as optional deps behind `serve` Cargo feature flag
+- Created src/serve.rs with axum router and GET /api/health endpoint returning {"ok":true}
+- Added Serve variant to CLI Commands enum with --port and --bind args
+- Added ServeConfig to config.rs with port (default 8420) and bind (default 0.0.0.0)
+- CORS headers configured via CorsLayer::permissive()
+- `cargo build` without features does NOT pull in axum (verified via cargo tree)
+- `cargo build --features serve` compiles cleanly
+- All 1077 tests pass, zero clippy warnings
+
+### Current State
+- Codebase is clean: tests pass, clippy clean, fmt clean
+- The serve feature is fully gated behind `--features serve`
+- 7 beads are now unblocked by this work (72hv was the bottleneck)
 
 ### Suggested Next Tasks
-- File new beads from a V4 spec or new requirements if available
-- Consider performance profiling or integration testing
-- The singleton lock issue (MEMORY.md) may still need addressing
+- simple-agent-harness-srg0: Create blacksmith-ui workspace crate (P1, ready)
+- simple-agent-harness-9b6v: Implement project and status API endpoints (P1, now unblocked)
+- simple-agent-harness-i7t0: Implement UDP multicast heartbeat (P2, now unblocked)

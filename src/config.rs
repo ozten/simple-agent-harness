@@ -25,6 +25,7 @@ pub struct HarnessConfig {
     pub architecture: ArchitectureConfig,
     pub quality_gates: QualityGatesConfig,
     pub improvements: ImprovementsConfig,
+    pub serve: ServeConfig,
 }
 
 impl HarnessConfig {
@@ -94,11 +95,10 @@ impl HarnessConfig {
             path: path.to_path_buf(),
             source: e,
         })?;
-        let config: HarnessConfig =
-            toml::from_str(&contents).map_err(|e| ConfigError::Parse {
-                path: path.to_path_buf(),
-                source: e,
-            })?;
+        let config: HarnessConfig = toml::from_str(&contents).map_err(|e| ConfigError::Parse {
+            path: path.to_path_buf(),
+            source: e,
+        })?;
         Ok(config)
     }
 
@@ -617,6 +617,24 @@ impl ArchitectureConfig {
 /// for the gate to pass. If any gate fails, the bead is NOT closed.
 ///
 /// Defaults are Rust-oriented but can be overridden for any language.
+#[derive(Debug, Deserialize, Clone)]
+#[serde(default)]
+pub struct ServeConfig {
+    /// HTTP server port. Default: 8420
+    pub port: u16,
+    /// Bind address. Default: 0.0.0.0
+    pub bind: String,
+}
+
+impl Default for ServeConfig {
+    fn default() -> Self {
+        Self {
+            port: 8420,
+            bind: "0.0.0.0".to_string(),
+        }
+    }
+}
+
 #[derive(Debug, Deserialize, Clone)]
 #[serde(default)]
 pub struct QualityGatesConfig {
@@ -2613,7 +2631,8 @@ max_iterations = 42
     #[test]
     fn test_no_config_file_returns_defaults() {
         // When no config file exists at all, should return defaults
-        let config = HarnessConfig::load(Path::new("/nonexistent/.blacksmith/config.toml")).unwrap();
+        let config =
+            HarnessConfig::load(Path::new("/nonexistent/.blacksmith/config.toml")).unwrap();
         assert_eq!(config.session.max_iterations, 25);
         assert_eq!(config.watchdog.stale_timeout_mins, 20);
     }

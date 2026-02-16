@@ -19,6 +19,11 @@ rusqlite = { version = "0.31", features = ["bundled"] }
 tempfile = "3"
 zstd = "0.13"
 fs2 = "0.4"
+axum = { version = "0.8", optional = true }
+tower-http = { version = "0.6", features = ["cors"], optional = true }
+
+[features]
+serve = ["axum", "tower-http"]
 
 [profile.dev]
 debug = "line-tables-only"   # Shrink debug info ~60%; backtraces still work
