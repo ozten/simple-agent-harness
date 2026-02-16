@@ -31,7 +31,7 @@ pub fn handle_log(db_path: &Path, file: &Path) -> Result<(), String> {
         "  turns: {}  cost: ${:.2}  duration: {}s",
         result.turns_total,
         result.cost_estimate_usd,
-        result.session_duration_ms / 1000
+        result.session_duration_secs as u64
     );
 
     Ok(())
@@ -79,8 +79,7 @@ pub fn handle_status(db_path: &Path, last: i64) -> Result<(), String> {
         let narration = data["turns.narration_only"].as_u64().unwrap_or(0);
         let parallel = data["turns.parallel"].as_u64().unwrap_or(0);
         let cost = data["cost.estimate_usd"].as_f64().unwrap_or(0.0);
-        let duration_ms = data["session.duration_ms"].as_u64().unwrap_or(0);
-        let duration_s = duration_ms / 1000;
+        let duration_s = data["session.duration_secs"].as_f64().unwrap_or(0.0) as u64;
 
         total_turns += turns;
         total_cost += cost;
@@ -352,7 +351,7 @@ pub fn handle_reingest(
                     "  session {session}: turns={} cost=${:.2} duration={}s",
                     result.turns_total,
                     result.cost_estimate_usd,
-                    result.session_duration_ms / 1000
+                    result.session_duration_secs as u64
                 );
             }
             Err(e) => {
@@ -528,7 +527,7 @@ fn list_tables(conn: &Connection) -> rusqlite::Result<Vec<String>> {
 ///   cache_creation_tokens -> cost.cache_creation_tokens
 ///   cost_usd -> cost.estimate_usd
 ///   output_bytes -> session.output_bytes
-///   duration_secs -> session.duration_ms (* 1000)
+///   duration_secs -> session.duration_secs
 ///   exit_code -> session.exit_code
 fn migrate_sessions(v1: &Connection, v2: &Connection) -> rusqlite::Result<u64> {
     // Discover available columns in V1 sessions table
@@ -608,8 +607,6 @@ fn migrate_sessions(v1: &Connection, v2: &Connection) -> rusqlite::Result<u64> {
             .and_then(|i| row.get(i).ok())
             .unwrap_or(0);
         let exit_code: Option<i64> = col_index("exit_code").and_then(|i| row.get(i).ok());
-        let duration_ms = duration_secs * 1000;
-
         // Write events
         let event_mappings: Vec<(&str, String)> = vec![
             ("turns.total", turns_total.to_string()),
@@ -622,7 +619,7 @@ fn migrate_sessions(v1: &Connection, v2: &Connection) -> rusqlite::Result<u64> {
             ("cost.cache_creation_tokens", cache_creation.to_string()),
             ("cost.estimate_usd", format!("{cost_usd:.6}")),
             ("session.output_bytes", output_bytes.to_string()),
-            ("session.duration_ms", duration_ms.to_string()),
+            ("session.duration_secs", duration_secs.to_string()),
         ];
 
         for (kind, value) in &event_mappings {
@@ -672,7 +669,7 @@ fn migrate_sessions(v1: &Connection, v2: &Connection) -> rusqlite::Result<u64> {
             "session.output_bytes".into(),
             serde_json::json!(output_bytes),
         );
-        map.insert("session.duration_ms".into(), serde_json::json!(duration_ms));
+        map.insert("session.duration_secs".into(), serde_json::json!(duration_secs));
         if let Some(code) = exit_code {
             map.insert("session.exit_code".into(), serde_json::json!(code));
         }
@@ -1319,7 +1316,7 @@ mod tests {
         "cost.cache_creation_tokens",
         "cost.estimate_usd",
         "session.output_bytes",
-        "session.duration_ms",
+        "session.duration_secs",
         "commit.detected",
     ];
 
@@ -1363,7 +1360,7 @@ mod tests {
         let (_dir, path) = test_db_path();
         let conn = db::open_or_create(&path).unwrap();
 
-        let data = r#"{"turns.total":42,"turns.narration_only":3,"turns.parallel":5,"cost.estimate_usd":1.5,"session.duration_ms":120000}"#;
+        let data = r#"{"turns.total":42,"turns.narration_only":3,"turns.parallel":5,"cost.estimate_usd":1.5,"session.duration_secs":120}"#;
         db::upsert_observation(
             &conn,
             1,
@@ -1394,7 +1391,7 @@ mod tests {
 
         for i in 1..=5 {
             let data = format!(
-                r#"{{"turns.total":{},"turns.narration_only":0,"turns.parallel":0,"cost.estimate_usd":0.5,"session.duration_ms":60000}}"#,
+                r#"{{"turns.total":{},"turns.narration_only":0,"turns.parallel":0,"cost.estimate_usd":0.5,"session.duration_secs":60}}"#,
                 i * 10
             );
             db::upsert_observation(&conn, i, "2026-02-15T10:00:00Z", Some(60), None, &data)
@@ -1918,7 +1915,7 @@ mod tests {
         assert_eq!(data["cost.input_tokens"], 10000);
         assert_eq!(data["cost.output_tokens"], 5000);
         assert_eq!(data["cost.estimate_usd"], 1.5);
-        assert_eq!(data["session.duration_ms"], 120000);
+        assert_eq!(data["session.duration_secs"], 120);
         assert_eq!(data["session.output_bytes"], 50000);
         assert_eq!(data["session.exit_code"], 0);
         assert_eq!(obs1.duration, Some(120));
@@ -1932,7 +1929,7 @@ mod tests {
         let events = db::events_by_session(&v2, 1).unwrap();
         // Should have: turns.total, turns.narration_only, turns.parallel, turns.tool_calls,
         // cost.input_tokens, cost.output_tokens, cost.cache_read_tokens, cost.cache_creation_tokens,
-        // cost.estimate_usd, session.output_bytes, session.duration_ms, session.exit_code = 12
+        // cost.estimate_usd, session.output_bytes, session.duration_secs, session.exit_code = 12
         assert_eq!(events.len(), 12);
     }
 
@@ -2215,8 +2212,8 @@ label = "Avg turns per session"
             &conn,
             "2026-01-15T10:00:00Z",
             1,
-            "session.duration_ms",
-            Some("60000"),
+            "session.duration_secs",
+            Some("60"),
             None,
         )
         .unwrap();
@@ -2826,7 +2823,7 @@ label = "Avg turns per session"
         let obs = db::get_observation(&conn, 0).unwrap().unwrap();
         let data: serde_json::Value = serde_json::from_str(&obs.data).unwrap();
         assert_eq!(data["turns.total"], 1);
-        assert_eq!(data["session.duration_ms"], 3000);
+        assert!((data["session.duration_secs"].as_f64().unwrap() - 3.0).abs() < 0.001);
     }
 
     #[test]

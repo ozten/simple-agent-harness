@@ -12,7 +12,7 @@ use std::path::Path;
 pub struct IngestResult {
     pub turns_total: u64,
     pub cost_estimate_usd: f64,
-    pub session_duration_ms: u64,
+    pub session_duration_secs: f64,
     #[allow(dead_code)]
     pub bead_id: Option<String>,
 }
@@ -76,12 +76,12 @@ pub fn ingest_session_with_rules(
     let data = build_observation_data(&builtin_metrics, exit_code, &rule_results);
 
     // Extract duration for the observation row
-    let duration_ms = builtin_metrics
+    let duration_secs_f = builtin_metrics
         .iter()
-        .find(|(k, _)| k == "session.duration_ms")
-        .and_then(|(_, v)| v.as_u64())
-        .unwrap_or(0);
-    let duration_secs = (duration_ms / 1000) as i64;
+        .find(|(k, _)| k == "session.duration_secs")
+        .and_then(|(_, v)| v.as_f64())
+        .unwrap_or(0.0);
+    let duration_secs = duration_secs_f as i64;
 
     db::upsert_observation(conn, session, &ts, Some(duration_secs), None, &data)
         .map_err(IngestError::Db)?;
@@ -107,7 +107,7 @@ pub fn ingest_session_with_rules(
             .find(|(k, _)| k == "cost.estimate_usd")
             .and_then(|(_, v)| v.as_f64())
             .unwrap_or(0.0),
-        session_duration_ms: duration_ms,
+        session_duration_secs: duration_secs_f,
         bead_id,
     };
 
@@ -520,13 +520,13 @@ fn format_system_time(t: std::time::SystemTime) -> String {
 /// Update the bead_metrics table with cumulative data from the attributed session.
 fn update_bead_metrics(conn: &Connection, session: i64, bead_id: &str) -> Result<(), IngestError> {
     // Get session duration and turns from events
-    let duration_ms: Option<i64> = conn
+    let duration_secs: Option<f64> = conn
         .query_row(
-            "SELECT value FROM events WHERE session = ?1 AND kind = 'session.duration_ms' LIMIT 1",
+            "SELECT value FROM events WHERE session = ?1 AND kind = 'session.duration_secs' LIMIT 1",
             rusqlite::params![session],
             |row| {
                 let v: Option<String> = row.get(0)?;
-                Ok(v.and_then(|s| s.parse::<i64>().ok()))
+                Ok(v.and_then(|s| s.parse::<f64>().ok()))
             },
         )
         .unwrap_or(None);
@@ -553,7 +553,7 @@ fn update_bead_metrics(conn: &Connection, session: i64, bead_id: &str) -> Result
         )
         .unwrap_or(None);
 
-    let wall_secs = duration_ms.unwrap_or(0) as f64 / 1000.0;
+    let wall_secs = duration_secs.unwrap_or(0.0);
     let session_turns = turns.unwrap_or(0);
 
     // Get existing metrics to accumulate
@@ -739,7 +739,12 @@ mod tests {
                     .map(Value::Number)
                     .unwrap(),
             ),
-            ("session.duration_ms".to_string(), Value::from(120000u64)),
+            (
+                "session.duration_secs".to_string(),
+                serde_json::Number::from_f64(120.0)
+                    .map(Value::Number)
+                    .unwrap(),
+            ),
         ];
         let json_str = build_observation_data(&builtin, Some(0), &[]);
         let v: Value = serde_json::from_str(&json_str).unwrap();
@@ -747,7 +752,7 @@ mod tests {
         assert_eq!(v["turns.parallel"], 5);
         assert_eq!(v["cost.estimate_usd"], 1.5);
         assert_eq!(v["session.exit_code"], 0);
-        assert_eq!(v["session.duration_ms"], 120000);
+        assert!((v["session.duration_secs"].as_f64().unwrap() - 120.0).abs() < 0.001);
     }
 
     #[test]
@@ -771,7 +776,7 @@ mod tests {
         let result = ingest_session(&conn, 10, &path, Some(0), &adapter).unwrap();
         assert_eq!(result.turns_total, 4); // 4 assistant messages
         assert!((result.cost_estimate_usd - 0.99).abs() < 0.001);
-        assert_eq!(result.session_duration_ms, 229857);
+        assert!((result.session_duration_secs - 229.857).abs() < 0.001);
 
         // Verify observation data has detailed metrics
         let obs = db::get_observation(&conn, 10).unwrap().unwrap();

@@ -265,7 +265,7 @@ fn format_performance_feedback(session: i64, data: &serde_json::Value) -> String
     let narration = data["turns.narration_only"].as_u64().unwrap_or(0);
     let parallel = data["turns.parallel"].as_u64().unwrap_or(0);
     let cost = data["cost.estimate_usd"].as_f64().unwrap_or(0.0);
-    let duration_ms = data["session.duration_ms"].as_u64().unwrap_or(0);
+    let duration_s = data["session.duration_secs"].as_f64().unwrap_or(0.0) as u64;
 
     // Narration percentage
     let narr_pct = if turns > 0 {
@@ -282,7 +282,6 @@ fn format_performance_feedback(session: i64, data: &serde_json::Value) -> String
     };
 
     // Duration formatting
-    let duration_s = duration_ms / 1000;
     let mins = duration_s / 60;
     let secs = duration_s % 60;
     let duration_str = if mins > 0 {
@@ -411,7 +410,7 @@ mod tests {
         let (_dir, path) = test_db_path();
         let conn = db::open_or_create(&path).unwrap();
 
-        let data = r#"{"turns.total":67,"turns.narration_only":4,"turns.parallel":8,"cost.estimate_usd":24.57,"session.duration_ms":1847000}"#;
+        let data = r#"{"turns.total":67,"turns.narration_only":4,"turns.parallel":8,"cost.estimate_usd":24.57,"session.duration_secs":1847}"#;
         db::upsert_observation(
             &conn,
             42,
@@ -439,8 +438,8 @@ mod tests {
         let (_dir, path) = test_db_path();
         let conn = db::open_or_create(&path).unwrap();
 
-        let data1 = r#"{"turns.total":50,"turns.narration_only":0,"turns.parallel":0,"cost.estimate_usd":10.0,"session.duration_ms":60000}"#;
-        let data2 = r#"{"turns.total":80,"turns.narration_only":5,"turns.parallel":10,"cost.estimate_usd":30.0,"session.duration_ms":120000}"#;
+        let data1 = r#"{"turns.total":50,"turns.narration_only":0,"turns.parallel":0,"cost.estimate_usd":10.0,"session.duration_secs":60}"#;
+        let data2 = r#"{"turns.total":80,"turns.narration_only":5,"turns.parallel":10,"cost.estimate_usd":30.0,"session.duration_secs":120}"#;
         db::upsert_observation(&conn, 1, "2026-02-15T10:00:00Z", None, None, data1).unwrap();
         db::upsert_observation(&conn, 2, "2026-02-15T11:00:00Z", None, None, data2).unwrap();
 
@@ -457,7 +456,7 @@ mod tests {
         let (_dir, path) = test_db_path();
         let conn = db::open_or_create(&path).unwrap();
 
-        let data = r#"{"turns.total":42,"turns.narration_only":2,"turns.parallel":5,"cost.estimate_usd":1.5,"session.duration_ms":60000}"#;
+        let data = r#"{"turns.total":42,"turns.narration_only":2,"turns.parallel":5,"cost.estimate_usd":1.5,"session.duration_secs":60}"#;
         db::upsert_observation(&conn, 1, "2026-02-15T10:00:00Z", None, None, data).unwrap();
         db::insert_improvement(&conn, "workflow", "Batch reads", None, None, None).unwrap();
 
@@ -478,7 +477,7 @@ mod tests {
         let (_dir, path) = test_db_path();
         let conn = db::open_or_create(&path).unwrap();
 
-        let data = r#"{"turns.total":30,"turns.narration_only":0,"turns.parallel":3,"cost.estimate_usd":5.0,"session.duration_ms":45000}"#;
+        let data = r#"{"turns.total":30,"turns.narration_only":0,"turns.parallel":3,"cost.estimate_usd":5.0,"session.duration_secs":45}"#;
         db::upsert_observation(&conn, 1, "2026-02-15T10:00:00Z", None, None, data).unwrap();
 
         drop(conn);
@@ -493,7 +492,7 @@ mod tests {
         let (_dir, path) = test_db_path();
         let conn = db::open_or_create(&path).unwrap();
 
-        let data = r#"{"turns.total":0,"turns.narration_only":0,"turns.parallel":0,"cost.estimate_usd":0.0,"session.duration_ms":0}"#;
+        let data = r#"{"turns.total":0,"turns.narration_only":0,"turns.parallel":0,"cost.estimate_usd":0.0,"session.duration_secs":0}"#;
         db::upsert_observation(&conn, 1, "2026-02-15T10:00:00Z", None, None, data).unwrap();
 
         drop(conn);
@@ -509,7 +508,7 @@ mod tests {
         let (_dir, path) = test_db_path();
         let conn = db::open_or_create(&path).unwrap();
 
-        let data = r#"{"turns.total":10,"turns.narration_only":0,"turns.parallel":0,"cost.estimate_usd":0.5,"session.duration_ms":45000}"#;
+        let data = r#"{"turns.total":10,"turns.narration_only":0,"turns.parallel":0,"cost.estimate_usd":0.5,"session.duration_secs":45}"#;
         db::upsert_observation(&conn, 1, "2026-02-15T10:00:00Z", None, None, data).unwrap();
 
         drop(conn);
@@ -521,7 +520,7 @@ mod tests {
     #[test]
     fn format_performance_feedback_unit() {
         let data: serde_json::Value = serde_json::from_str(
-            r#"{"turns.total":100,"turns.narration_only":10,"turns.parallel":20,"cost.estimate_usd":15.99,"session.duration_ms":300000}"#,
+            r#"{"turns.total":100,"turns.narration_only":10,"turns.parallel":20,"cost.estimate_usd":15.99,"session.duration_secs":300}"#,
         )
         .unwrap();
 
@@ -815,7 +814,7 @@ mod tests {
         let (_dir, path) = test_db_path();
         let conn = db::open_or_create(&path).unwrap();
 
-        let data = r#"{"turns.total":80,"turns.narration_only":5,"turns.parallel":8,"cost.estimate_usd":35.0,"session.duration_ms":60000}"#;
+        let data = r#"{"turns.total":80,"turns.narration_only":5,"turns.parallel":8,"cost.estimate_usd":35.0,"session.duration_secs":60}"#;
         db::upsert_observation(&conn, 1, "2026-02-15T10:00:00Z", None, None, data).unwrap();
         db::insert_improvement(&conn, "workflow", "Test improvement", None, None, None).unwrap();
         drop(conn);

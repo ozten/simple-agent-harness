@@ -1766,7 +1766,7 @@ printf '{"type":"result","duration_ms":5000,"total_cost_usd":0.42,"num_turns":2,
         let ingest = crate::ingest::IngestResult {
             turns_total: 65,
             cost_estimate_usd: 1.85,
-            session_duration_ms: 300000,
+            session_duration_secs: 300.0,
             bead_id: None,
         };
         // Should include turns in output

@@ -515,13 +515,13 @@ pub fn rebuild_observations(conn: &Connection) -> Result<u64> {
 
         let data = serde_json::Value::Object(map).to_string();
 
-        // Extract duration from session.duration_ms event if present
+        // Extract duration from session.duration_secs event if present
         let duration_secs = events
             .iter()
-            .find(|e| e.kind == "session.duration_ms")
+            .find(|e| e.kind == "session.duration_secs")
             .and_then(|e| e.value.as_ref())
-            .and_then(|v| v.parse::<i64>().ok())
-            .map(|ms| ms / 1000);
+            .and_then(|v| v.parse::<f64>().ok())
+            .map(|s| s as i64);
 
         upsert_observation(conn, session, ts, duration_secs, None, &data)?;
         count += 1;
@@ -1998,8 +1998,8 @@ mod tests {
             &conn,
             "2026-01-15T10:00:00Z",
             1,
-            "session.duration_ms",
-            Some("120000"),
+            "session.duration_secs",
+            Some("120"),
             None,
         )
         .unwrap();
@@ -2018,8 +2018,8 @@ mod tests {
             &conn,
             "2026-01-15T11:00:00Z",
             2,
-            "session.duration_ms",
-            Some("90000"),
+            "session.duration_secs",
+            Some("90"),
             None,
         )
         .unwrap();
@@ -2032,8 +2032,8 @@ mod tests {
         let data1: serde_json::Value = serde_json::from_str(&obs1.data).unwrap();
         assert_eq!(data1["turns.total"], 42);
         assert_eq!(data1["cost.estimate_usd"], 1.5);
-        assert_eq!(data1["session.duration_ms"], 120000);
-        assert_eq!(obs1.duration, Some(120)); // 120000ms / 1000
+        assert_eq!(data1["session.duration_secs"], 120);
+        assert_eq!(obs1.duration, Some(120));
 
         // Verify session 2 observation
         let obs2 = get_observation(&conn, 2).unwrap().unwrap();
@@ -2105,7 +2105,7 @@ mod tests {
     fn rebuild_observations_no_duration_event() {
         let (_dir, conn) = test_db();
 
-        // Session with no session.duration_ms event
+        // Session with no duration event
         insert_event_with_ts(
             &conn,
             "2026-01-15T10:00:00Z",
