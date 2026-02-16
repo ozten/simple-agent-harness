@@ -167,8 +167,20 @@ pub async fn run(
         retention::enforce_retention(&data_dir.sessions_dir(), &config.storage.retention);
 
         // 3. Assemble prompt (read file + run prepend_commands + brief injection)
+        let targets = &config.metrics.targets;
+        let targets_opt = if targets.rules.is_empty() {
+            None
+        } else {
+            Some(targets)
+        };
+        let supported = adapter.supported_metrics();
+        let supported_opt: Option<&[&str]> = if supported.is_empty() {
+            None
+        } else {
+            Some(supported)
+        };
         let prompt =
-            match prompt::assemble(&config.prompt, &config.session.prompt_file, &data_dir.db()) {
+            match prompt::assemble(&config.prompt, &config.session.prompt_file, &data_dir.db(), targets_opt, supported_opt) {
                 Ok(p) => p,
                 Err(e) => {
                     tracing::error!(error = %e, "failed to assemble prompt");
