@@ -1158,7 +1158,8 @@ async fn main() {
     }) = &cli.command
     {
         let config = HarnessConfig::load(&cli.config).unwrap_or_default();
-        let result = finish::handle_finish(bead_id, message, files, &config.quality_gates);
+        let dd = data_dir::DataDir::new(&config.storage.data_dir);
+        let result = finish::handle_finish(bead_id, message, files, &config.quality_gates, Some(&dd.db()));
         if !result.success {
             eprintln!("Error: {}", result.message);
             std::process::exit(1);

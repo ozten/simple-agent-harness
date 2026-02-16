@@ -5,6 +5,7 @@
 //! from closing beads without actually completing the work.
 
 use crate::config::QualityGatesConfig;
+use crate::db;
 use std::path::Path;
 use std::process::Command;
 
@@ -240,6 +241,7 @@ pub fn handle_finish(
     commit_msg: &str,
     files: &[String],
     gates_config: &QualityGatesConfig,
+    db_path: Option<&Path>,
 ) -> FinishResult {
     let working_dir = match std::env::current_dir() {
         Ok(d) => d,
@@ -433,6 +435,18 @@ pub fn handle_finish(
         }
     }
 
+    // --- Step 4b: Mark bead completed in SQLite ---
+    if let Some(path) = db_path {
+        match db::open_or_create(path) {
+            Ok(conn) => match db::mark_bead_completed(&conn, bead_id) {
+                Ok(true) => eprintln!("[4b] Marked bead {bead_id} completed in DB"),
+                Ok(false) => eprintln!("[4b] Bead {bead_id} not found or already completed in DB"),
+                Err(e) => eprintln!("[4b] Warning: failed to mark bead completed in DB: {e}"),
+            },
+            Err(e) => eprintln!("[4b] Warning: could not open database: {e}"),
+        }
+    }
+
     // --- Step 5: bd sync ---
     let _ = Command::new("bd")
         .args(["sync"])
@@ -601,7 +615,7 @@ mod tests {
             format: vec![],
         };
         // This tests the gate failure path (we can't test the full flow without git/bd)
-        let result = handle_finish("test-bead", "test message", &[], &gates);
+        let result = handle_finish("test-bead", "test message", &[], &gates, None);
         assert!(!result.success);
         assert!(result.message.contains("check gate failed"));
     }
@@ -614,7 +628,7 @@ mod tests {
             lint: vec![],
             format: vec![],
         };
-        let result = handle_finish("test-bead", "test message", &[], &gates);
+        let result = handle_finish("test-bead", "test message", &[], &gates, None);
         assert!(!result.success);
         assert!(result.message.contains("test gate failed"));
     }
@@ -627,7 +641,7 @@ mod tests {
             lint: vec!["exit 1".to_string()],
             format: vec![],
         };
-        let result = handle_finish("test-bead", "test message", &[], &gates);
+        let result = handle_finish("test-bead", "test message", &[], &gates, None);
         assert!(!result.success);
         assert!(result.message.contains("lint gate failed"));
     }
@@ -640,8 +654,38 @@ mod tests {
             lint: vec!["true".to_string()],
             format: vec!["exit 1".to_string()],
         };
-        let result = handle_finish("test-bead", "test message", &[], &gates);
+        let result = handle_finish("test-bead", "test message", &[], &gates, None);
         assert!(!result.success);
         assert!(result.message.contains("format gate failed"));
+    }
+
+    #[test]
+    fn test_handle_finish_marks_bead_completed() {
+        // Create a temp DB with a bead_metrics entry
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("blacksmith.db");
+        let conn = db::open_or_create(&db_path).unwrap();
+        db::upsert_bead_metrics(&conn, "test-bead", 1, 60.0, 10, Some(100), None, None).unwrap();
+
+        // Verify completed_at is initially NULL
+        let bm = db::get_bead_metrics(&conn, "test-bead").unwrap().unwrap();
+        assert!(bm.completed_at.is_none(), "completed_at should start as None");
+        drop(conn);
+
+        // Call handle_finish with all gates passing but it will fail at git stage
+        // (since we're not in a git repo in the temp dir). The DB marking happens
+        // after bd close (step 4), so we can't reach it through handle_finish in a
+        // unit test without a full git+bd setup. Instead, test the DB marking path
+        // directly to verify the integration logic works.
+        let conn = db::open_or_create(&db_path).unwrap();
+        let result = db::mark_bead_completed(&conn, "test-bead").unwrap();
+        assert!(result, "should return true when marking bead completed");
+
+        let bm = db::get_bead_metrics(&conn, "test-bead").unwrap().unwrap();
+        assert!(bm.completed_at.is_some(), "completed_at should now be set");
+        assert!(
+            bm.completed_at.unwrap().contains('T'),
+            "should be an ISO timestamp"
+        );
     }
 }
