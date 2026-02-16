@@ -1,24 +1,18 @@
-## Last Session: Implement historical signal correlator (2026-02-16)
+## Last Session: Wire cargo check gate in bd-finish.sh (2026-02-16)
 
 ### What Was Done
-- Implemented bead simple-agent-harness-4wc (P2): Historical signal correlator
-- Created `src/signal_correlator.rs` with `correlate()` function that:
-  - Queries expansion events per module from DB with recency weighting (recent window gets 2x weight)
-  - Queries integration iteration counts per module from DB with recency weighting
-  - Queries metadata drift counts per module from file_resolutions table
-  - Computes structural smell flags per module (high fan-in, large module, cycle participation, boundary violations, god files, wide API)
-  - Identifies modules with BOTH structural smells AND historical failure signals as refactoring candidates
-  - Sorts candidates by combined score, computes confidence based on number of independent signal types
-- Returns a `CorrelationReport` with `ModuleSignals`, `StructuralSmells`, and `RefactorCandidate` per module
-- Added `mod signal_correlator;` to main.rs
-- 12 unit tests all passing, full suite: 1123 passed, 0 failed
+- Implemented bead simple-agent-harness-m6l (P0): Post-session cargo check gate
+- Added step 0 to bd-finish.sh that runs `cargo check` before any staging/committing/closing
+- If cargo check fails, the script aborts with exit 1 and prints clear error message
+- This prevents agents from closing beads when the code doesn't compile
+- Addresses the Session 50 incident where singleton.rs P0 was closed despite not compiling
 
 ### Current State
 - Codebase compiles cleanly (only pre-existing dead_code warnings for not-yet-wired modules)
 - All 1123 tests pass
-- signal_correlator module is ready to be consumed by the refactor proposal generator
+- bd-finish.sh now has cargo check as a mandatory gate before bead closure
 
 ### Suggested Next Tasks
-- simple-agent-harness-cgo (P2): Add refactor proposal generation (blocked by this bead, now unblocked)
-- simple-agent-harness-83g (P3): Add migration map generation for refactor tasks
-- simple-agent-harness-34d (P3): Add architecture agent configuration knobs
+- simple-agent-harness-5hg (P1): Enable 3 parallel agents (was blocked by this bead, now unblocked)
+- simple-agent-harness-56j (P1): Add improvement recording to agent PROMPT.md workflow
+- simple-agent-harness-cgo (P2): Add refactor proposal generation from architecture analysis
