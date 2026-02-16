@@ -201,43 +201,6 @@ pub fn schedule_next(
         .next()
 }
 
-/// Enrich a `ReadyBead`'s affected globs using fresh metadata from the database.
-///
-/// If a bead has no `affected_globs` (no `affected:` line in its design), this
-/// function uses `ensure_fresh_metadata` to compute file resolution and derive
-/// affected globs from the resolved files. This makes the scheduler's conflict
-/// detection more precise — instead of treating the bead as "affects everything",
-/// it uses the actual files the task touches.
-///
-/// If the bead already has explicit affected globs (from the design field), they
-/// are preserved as-is (explicit declarations take precedence over inferred metadata).
-///
-/// Returns `true` if the bead's globs were updated from metadata.
-pub fn enrich_with_metadata(
-    bead: &mut ReadyBead,
-    conn: &rusqlite::Connection,
-    repo_root: &std::path::Path,
-    current_commit: &str,
-) -> bool {
-    // Only enrich beads that don't already have explicit affected globs
-    if bead.affected_globs.is_some() {
-        return false;
-    }
-
-    match crate::metadata_regen::ensure_fresh_metadata(conn, repo_root, &bead.id, current_commit) {
-        Ok(Some(metadata)) => {
-            let globs = metadata.affected_globs();
-            if !globs.is_empty() {
-                bead.affected_globs = Some(globs);
-                true
-            } else {
-                false
-            }
-        }
-        Ok(None) | Err(_) => false,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -633,67 +596,5 @@ mod tests {
         let beads = vec![bead("b1", 1, None)];
         let result = next_assignable_tasks(&beads, &[]);
         assert_eq!(result, vec!["b1"]);
-    }
-
-    // ── enrich_with_metadata tests ──
-
-    fn setup_enrich_db() -> rusqlite::Connection {
-        let conn = rusqlite::Connection::open_in_memory().unwrap();
-        crate::intent::create_table(&conn).unwrap();
-        crate::file_resolution::create_table(&conn).unwrap();
-        conn
-    }
-
-    #[test]
-    fn enrich_skips_bead_with_existing_globs() {
-        let conn = setup_enrich_db();
-        let tmp = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(tmp.path().join("src")).unwrap();
-        std::fs::write(tmp.path().join("src/main.rs"), "fn main() {}").unwrap();
-
-        let mut b = bead("b1", 1, Some(vec!["src/db.rs"]));
-        let changed = enrich_with_metadata(&mut b, &conn, tmp.path(), "commit1");
-        assert!(!changed);
-        assert_eq!(b.affected_globs, Some(vec!["src/db.rs".to_string()]));
-    }
-
-    #[test]
-    fn enrich_populates_globs_from_metadata() {
-        let conn = setup_enrich_db();
-        let tmp = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(tmp.path().join("src")).unwrap();
-        std::fs::write(tmp.path().join("src/main.rs"), "mod config;\nfn main() {}").unwrap();
-        std::fs::write(tmp.path().join("src/config.rs"), "pub struct Config;").unwrap();
-
-        // Store intent analysis so ensure_fresh_metadata can resolve
-        let analysis = crate::intent::IntentAnalysis {
-            task_id: "b1".to_string(),
-            content_hash: "h1".to_string(),
-            target_areas: vec![crate::intent::TargetArea {
-                concept: "config".to_string(),
-                reasoning: "config changes".to_string(),
-            }],
-        };
-        crate::intent::store(&conn, &analysis).unwrap();
-
-        let mut b = bead("b1", 1, None);
-        let changed = enrich_with_metadata(&mut b, &conn, tmp.path(), "commit1");
-        assert!(changed);
-        assert!(b.affected_globs.is_some());
-        let globs = b.affected_globs.unwrap();
-        assert!(globs.iter().any(|g| g.contains("config")));
-    }
-
-    #[test]
-    fn enrich_no_intent_leaves_none() {
-        let conn = setup_enrich_db();
-        let tmp = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(tmp.path().join("src")).unwrap();
-        std::fs::write(tmp.path().join("src/main.rs"), "fn main() {}").unwrap();
-
-        let mut b = bead("b-unknown", 1, None);
-        let changed = enrich_with_metadata(&mut b, &conn, tmp.path(), "commit1");
-        assert!(!changed);
-        assert!(b.affected_globs.is_none());
     }
 }

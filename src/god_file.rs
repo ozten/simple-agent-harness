@@ -11,8 +11,6 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use crate::public_api;
-
 /// A god file candidate with its cohesion analysis.
 #[derive(Debug, Clone)]
 pub struct GodFileEntry {
@@ -20,12 +18,8 @@ pub struct GodFileEntry {
     pub file: PathBuf,
     /// Total line count.
     pub line_count: usize,
-    /// Number of public symbols in the file.
-    pub symbol_count: usize,
     /// Number of independent symbol clusters (connected components).
     pub cluster_count: usize,
-    /// The clusters themselves: each cluster is a list of symbol names.
-    pub clusters: Vec<Vec<String>>,
 }
 
 /// Configuration for god file detection.
@@ -93,18 +87,14 @@ pub fn analyze_file(file: &Path, content: &str) -> GodFileEntry {
         .map(|f| f.to_string_lossy().to_string())
         .unwrap_or_default();
 
-    let symbols = public_api::extract_from_files(&[file]);
-
-    // Also extract private symbols for cohesion analysis — we need all definitions
+    // Extract all symbols (pub + private) for cohesion analysis
     let all_symbols = extract_all_defined_symbols(content, &file_name);
 
     if all_symbols.is_empty() {
         return GodFileEntry {
             file: file.to_path_buf(),
             line_count,
-            symbol_count: symbols.len(),
             cluster_count: 0,
-            clusters: Vec::new(),
         };
     }
 
@@ -115,9 +105,7 @@ pub fn analyze_file(file: &Path, content: &str) -> GodFileEntry {
     GodFileEntry {
         file: file.to_path_buf(),
         line_count,
-        symbol_count: symbols.len(),
         cluster_count: clusters.len(),
-        clusters,
     }
 }
 
@@ -629,7 +617,6 @@ impl Gadget {
         let src = tmp.path().join("src");
         let entry = analyze_file(&src.join("empty.rs"), source);
         assert_eq!(entry.cluster_count, 0);
-        assert_eq!(entry.symbol_count, 0);
     }
 
     #[test]

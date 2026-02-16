@@ -37,68 +37,6 @@ pub fn create_table(conn: &Connection) -> Result<()> {
     )
 }
 
-/// Record an expansion event.
-pub fn record(conn: &Connection, event: &ExpansionEvent) -> Result<()> {
-    let predicted_json =
-        serde_json::to_string(&event.predicted_modules).unwrap_or_else(|_| "[]".to_string());
-    let actual_json =
-        serde_json::to_string(&event.actual_modules).unwrap_or_else(|_| "[]".to_string());
-
-    conn.execute(
-        "INSERT INTO expansion_events (task_id, predicted_modules, actual_modules, expansion_reason, timestamp)
-         VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![
-            event.task_id,
-            predicted_json,
-            actual_json,
-            event.expansion_reason,
-            event.timestamp,
-        ],
-    )?;
-    Ok(())
-}
-
-/// Get all expansion events for a specific task.
-pub fn get_by_task(conn: &Connection, task_id: &str) -> Result<Vec<ExpansionEvent>> {
-    let mut stmt = conn.prepare(
-        "SELECT task_id, predicted_modules, actual_modules, expansion_reason, timestamp
-         FROM expansion_events
-         WHERE task_id = ?1
-         ORDER BY id ASC",
-    )?;
-
-    let rows = stmt.query_map(params![task_id], |row| {
-        let task_id: String = row.get(0)?;
-        let predicted_json: String = row.get(1)?;
-        let actual_json: String = row.get(2)?;
-        let expansion_reason: String = row.get(3)?;
-        let timestamp: String = row.get(4)?;
-        Ok((
-            task_id,
-            predicted_json,
-            actual_json,
-            expansion_reason,
-            timestamp,
-        ))
-    })?;
-
-    let mut events = Vec::new();
-    for row in rows {
-        let (task_id, predicted_json, actual_json, expansion_reason, timestamp) = row?;
-        let predicted_modules: Vec<String> =
-            serde_json::from_str(&predicted_json).unwrap_or_default();
-        let actual_modules: Vec<String> = serde_json::from_str(&actual_json).unwrap_or_default();
-        events.push(ExpansionEvent {
-            task_id,
-            predicted_modules,
-            actual_modules,
-            expansion_reason,
-            timestamp,
-        });
-    }
-    Ok(events)
-}
-
 /// Get the most recent N expansion events across all tasks.
 pub fn get_recent(conn: &Connection, limit: u32) -> Result<Vec<ExpansionEvent>> {
     let mut stmt = conn.prepare(
@@ -140,39 +78,26 @@ pub fn get_recent(conn: &Connection, limit: u32) -> Result<Vec<ExpansionEvent>> 
     Ok(events)
 }
 
-/// Count expansion events involving a specific module (in actual_modules).
-///
-/// Useful for identifying modules with poor boundary containment —
-/// if a module frequently appears in expansions, its boundaries
-/// don't contain changes well.
-pub fn count_by_module(conn: &Connection, module: &str) -> Result<u32> {
-    // JSON array stored as text; use LIKE for substring match on the module name.
-    // This is safe because module names don't contain SQL wildcards in practice.
-    let pattern = format!("%\"{module}\"%");
-    let count: u32 = conn.query_row(
-        "SELECT COUNT(*) FROM expansion_events WHERE actual_modules LIKE ?1",
-        params![pattern],
-        |row| row.get(0),
-    )?;
-    Ok(count)
-}
+/// Record an expansion event (test-only; no production callers yet).
+#[cfg(test)]
+pub fn record(conn: &Connection, event: &ExpansionEvent) -> Result<()> {
+    let predicted_json =
+        serde_json::to_string(&event.predicted_modules).unwrap_or_else(|_| "[]".to_string());
+    let actual_json =
+        serde_json::to_string(&event.actual_modules).unwrap_or_else(|_| "[]".to_string());
 
-/// Count total expansion events within a recent window of tasks.
-///
-/// Returns the number of expansion events where the task_id is among
-/// the most recent `task_window` distinct tasks that have events.
-pub fn count_recent_expansions(conn: &Connection, task_window: u32) -> Result<u32> {
-    let count: u32 = conn.query_row(
-        "SELECT COUNT(*) FROM expansion_events
-         WHERE task_id IN (
-             SELECT DISTINCT task_id FROM expansion_events
-             ORDER BY rowid DESC
-             LIMIT ?1
-         )",
-        params![task_window],
-        |row| row.get(0),
+    conn.execute(
+        "INSERT INTO expansion_events (task_id, predicted_modules, actual_modules, expansion_reason, timestamp)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![
+            event.task_id,
+            predicted_json,
+            actual_json,
+            event.expansion_reason,
+            event.timestamp,
+        ],
     )?;
-    Ok(count)
+    Ok(())
 }
 
 #[cfg(test)]
@@ -197,6 +122,74 @@ mod tests {
             expansion_reason: "Auth changes required updating shared model types".to_string(),
             timestamp: "2025-03-15T10:30:00Z".to_string(),
         }
+    }
+
+    /// Get all expansion events for a specific task (test helper).
+    fn get_by_task(conn: &Connection, task_id: &str) -> Result<Vec<ExpansionEvent>> {
+        let mut stmt = conn.prepare(
+            "SELECT task_id, predicted_modules, actual_modules, expansion_reason, timestamp
+             FROM expansion_events
+             WHERE task_id = ?1
+             ORDER BY id ASC",
+        )?;
+
+        let rows = stmt.query_map(params![task_id], |row| {
+            let task_id: String = row.get(0)?;
+            let predicted_json: String = row.get(1)?;
+            let actual_json: String = row.get(2)?;
+            let expansion_reason: String = row.get(3)?;
+            let timestamp: String = row.get(4)?;
+            Ok((
+                task_id,
+                predicted_json,
+                actual_json,
+                expansion_reason,
+                timestamp,
+            ))
+        })?;
+
+        let mut events = Vec::new();
+        for row in rows {
+            let (task_id, predicted_json, actual_json, expansion_reason, timestamp) = row?;
+            let predicted_modules: Vec<String> =
+                serde_json::from_str(&predicted_json).unwrap_or_default();
+            let actual_modules: Vec<String> =
+                serde_json::from_str(&actual_json).unwrap_or_default();
+            events.push(ExpansionEvent {
+                task_id,
+                predicted_modules,
+                actual_modules,
+                expansion_reason,
+                timestamp,
+            });
+        }
+        Ok(events)
+    }
+
+    /// Count expansion events involving a specific module (test helper).
+    fn count_by_module(conn: &Connection, module: &str) -> Result<u32> {
+        let pattern = format!("%\"{module}\"%");
+        let count: u32 = conn.query_row(
+            "SELECT COUNT(*) FROM expansion_events WHERE actual_modules LIKE ?1",
+            params![pattern],
+            |row| row.get(0),
+        )?;
+        Ok(count)
+    }
+
+    /// Count total expansion events within a recent window of tasks (test helper).
+    fn count_recent_expansions(conn: &Connection, task_window: u32) -> Result<u32> {
+        let count: u32 = conn.query_row(
+            "SELECT COUNT(*) FROM expansion_events
+             WHERE task_id IN (
+                 SELECT DISTINCT task_id FROM expansion_events
+                 ORDER BY rowid DESC
+                 LIMIT ?1
+             )",
+            params![task_window],
+            |row| row.get(0),
+        )?;
+        Ok(count)
     }
 
     #[test]

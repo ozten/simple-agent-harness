@@ -1,15 +1,18 @@
-## Session 155: Committed leftover cleanup changes
+## Session 156: Remove dead code (65 warnings → 0)
 
 ### Completed
-- Committed minor idiomatic Rust cleanups left uncommitted from prior sessions:
-  - `src/proposal_validation.rs`: Use `div_ceil` instead of manual ceiling division
-  - `src/worktree.rs`: Use `is_some_and` instead of `map_or(false, ...)`
-  - Removed deleted `blacksmith.toml` config file
+- Deleted 4 entirely-dead modules: `file_resolution.rs`, `intent.rs`, `metadata_regen.rs`, `proposal_validation.rs`
+- Removed `mod` declarations and cross-module references (db.rs, scheduler.rs)
+- Removed dead `enrich_with_metadata` function and its tests from `scheduler.rs`
+- Moved test-only functions to `#[cfg(test)]`: `expansion_event::record`, `fan_in::compute_fan_in_scores`, `fan_in::hotspots`, `public_api::extract_module_api`, `public_api::format_boundary_signatures`, `public_api::extract_from_files`
+- Removed unused struct fields: `FanInEntry::total_modules`, `GodFileEntry::symbol_count`, `GodFileEntry::clusters`
+- Removed unused import of `crate::public_api` from `god_file.rs`
+- Dead code warnings: 65 → 0
+- All 1072 tests pass, clippy clean, fmt clean
 
 ### Current state
-- All beads are closed. Ready queue is empty.
-- Codebase compiles clean (65 dead_code warnings from unused scaffolding modules)
+- Codebase compiles with ZERO warnings
+- All beads closed, ready queue empty
 
 ### Suggested next tasks
-- File new beads from PRD or create cleanup work
-- Consider filing beads to remove dead code in: expansion_event.rs, file_resolution.rs, fan_in.rs, intent.rs, god_file.rs, public_api.rs, scheduler.rs
+- File new beads from PRD or create new feature work

@@ -8,6 +8,7 @@
 //! symbols create large blast radii) and to detect boundary violations.
 
 use std::collections::HashMap;
+#[cfg(test)]
 use std::path::Path;
 
 use crate::module_detect::Module;
@@ -74,6 +75,7 @@ pub fn extract_public_apis(modules: &HashMap<String, Module>) -> HashMap<String,
 }
 
 /// Extract public API surface for a single module.
+#[cfg(test)]
 pub fn extract_module_api(module: &Module) -> ModuleApi {
     let mut symbols = Vec::new();
 
@@ -104,6 +106,7 @@ pub fn extract_module_api(module: &Module) -> ModuleApi {
 /// `DerivedFields::boundary_signatures`.
 ///
 /// Returns strings like `"pub fn module::file::name(args) -> Ret"`.
+#[cfg(test)]
 pub fn format_boundary_signatures(api: &ModuleApi) -> Vec<String> {
     api.public_symbols
         .iter()
@@ -114,6 +117,7 @@ pub fn format_boundary_signatures(api: &ModuleApi) -> Vec<String> {
 /// Extract public API surfaces from a set of source files (by path).
 ///
 /// Convenience for extracting without needing full module detection.
+#[cfg(test)]
 pub fn extract_from_files(files: &[&Path]) -> Vec<Symbol> {
     let mut symbols = Vec::new();
     for file_path in files {

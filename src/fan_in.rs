@@ -5,22 +5,25 @@
 //! are splitting candidates.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
+#[cfg(test)]
 use crate::import_graph;
+#[cfg(test)]
+use std::path::Path;
 
 /// A file with its computed fan-in score.
 #[derive(Debug, Clone)]
 pub struct FanInEntry {
     pub file: PathBuf,
     pub importers: usize,
-    pub total_modules: usize,
     pub score: f64,
 }
 
 /// Compute fan-in scores for all files in a Rust codebase.
 ///
 /// Returns entries sorted by score descending (highest fan-in first).
+#[cfg(test)]
 pub fn compute_fan_in_scores(repo_root: &Path) -> Vec<FanInEntry> {
     let graph = import_graph::build_import_graph(repo_root);
     scores_from_graph(&graph)
@@ -53,7 +56,6 @@ pub fn scores_from_graph(graph: &HashMap<PathBuf, Vec<PathBuf>>) -> Vec<FanInEnt
             FanInEntry {
                 file: file.clone(),
                 importers,
-                total_modules,
                 score,
             }
         })
@@ -71,6 +73,7 @@ pub fn scores_from_graph(graph: &HashMap<PathBuf, Vec<PathBuf>>) -> Vec<FanInEnt
 }
 
 /// Filter entries to only those above the given threshold.
+#[cfg(test)]
 pub fn hotspots(entries: &[FanInEntry], threshold: f64) -> Vec<&FanInEntry> {
     entries.iter().filter(|e| e.score > threshold).collect()
 }
