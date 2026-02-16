@@ -12,7 +12,7 @@ use crate::module_detect::Module;
 use crate::public_api::ModuleApi;
 
 /// A boundary violation: a cross-module import of a non-public symbol.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct BoundaryViolation {
     /// The module that contains the violating import.
     pub source_module: String,

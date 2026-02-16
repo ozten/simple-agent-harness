@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use crate::module_detect::Module;
 
 /// A detected circular dependency between modules.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct ModuleCycle {
     /// Module names participating in the cycle, sorted alphabetically.
     pub modules: Vec<String>,

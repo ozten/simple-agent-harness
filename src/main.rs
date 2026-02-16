@@ -152,6 +152,12 @@ enum Commands {
         #[command(subcommand)]
         action: AdapterAction,
     },
+    /// Run architecture analysis on the codebase
+    Arch {
+        /// Output as JSON instead of human-readable text
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -783,6 +789,154 @@ fn handle_adapter_test(
     Ok(())
 }
 
+fn print_arch_json(
+    report: &structural_metrics::StructuralReport,
+    correlation: &Option<signal_correlator::CorrelationReport>,
+) {
+    #[derive(serde::Serialize)]
+    struct JsonOutput<'a> {
+        structural: &'a structural_metrics::StructuralReport,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        correlation: &'a Option<signal_correlator::CorrelationReport>,
+    }
+    let output = JsonOutput {
+        structural: report,
+        correlation,
+    };
+    println!("{}", serde_json::to_string_pretty(&output).unwrap());
+}
+
+fn print_arch_text(
+    report: &structural_metrics::StructuralReport,
+    correlation: &Option<signal_correlator::CorrelationReport>,
+) {
+    println!("=== Architecture Analysis ===\n");
+    println!(
+        "Modules: {}  |  Files: {}",
+        report.total_modules, report.total_files
+    );
+
+    // -- Fan-in hotspots --
+    let mut hotspots: Vec<_> = report
+        .files
+        .values()
+        .filter(|f| f.fan_in_importers > 0)
+        .collect();
+    hotspots.sort_by(|a, b| b.fan_in_importers.cmp(&a.fan_in_importers));
+    if !hotspots.is_empty() {
+        println!("\n--- Fan-in Hotspots ---");
+        for f in hotspots.iter().take(10) {
+            println!(
+                "  {} — {} importers (score {:.2})",
+                f.path.display(),
+                f.fan_in_importers,
+                f.fan_in_score
+            );
+        }
+    }
+
+    // -- God files --
+    let god_files: Vec<_> = report.files.values().filter(|f| f.is_god_file).collect();
+    if !god_files.is_empty() {
+        println!("\n--- God Files ---");
+        for f in &god_files {
+            println!(
+                "  {} — {} lines, {} clusters",
+                f.path.display(),
+                f.line_count,
+                f.cluster_count
+            );
+        }
+    }
+
+    // -- Cycles --
+    if !report.cycles.is_empty() {
+        println!("\n--- Circular Dependencies ---");
+        for cycle in &report.cycles {
+            println!("  {}", cycle.modules.join(" <-> "));
+        }
+    }
+
+    // -- Boundary violations --
+    if !report.boundary_violations.is_empty() {
+        println!(
+            "\n--- Boundary Violations ({}) ---",
+            report.boundary_violations.len()
+        );
+        for v in report.boundary_violations.iter().take(15) {
+            println!(
+                "  {} -> {}: non-public symbol `{}`",
+                v.source_module, v.target_module, v.symbol
+            );
+        }
+        if report.boundary_violations.len() > 15 {
+            println!("  ... and {} more", report.boundary_violations.len() - 15);
+        }
+    }
+
+    // -- Module summary --
+    let mut mods: Vec<_> = report.modules.values().collect();
+    mods.sort_by(|a, b| b.total_lines.cmp(&a.total_lines));
+    println!("\n--- Module Summary ---");
+    println!(
+        "  {:<20} {:>6} {:>6} {:>5} {:>8} {:>5}",
+        "MODULE", "LINES", "FILES", "API", "VIOLNS", "GODS"
+    );
+    for m in &mods {
+        let violations = m.violations_as_source + m.violations_as_target;
+        let cycle_marker = if m.in_cycle { " [cycle]" } else { "" };
+        println!(
+            "  {:<20} {:>6} {:>6} {:>5} {:>8} {:>5}{}",
+            m.name, m.total_lines, m.file_count, m.api_surface_width, violations, m.god_file_count, cycle_marker
+        );
+    }
+
+    // -- Signal correlation (if available) --
+    if let Some(corr) = correlation {
+        println!("\n--- Signal Correlation ---");
+        println!(
+            "Historical data: {} expansion events, {} integration records, {} drift reports",
+            corr.total_expansion_events, corr.total_integration_records, corr.total_drift_reports
+        );
+
+        if corr.candidates.is_empty() {
+            println!("  No refactoring candidates identified.");
+        } else {
+            println!("\n  Refactoring Candidates (structural + historical signals):");
+            for c in &corr.candidates {
+                let mut flags = Vec::new();
+                if c.smells.high_fan_in {
+                    flags.push("high-fan-in");
+                }
+                if c.smells.large_module {
+                    flags.push("large");
+                }
+                if c.smells.in_cycle {
+                    flags.push("cycle");
+                }
+                if c.smells.has_violations {
+                    flags.push("violations");
+                }
+                if c.smells.has_god_files {
+                    flags.push("god-files");
+                }
+                if c.smells.wide_api {
+                    flags.push("wide-api");
+                }
+                println!(
+                    "  {:>5.1} | {:<20} [{}]  confidence {:.0}%",
+                    c.combined_score,
+                    c.module,
+                    flags.join(", "),
+                    c.confidence * 100.0
+                );
+            }
+        }
+    } else {
+        println!("\n(No database found — signal correlation skipped)");
+    }
+}
+
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
@@ -921,6 +1075,48 @@ async fn main() {
                     std::process::exit(1);
                 }
             }
+        }
+        return;
+    }
+
+    if let Some(Commands::Arch { json }) = &cli.command {
+        let config = HarnessConfig::load(&cli.config).unwrap_or_default();
+        let dd = data_dir::DataDir::new(&config.storage.data_dir);
+        let db_path = dd.db();
+        let repo_root = std::env::current_dir().unwrap_or_else(|e| {
+            eprintln!("Error: cannot determine current directory: {e}");
+            std::process::exit(1);
+        });
+
+        let report = structural_metrics::analyze(&repo_root);
+
+        // Try signal correlation if DB exists
+        let correlation = if db_path.exists() {
+            match db::open_or_create(&db_path) {
+                Ok(conn) => match signal_correlator::correlate(&conn, &report, None) {
+                    Ok(c) => Some(c),
+                    Err(e) => {
+                        if !cli.quiet {
+                            eprintln!("Warning: signal correlation failed: {e}");
+                        }
+                        None
+                    }
+                },
+                Err(e) => {
+                    if !cli.quiet {
+                        eprintln!("Warning: could not open database: {e}");
+                    }
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        if *json {
+            print_arch_json(&report, &correlation);
+        } else {
+            print_arch_text(&report, &correlation);
         }
         return;
     }

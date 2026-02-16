@@ -9,6 +9,8 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
+use serde::Serialize;
+
 use crate::boundary_violation::{self, BoundaryViolation};
 use crate::circular_dep::{self, ModuleCycle};
 use crate::fan_in::{self, FanInEntry};
@@ -18,7 +20,7 @@ use crate::module_detect;
 use crate::public_api;
 
 /// Complete structural analysis report for a codebase.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct StructuralReport {
     /// Per-module metrics, keyed by module name.
     pub modules: HashMap<String, ModuleMetrics>,
@@ -35,7 +37,7 @@ pub struct StructuralReport {
 }
 
 /// Structural metrics for a single module.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ModuleMetrics {
     /// Module name.
     pub name: String,
@@ -56,7 +58,7 @@ pub struct ModuleMetrics {
 }
 
 /// Structural metrics for a single file.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct FileMetrics {
     /// File path.
     pub path: PathBuf,

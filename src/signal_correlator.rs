@@ -12,6 +12,7 @@
 use std::collections::HashMap;
 
 use rusqlite::{Connection, Result};
+use serde::Serialize;
 
 use crate::structural_metrics::StructuralReport;
 
@@ -32,7 +33,7 @@ const WIDE_API_THRESHOLD: usize = 15;
 const CANDIDATE_THRESHOLD: f64 = 2.0;
 
 /// Historical signals aggregated for a single module.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ModuleSignals {
     /// Module name.
     pub module: String,
@@ -47,7 +48,7 @@ pub struct ModuleSignals {
 }
 
 /// Structural smell flags for a module.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct StructuralSmells {
     /// High fan-in (many importers).
     pub high_fan_in: bool,
@@ -66,7 +67,7 @@ pub struct StructuralSmells {
 }
 
 /// A module identified as a refactoring candidate.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct RefactorCandidate {
     /// Module name.
     pub module: String,
@@ -81,7 +82,7 @@ pub struct RefactorCandidate {
 }
 
 /// Full correlation report combining structural analysis with historical signals.
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 pub struct CorrelationReport {
     /// Per-module signal data.
     pub module_signals: HashMap<String, ModuleSignals>,
