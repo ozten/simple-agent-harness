@@ -546,6 +546,11 @@ impl IntegrationQueue {
             }
         }
 
+        // Sync working tree to match the updated ref
+        if let Err(e) = self.sync_working_tree() {
+            tracing::warn!(error = %e, "working tree sync failed (non-fatal)");
+        }
+
         // Step 7: Record integration in DB
         let merged_at = chrono_now_utc();
         let manifest_str = manifest_entries.map(|n| format!("{n} entries applied"));
@@ -672,6 +677,24 @@ impl IntegrationQueue {
         }
 
         Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    }
+
+    /// Sync the working tree to match HEAD after an update-ref.
+    ///
+    /// `git update-ref` moves the ref without updating the index or working tree.
+    /// This leaves the main checkout stale — any subsequent commit from the working
+    /// directory would silently revert the integrated changes. Reset to HEAD to fix.
+    fn sync_working_tree(&self) -> Result<(), IntegrationError> {
+        let output = Command::new("git")
+            .args(["reset", "--hard", "HEAD"])
+            .current_dir(&self.repo_dir)
+            .output()
+            .map_err(|e| IntegrationError::Git(format!("failed to sync working tree: {e}")))?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            tracing::warn!("working tree sync failed: {}", stderr.trim());
+        }
+        Ok(())
     }
 
     /// Fast-forward main to the given commit.
@@ -946,16 +969,7 @@ impl IntegrationQueue {
         // Step 2: Ensure the working tree matches HEAD before reverting.
         // Integration uses update-ref which moves the ref without updating the worktree,
         // so we need to sync the working tree to HEAD first.
-        let reset = Command::new("git")
-            .args(["reset", "--hard", "HEAD"])
-            .current_dir(&self.repo_dir)
-            .output()
-            .map_err(|e| IntegrationError::Git(format!("failed to reset working tree: {e}")))?;
-
-        if !reset.status.success() {
-            let stderr = String::from_utf8_lossy(&reset.stderr);
-            tracing::warn!("git reset --hard HEAD failed: {}", stderr.trim());
-        }
+        self.sync_working_tree()?;
 
         // git revert the merge commit
         let output = Command::new("git")

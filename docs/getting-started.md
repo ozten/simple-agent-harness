@@ -29,7 +29,7 @@ Creates `.blacksmith/` with default config, prompt, skills, and database. This h
 
 ## Configuration
 
-Create a `blacksmith.toml` to override defaults:
+Create `.blacksmith/config.toml` to override defaults (or `blacksmith.toml` in the project root — both work, but the new location is preferred):
 
 ```toml
 [session]
@@ -109,10 +109,10 @@ See [Agent Adapters](adapters.md) for supported agents.
 
 ```
 your-project/
-├── blacksmith.toml     # Configuration (optional)
 ├── PROMPT.md           # Agent instructions
 ├── STOP                # Touch to stop gracefully
 └── .blacksmith/        # Data directory (auto-created)
+    ├── config.toml     # Configuration (optional)
     ├── blacksmith.db   # Metrics database
     ├── sessions/       # Session output files
     └── ...

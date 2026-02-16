@@ -17,7 +17,7 @@ Creates the `.blacksmith/` directory structure with default files:
 ├── counter             # Global iteration counter
 ├── lock                # Singleton lock (PID + flock)
 ├── PROMPT.md           # Default agent instructions
-├── blacksmith.toml     # Default configuration
+├── config.toml         # Default configuration
 ├── skills/             # Claude skills
 │   ├── prd-to-beads/
 │   ├── break-down-issue/

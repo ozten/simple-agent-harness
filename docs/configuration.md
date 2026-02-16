@@ -1,6 +1,16 @@
 # Configuration Reference
 
-All configuration is optional. Blacksmith uses sensible defaults and looks for `blacksmith.toml` in the current directory (falls back to `harness.toml` for backwards compatibility).
+All configuration is optional. Blacksmith uses sensible defaults and looks for `.blacksmith/config.toml` (falls back to `blacksmith.toml` then `harness.toml` for backwards compatibility).
+
+### Migrating from `blacksmith.toml`
+
+If you have a `blacksmith.toml` in your project root, move it to the new location:
+
+```bash
+mv blacksmith.toml .blacksmith/config.toml
+```
+
+The old location still works but prints a deprecation warning on each run.
 
 **Precedence:** Defaults < Config file < CLI flags
 

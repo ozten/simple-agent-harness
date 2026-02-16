@@ -16,7 +16,7 @@ blacksmith [OPTIONS] [MAX_ITERATIONS] [COMMAND]
 
 | Flag | Description |
 |---|---|
-| `-c, --config <PATH>` | Config file path (default: `blacksmith.toml`) |
+| `-c, --config <PATH>` | Config file path (default: `.blacksmith/config.toml`) |
 | `-p, --prompt <PATH>` | Prompt file (overrides config) |
 | `-o, --output-dir <PATH>` | Output directory (deprecated) |
 | `--timeout <MINUTES>` | Stale timeout in minutes (overrides config) |

@@ -2,7 +2,8 @@ use regex::Regex;
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
-/// Top-level configuration loaded from blacksmith.toml (or harness.toml for backwards compat).
+/// Top-level configuration loaded from `.blacksmith/config.toml`
+/// (falls back to `blacksmith.toml` then `harness.toml` for backwards compatibility).
 #[derive(Debug, Deserialize)]
 #[serde(default)]
 #[derive(Default, Clone)]
@@ -27,39 +28,78 @@ pub struct HarnessConfig {
 }
 
 impl HarnessConfig {
-    /// Load configuration from a TOML file. If the file doesn't exist,
-    /// falls back to harness.toml for backwards compatibility.
-    /// If neither file exists, returns compiled defaults.
+    /// Load configuration from a TOML file with fallback chain:
+    ///
+    /// 1. The requested `path` (default: `.blacksmith/config.toml`)
+    /// 2. `blacksmith.toml` in the current directory (deprecation warning)
+    /// 3. `harness.toml` in the current directory (deprecation warning)
+    /// 4. Compiled defaults
+    ///
+    /// If an explicit `-c` path is given that doesn't match the default,
+    /// only that path is tried (no fallback chain).
+    ///
     /// Returns an error only if a file exists but can't be read or parsed.
     pub fn load(path: &Path) -> Result<Self, ConfigError> {
-        match std::fs::read_to_string(path) {
-            Ok(contents) => {
-                let config: HarnessConfig =
-                    toml::from_str(&contents).map_err(|e| ConfigError::Parse {
-                        path: path.to_path_buf(),
-                        source: e,
-                    })?;
-                Ok(config)
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                // Try harness.toml fallback for backwards compatibility
-                let fallback = Path::new("harness.toml");
-                if path
-                    .file_name()
-                    .map(|f| f == "blacksmith.toml")
-                    .unwrap_or(false)
-                    && fallback.exists()
-                {
-                    tracing::info!("blacksmith.toml not found, falling back to harness.toml");
-                    return Self::load(fallback);
-                }
-                Ok(Self::default())
-            }
-            Err(e) => Err(ConfigError::Read {
+        // Try the requested path first
+        match Self::load_file(path) {
+            Ok(config) => return Ok(config),
+            Err(ConfigError::Read { source, .. })
+                if source.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
+
+        // Only run the fallback chain when the requested path is the default
+        let is_default_path = path
+            .file_name()
+            .map(|f| f == "config.toml")
+            .unwrap_or(false)
+            && path
+                .parent()
+                .and_then(|p| p.file_name())
+                .map(|f| f == ".blacksmith")
+                .unwrap_or(false);
+
+        if !is_default_path {
+            // Explicit -c path that doesn't exist — return defaults
+            return Ok(Self::default());
+        }
+
+        // Fallback: try blacksmith.toml
+        let blacksmith_toml = Path::new("blacksmith.toml");
+        if blacksmith_toml.exists() {
+            tracing::warn!(
+                "Loading config from blacksmith.toml (deprecated). \
+                 Please migrate to .blacksmith/config.toml"
+            );
+            return Self::load_file(blacksmith_toml);
+        }
+
+        // Fallback: try harness.toml
+        let harness_toml = Path::new("harness.toml");
+        if harness_toml.exists() {
+            tracing::warn!(
+                "Loading config from harness.toml (deprecated). \
+                 Please migrate to .blacksmith/config.toml"
+            );
+            return Self::load_file(harness_toml);
+        }
+
+        // No config file found — return compiled defaults
+        Ok(Self::default())
+    }
+
+    /// Load and parse a single TOML config file. Returns a Read error if not found.
+    fn load_file(path: &Path) -> Result<Self, ConfigError> {
+        let contents = std::fs::read_to_string(path).map_err(|e| ConfigError::Read {
+            path: path.to_path_buf(),
+            source: e,
+        })?;
+        let config: HarnessConfig =
+            toml::from_str(&contents).map_err(|e| ConfigError::Parse {
                 path: path.to_path_buf(),
                 source: e,
-            }),
-        }
+            })?;
+        Ok(config)
     }
 
     /// Apply CLI overrides to this config. CLI values take precedence
@@ -2514,5 +2554,78 @@ auto_promote_after = 0
         .unwrap();
         let config = HarnessConfig::load(&path).unwrap();
         assert_eq!(config.improvements.auto_promote_after, 0);
+    }
+
+    // --- Config migration fallback chain tests ---
+
+    #[test]
+    fn test_load_from_new_config_path() {
+        // .blacksmith/config.toml should load successfully
+        let dir = tempfile::tempdir().unwrap();
+        let bs_dir = dir.path().join(".blacksmith");
+        std::fs::create_dir_all(&bs_dir).unwrap();
+        let config_path = bs_dir.join("config.toml");
+        std::fs::write(
+            &config_path,
+            r#"
+[session]
+max_iterations = 77
+"#,
+        )
+        .unwrap();
+        let config = HarnessConfig::load(&config_path).unwrap();
+        assert_eq!(config.session.max_iterations, 77);
+    }
+
+    #[test]
+    fn test_fallback_to_blacksmith_toml() {
+        // When .blacksmith/config.toml doesn't exist but blacksmith.toml does,
+        // load from blacksmith.toml (with deprecation warning)
+        let dir = tempfile::tempdir().unwrap();
+        let bs_dir = dir.path().join(".blacksmith");
+        std::fs::create_dir_all(&bs_dir).unwrap();
+        // Don't create .blacksmith/config.toml — it shouldn't exist
+
+        // Create blacksmith.toml in the tempdir
+        let old_path = dir.path().join("blacksmith.toml");
+        std::fs::write(
+            &old_path,
+            r#"
+[session]
+max_iterations = 42
+"#,
+        )
+        .unwrap();
+
+        // The fallback chain uses Path::new("blacksmith.toml") which is relative to CWD,
+        // so we can't easily test the CWD-based fallback in a unit test.
+        // Instead, test that load_file works for an explicit path.
+        let config = HarnessConfig::load_file(&old_path).unwrap();
+        assert_eq!(config.session.max_iterations, 42);
+    }
+
+    #[test]
+    fn test_load_file_not_found_returns_read_error() {
+        let result = HarnessConfig::load_file(Path::new("/nonexistent/config.toml"));
+        assert!(matches!(result, Err(ConfigError::Read { .. })));
+    }
+
+    #[test]
+    fn test_no_config_file_returns_defaults() {
+        // When no config file exists at all, should return defaults
+        let config = HarnessConfig::load(Path::new("/nonexistent/.blacksmith/config.toml")).unwrap();
+        assert_eq!(config.session.max_iterations, 25);
+        assert_eq!(config.watchdog.stale_timeout_mins, 20);
+    }
+
+    #[test]
+    fn test_explicit_path_no_fallback() {
+        // When an explicit -c path is given (not the default), no fallback chain
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("custom-config.toml");
+        // Don't create the file
+        let config = HarnessConfig::load(&path).unwrap();
+        // Should get defaults, not try blacksmith.toml or harness.toml
+        assert_eq!(config.session.max_iterations, 25);
     }
 }

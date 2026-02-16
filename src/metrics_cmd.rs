@@ -172,7 +172,7 @@ pub fn handle_targets(
 ) -> Result<(), String> {
     if targets_config.rules.is_empty() {
         println!("No target rules configured in [metrics.targets.rules].");
-        println!("Add rules to your blacksmith.toml to track performance targets.");
+        println!("Add rules to your .blacksmith/config.toml to track performance targets.");
         return Ok(());
     }
 
