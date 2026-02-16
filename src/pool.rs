@@ -207,6 +207,7 @@ impl WorkerPool {
     pub async fn spawn_worker(
         &mut self,
         bead_id: &str,
+        affected_globs: Option<&str>,
         agent_config: &ResolvedAgentConfig,
         prompt: &str,
         output_dir: &Path,
@@ -230,14 +231,14 @@ impl WorkerPool {
             &self.base_branch,
         )?;
 
-        // Insert assignment into DB
+        // Insert assignment into DB with the bead's declared affected set
         let assignment_id = db::insert_worker_assignment(
             db_conn,
             worker_id as i64,
             bead_id,
             &wt_path.to_string_lossy(),
             "coding",
-            None,
+            affected_globs,
         )?;
 
         // Build the output file path using numeric naming convention ({N}.jsonl)
@@ -671,7 +672,7 @@ mod tests {
 
         // Spawn a worker
         let (worker_id, assignment_id) = pool
-            .spawn_worker("beads-test-abc", &agent, "test prompt", &output_dir, &conn)
+            .spawn_worker("beads-test-abc", None, &agent, "test prompt", &output_dir, &conn)
             .await
             .unwrap();
 
@@ -727,7 +728,7 @@ mod tests {
         };
 
         let (worker_id, assignment_id) = pool
-            .spawn_worker("beads-fail", &agent, "test", &output_dir, &conn)
+            .spawn_worker("beads-fail", None, &agent, "test", &output_dir, &conn)
             .await
             .unwrap();
 
@@ -767,7 +768,7 @@ mod tests {
         let conn = db::open_or_create(&db_path).unwrap();
         let agent = test_agent_config();
 
-        pool.spawn_worker("beads-reset", &agent, "test", &output_dir, &conn)
+        pool.spawn_worker("beads-reset", None, &agent, "test", &output_dir, &conn)
             .await
             .unwrap();
 
@@ -805,13 +806,13 @@ mod tests {
         };
 
         // First spawn succeeds
-        pool.spawn_worker("beads-first", &agent, "test", &output_dir, &conn)
+        pool.spawn_worker("beads-first", None, &agent, "test", &output_dir, &conn)
             .await
             .unwrap();
 
         // Second spawn fails — no idle worker
         let result = pool
-            .spawn_worker("beads-second", &agent, "test", &output_dir, &conn)
+            .spawn_worker("beads-second", None, &agent, "test", &output_dir, &conn)
             .await;
 
         assert!(matches!(result, Err(PoolError::NoIdleWorker)));
@@ -837,7 +838,7 @@ mod tests {
             prompt_via: crate::config::PromptVia::Arg,
         };
 
-        pool.spawn_worker("beads-active", &agent, "test", &output_dir, &conn)
+        pool.spawn_worker("beads-active", None, &agent, "test", &output_dir, &conn)
             .await
             .unwrap();
 
@@ -865,7 +866,7 @@ mod tests {
         for i in 0..3 {
             let bead_id = format!("beads-concurrent-{i}");
             let (wid, _) = pool
-                .spawn_worker(&bead_id, &agent, "test", &output_dir, &conn)
+                .spawn_worker(&bead_id, None, &agent, "test", &output_dir, &conn)
                 .await
                 .unwrap();
             assert_eq!(wid, i);
@@ -904,10 +905,10 @@ mod tests {
         let agent = test_agent_config();
 
         // Spawn two workers
-        pool.spawn_worker("beads-num-a", &agent, "test", &output_dir, &conn)
+        pool.spawn_worker("beads-num-a", None, &agent, "test", &output_dir, &conn)
             .await
             .unwrap();
-        pool.spawn_worker("beads-num-b", &agent, "test", &output_dir, &conn)
+        pool.spawn_worker("beads-num-b", None, &agent, "test", &output_dir, &conn)
             .await
             .unwrap();
 

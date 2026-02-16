@@ -279,16 +279,28 @@ pub async fn run(
             let assignable = scheduler::next_assignable_tasks(&ready_beads, &in_progress);
 
             for bead_id in assignable.iter().take(pool.idle_count() as usize) {
-                // Find the bead to get its info for prompting
+                // Find the bead to get its info for prompting and affected set
                 let bead = ready_beads.iter().find(|b| b.id == *bead_id);
                 let prompt = match bead {
                     Some(b) => format!("Work on bead: {}", b.id),
                     None => continue,
                 };
 
+                // Serialize affected globs as comma-separated string for the DB
+                let affected_globs_str = bead.and_then(|b| {
+                    b.affected_globs.as_ref().map(|globs| globs.join(", "))
+                });
+
                 let resolved_agent = config.agent.resolved_coding();
                 match pool
-                    .spawn_worker(bead_id, &resolved_agent, &prompt, &output_dir, &db_conn)
+                    .spawn_worker(
+                        bead_id,
+                        affected_globs_str.as_deref(),
+                        &resolved_agent,
+                        &prompt,
+                        &output_dir,
+                        &db_conn,
+                    )
                     .await
                 {
                     Ok((worker_id, assignment_id)) => {
