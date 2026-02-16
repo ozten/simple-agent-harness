@@ -201,6 +201,37 @@ pub fn schedule_next(
         .next()
 }
 
+/// Like [`schedule_next`], but first ensures each candidate bead has fresh
+/// metadata before evaluating conflicts.
+///
+/// For each `ReadyBead` without explicit `affected_globs`, this calls
+/// [`enrich_with_metadata`] to resolve the bead's affected files via
+/// `ensure_fresh_metadata`. If `base_commit` doesn't match `current_commit`,
+/// the metadata is regenerated. Beads that already have explicit globs are
+/// left unchanged. Beads without intent analysis are skipped gracefully.
+///
+/// Regeneration errors are logged but don't block scheduling — the bead
+/// falls back to its existing metadata (or `None`, which means "affects
+/// everything" and will conflict conservatively).
+#[allow(dead_code)]
+pub fn schedule_next_enriched(
+    ready_beads: &[ReadyBead],
+    in_progress: &[InProgressAssignment],
+    conn: &rusqlite::Connection,
+    repo_root: &std::path::Path,
+    current_commit: &str,
+) -> Option<String> {
+    let mut enriched: Vec<ReadyBead> = ready_beads.to_vec();
+
+    for bead in &mut enriched {
+        enrich_with_metadata(bead, conn, repo_root, current_commit);
+    }
+
+    next_assignable_tasks(&enriched, in_progress)
+        .into_iter()
+        .next()
+}
+
 /// Enrich a `ReadyBead`'s affected globs using fresh metadata from the database.
 ///
 /// If a bead has no `affected_globs` (no `affected:` line in its design), this
@@ -695,5 +726,119 @@ mod tests {
         let changed = enrich_with_metadata(&mut b, &conn, tmp.path(), "commit1");
         assert!(!changed);
         assert!(b.affected_globs.is_none());
+    }
+
+    // ── schedule_next_enriched tests ──
+
+    #[test]
+    fn scheduler_fresh_metadata() {
+        // Scenario: bead "stale-task" has no explicit affected_globs and its
+        // metadata was computed against an old commit. schedule_next_enriched
+        // should call ensure_fresh_metadata, regenerate layer 2 for the
+        // current commit, and use the freshly resolved files for conflict
+        // detection — instead of treating it as "affects everything".
+        let conn = setup_enrich_db();
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("src")).unwrap();
+        std::fs::write(tmp.path().join("src/main.rs"), "mod config;\nfn main() {}").unwrap();
+        std::fs::write(tmp.path().join("src/config.rs"), "pub struct Config;").unwrap();
+
+        // Store intent analysis for the bead — this is Layer 1
+        let analysis = crate::intent::IntentAnalysis {
+            task_id: "stale-task".to_string(),
+            content_hash: "hash-stale".to_string(),
+            target_areas: vec![crate::intent::TargetArea {
+                concept: "config".to_string(),
+                reasoning: "modifies config".to_string(),
+            }],
+        };
+        crate::intent::store(&conn, &analysis).unwrap();
+
+        // Store a stale file resolution at an old commit
+        let stale_res = crate::file_resolution::FileResolution {
+            task_id: "stale-task".to_string(),
+            base_commit: "old-commit".to_string(),
+            intent_hash: "hash-stale".to_string(),
+            mappings: vec![crate::file_resolution::FileResolutionMapping {
+                concept: "config".to_string(),
+                resolved_files: vec!["src/config.rs".to_string()],
+                resolved_modules: vec!["config".to_string()],
+            }],
+            derived: crate::file_resolution::DerivedFields::default(),
+        };
+        crate::file_resolution::store(&conn, &stale_res).unwrap();
+
+        // The bead has no explicit affected_globs (no "affected:" in design)
+        let beads = vec![bead("stale-task", 1, None)];
+
+        // In-progress task locks tests/** — should NOT conflict with config
+        let in_progress = vec![assignment("other", Some(vec!["tests/**"]))];
+
+        // Without enrichment: bead has None globs → treated as "affects
+        // everything" → conflicts with any in-progress task → not assignable.
+        let without = schedule_next(&beads, &in_progress);
+        assert_eq!(without, None, "without enrichment, None globs blocks assignment");
+
+        // With enrichment: ensure_fresh_metadata regenerates metadata for
+        // current commit, populating affected_globs with config-related files.
+        // These don't overlap with tests/** → bead IS assignable.
+        let current_commit = "new-commit";
+        let with = schedule_next_enriched(&beads, &in_progress, &conn, tmp.path(), current_commit);
+        assert_eq!(
+            with,
+            Some("stale-task".to_string()),
+            "with enrichment, resolved globs don't conflict with tests/**"
+        );
+    }
+
+    #[test]
+    fn schedule_next_enriched_skips_no_intent_gracefully() {
+        // A bead with no intent analysis should not crash — it stays with
+        // None globs and is handled conservatively (conflicts with everything).
+        let conn = setup_enrich_db();
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("src")).unwrap();
+        std::fs::write(tmp.path().join("src/main.rs"), "fn main() {}").unwrap();
+
+        let beads = vec![bead("no-intent", 1, None)];
+        let in_progress = vec![assignment("other", Some(vec!["tests/**"]))];
+
+        // No intent → enrichment can't resolve → None globs → conflicts
+        let result =
+            schedule_next_enriched(&beads, &in_progress, &conn, tmp.path(), "commit1");
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn schedule_next_enriched_preserves_explicit_globs() {
+        // A bead with explicit affected_globs should NOT be overwritten
+        // by metadata enrichment.
+        let conn = setup_enrich_db();
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("src")).unwrap();
+        std::fs::write(tmp.path().join("src/main.rs"), "fn main() {}").unwrap();
+
+        let beads = vec![bead("explicit", 1, Some(vec!["docs/**"]))];
+        let in_progress = vec![assignment("other", Some(vec!["src/**"]))];
+
+        let result =
+            schedule_next_enriched(&beads, &in_progress, &conn, tmp.path(), "commit1");
+        // docs/** doesn't conflict with src/** → assignable
+        assert_eq!(result, Some("explicit".to_string()));
+    }
+
+    #[test]
+    fn schedule_next_enriched_no_in_progress() {
+        // When nothing is in progress, all beads are assignable regardless
+        // of enrichment.
+        let conn = setup_enrich_db();
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("src")).unwrap();
+        std::fs::write(tmp.path().join("src/main.rs"), "fn main() {}").unwrap();
+
+        let beads = vec![bead("b1", 1, None), bead("b2", 2, Some(vec!["src/**"]))];
+
+        let result = schedule_next_enriched(&beads, &[], &conn, tmp.path(), "commit1");
+        assert_eq!(result, Some("b1".to_string()));
     }
 }
