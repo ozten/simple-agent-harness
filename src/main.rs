@@ -9,6 +9,7 @@ mod coordinator;
 mod cycle_detect;
 mod data_dir;
 mod db;
+mod defaults;
 mod estimation;
 mod expansion_event;
 mod fan_in;

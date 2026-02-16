@@ -2741,3 +2741,19 @@ Added step 0c to `bd-finish.sh` that verifies bead deliverables before allowing 
 ### Suggested next tasks
 - Consider adding `## Verify` sections to existing open beads that lack them
 - The beads simple-agent-harness-374 and simple-agent-harness-2kb mentioned in the bug report can now be re-attempted — the verification gate will prevent false closures
+
+--- 2026-02-16 17:52:53 | simple-agent-harness-7u1 ---
+## Session: simple-agent-harness-7u1 — Embed default assets in binary
+
+### Completed
+- Created `defaults/` directory with canonical PROMPT.md, blacksmith.toml, and 3 skill SKILL.md files
+- Created `src/defaults.rs` with `include_str!()` embedding all 5 assets + a convenience `SKILLS` array
+- Registered `mod defaults` in `src/main.rs`
+- All 1164 tests pass, clippy/fmt clean (only dead_code warnings expected until consumers exist)
+
+### Current state
+- `defaults::PROMPT_MD`, `defaults::BLACKSMITH_TOML`, `defaults::SKILL_BREAK_DOWN_ISSUE`, `defaults::SKILL_PRD_TO_BEADS`, `defaults::SKILL_SELF_IMPROVEMENT` are available as `&str` constants
+- `defaults::SKILLS` is a `&[(&str, &str)]` slice of (relative_path, content) pairs for bulk extraction
+
+### Next up
+- `simple-agent-harness-auh` (V3.5: Complete first-run extraction of embedded defaults to .blacksmith/) — now unblocked. It should use the `defaults` module to write files to `.blacksmith/` on first run.
