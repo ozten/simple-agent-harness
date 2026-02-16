@@ -445,6 +445,19 @@ impl WorkerPool {
             .collect()
     }
 
+    /// Get worktree paths for all in-progress (Coding) workers.
+    ///
+    /// Returns (worker_id, worktree_path) pairs for workers actively coding,
+    /// so migration maps can be applied to their worktrees after a refactor
+    /// integrates to main.
+    pub fn in_progress_worktrees(&self) -> Vec<(u32, PathBuf)> {
+        self.workers
+            .iter()
+            .filter(|w| w.state == WorkerState::Coding)
+            .filter_map(|w| Some((w.id, w.worktree_path.clone()?)))
+            .collect()
+    }
+
     /// Set a worker's state directly for testing purposes.
     #[doc(hidden)]
     #[allow(dead_code)]

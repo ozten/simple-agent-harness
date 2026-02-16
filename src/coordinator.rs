@@ -10,6 +10,8 @@ use crate::data_dir::DataDir;
 use crate::db;
 use crate::estimation::BeadNode;
 use crate::integrator::{CircuitBreaker, IntegrationQueue, TrippedFailure};
+use crate::migration_apply;
+use crate::migration_map;
 use crate::pool::{PoolError, WorkerPool};
 use crate::scheduler::{self, InProgressAssignment, ReadyBead};
 use crate::signals::SignalHandler;
@@ -219,6 +221,17 @@ pub async fn run(
                         commit = ?result.merge_commit,
                         "integration succeeded"
                     );
+
+                    // Apply migration map to in-progress worktrees
+                    if let Some(ref merge_commit) = result.merge_commit {
+                        apply_migration_to_in_progress_worktrees(
+                            &pool,
+                            &repo_dir,
+                            merge_commit,
+                            &config.workers.base_branch,
+                        );
+                    }
+
                     // Reset the worker back to idle after successful integration
                     if let Err(e) = pool.reset_worker(worker_id) {
                         tracing::warn!(error = %e, worker_id, "failed to reset worker after integration");
@@ -746,6 +759,96 @@ fn handle_tripped_failure(tripped: &TrippedFailure) {
                 error = %e,
                 "failed to run bd update command"
             );
+        }
+    }
+}
+
+/// After a successful integration, detect if the integrated commit contains file renames
+/// and apply migration maps to all in-progress worktrees.
+///
+/// This is the "Handling the In-Progress Agent" flow:
+/// 1. Generate a migration map from the integration commit
+/// 2. For each in-progress worktree, apply the map (relocate imports, merge main, fix loop)
+/// 3. If the fix loop fails, log a warning (the agent will deal with errors at integration time)
+fn apply_migration_to_in_progress_worktrees(
+    pool: &WorkerPool,
+    repo_dir: &std::path::Path,
+    merge_commit: &str,
+    base_branch: &str,
+) {
+    let in_progress = pool.in_progress_worktrees();
+    if in_progress.is_empty() {
+        return;
+    }
+
+    // Find the parent commit (before the integration) to diff against
+    let parent_output = std::process::Command::new("git")
+        .args(["rev-parse", &format!("{merge_commit}^")])
+        .current_dir(repo_dir)
+        .output();
+
+    let parent_commit = match parent_output {
+        Ok(output) if output.status.success() => {
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        }
+        _ => {
+            tracing::debug!("could not determine parent commit for migration map, skipping");
+            return;
+        }
+    };
+
+    // Generate migration map from the integration diff
+    let migration_map =
+        match migration_map::generate_migration_map(repo_dir, &parent_commit, merge_commit) {
+            Ok(map) => map,
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to generate migration map, skipping");
+                return;
+            }
+        };
+
+    if migration_map.is_empty() {
+        tracing::debug!("migration map is empty (no renames), skipping worktree updates");
+        return;
+    }
+
+    tracing::info!(
+        file_moves = migration_map.file_moves.len(),
+        symbol_relocations = migration_map.symbol_relocations.len(),
+        in_progress_worktrees = in_progress.len(),
+        "applying migration map to in-progress worktrees"
+    );
+
+    for (worker_id, worktree_path) in &in_progress {
+        match migration_apply::apply_migration_map(&migration_map, worktree_path, base_branch) {
+            Ok(result) => {
+                tracing::info!(
+                    worker_id,
+                    files_modified = result.files_modified,
+                    replacements = result.replacements_made,
+                    fix_iterations = result.fix_iterations,
+                    cargo_check_passed = result.cargo_check_passed,
+                    "migration map applied to in-progress worktree"
+                );
+            }
+            Err(migration_apply::MigrationApplyError::FixLoopExhausted {
+                iterations,
+                ref last_errors,
+            }) => {
+                tracing::warn!(
+                    worker_id,
+                    iterations,
+                    errors = %last_errors,
+                    "migration fix loop exhausted for in-progress worktree, agent will need to handle errors"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    worker_id,
+                    error = %e,
+                    "failed to apply migration map to in-progress worktree"
+                );
+            }
         }
     }
 }

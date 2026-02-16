@@ -27,6 +27,8 @@ mod metadata_regen;
 mod metrics;
 mod metrics_cmd;
 mod migrate;
+mod migration_apply;
+mod migration_map;
 mod module_detect;
 mod pool;
 mod prompt;
