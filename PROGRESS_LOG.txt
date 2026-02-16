@@ -2321,3 +2321,32 @@
 - simple-agent-harness-33k (P2): Add circular dependency detection for modules (now unblocked)
 - simple-agent-harness-aol (P2): Add boundary violation detector for module imports (now unblocked)
 - simple-agent-harness-ehy (P2): Add public API surface extractor for modules (now unblocked)
+
+--- 2026-02-16 00:01:49 | simple-agent-harness-ikw ---
+## Last Session: Implement file resolution from intent concepts (2026-02-16)
+
+### What Was Done
+- Implemented bead simple-agent-harness-ikw: file resolution from intent concepts
+- Added `resolve()` function to src/file_resolution.rs that maps Layer 1 intent concepts to concrete files and modules
+- Core logic:
+  - `concept_to_keywords()` — splits concept names like "auth_endpoints" into keywords ["auth", "endpoints"]
+  - `keywords_match_name()` — case-insensitive substring matching of keywords against file/module names
+  - `resolve()` — scans module names and file stems for keyword matches, collects resolved files/modules per concept
+  - `compute_blast_radius()` — BFS on reverse import graph to find transitive dependents
+  - `file_relative_path()` — converts absolute paths to src-relative paths for storage
+  - `module_detect_name()` — derives module name from directory path
+- Skips generic entry points (main.rs, mod.rs, lib.rs) to avoid overly broad matches
+- Computes affected_modules (direct matches) and blast_radius (transitive dependents)
+- boundary_signatures left empty (populated by public API extractor bead)
+- 17 new tests (31 total in file_resolution module): keyword splitting, matching, resolve with file/module matches, compound concepts, blast radius (empty/direct/transitive), no-match, multiple concepts, field passthrough, entry point skipping
+
+### Current State
+- Compilation clean (only pre-existing dead_code warnings for not-yet-wired modules)
+- Full test suite: 987 passed, 0 failed, 1 ignored
+- file_resolution::resolve() is ready for downstream beads (scheduler integration, metadata regeneration)
+
+### Suggested Next Tasks
+- simple-agent-harness-ehy (P2): Add public API surface extractor for modules (populates boundary_signatures)
+- simple-agent-harness-q5v (P2): Add fan-in hotspot scoring for files
+- simple-agent-harness-33k (P2): Add circular dependency detection for modules
+- simple-agent-harness-90v (P2): Implement ensure_fresh_metadata for scheduler integration (now unblocked)

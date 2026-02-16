@@ -6,6 +6,12 @@
 
 use rusqlite::{params, Connection, Result};
 use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
+
+use crate::import_graph;
+use crate::intent::TargetArea;
+use crate::module_detect;
 
 /// A single concept-to-files mapping: which files and modules correspond to a concept.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -208,6 +214,207 @@ pub fn is_fresh(
         |row| row.get(0),
     )?;
     Ok(count > 0)
+}
+
+/// Resolve intent concepts to concrete files and modules using static analysis.
+///
+/// For each `TargetArea` concept, scans file names and module names for matches.
+/// A concept like `"auth_endpoints"` matches files/modules containing `"auth"` or
+/// `"endpoint"` in their name. Concepts are split on `_` into keywords.
+///
+/// After resolving, computes:
+/// - `affected_modules`: all modules touched by any concept
+/// - `blast_radius`: transitive dependents (files that import from affected files)
+pub fn resolve(
+    repo_root: &Path,
+    task_id: &str,
+    base_commit: &str,
+    intent_hash: &str,
+    target_areas: &[TargetArea],
+) -> FileResolution {
+    let import_graph = import_graph::build_import_graph(repo_root);
+    let modules = module_detect::detect_modules_from_repo(repo_root);
+    let src_root = repo_root.join("src");
+
+    let mut mappings = Vec::new();
+    let mut all_affected_modules: HashSet<String> = HashSet::new();
+    let mut all_resolved_files: HashSet<PathBuf> = HashSet::new();
+
+    for area in target_areas {
+        let keywords = concept_to_keywords(&area.concept);
+        let mut resolved_files: Vec<String> = Vec::new();
+        let mut resolved_modules: Vec<String> = Vec::new();
+
+        // Match against module names
+        for (mod_name, module) in &modules {
+            if keywords_match_name(&keywords, mod_name) {
+                resolved_modules.push(mod_name.clone());
+                all_affected_modules.insert(mod_name.clone());
+                for file in &module.files {
+                    let rel = file_relative_path(&src_root, file);
+                    if !resolved_files.contains(&rel) {
+                        resolved_files.push(rel);
+                    }
+                    all_resolved_files.insert(file.clone());
+                }
+            }
+        }
+
+        // Match against individual file names (stem without extension)
+        for file in import_graph.keys() {
+            let stem = file.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+            if stem == "mod" || stem == "main" || stem == "lib" {
+                continue; // Skip generic entry points, they match too broadly
+            }
+            if keywords_match_name(&keywords, stem) {
+                let rel = file_relative_path(&src_root, file);
+                if !resolved_files.contains(&rel) {
+                    resolved_files.push(rel);
+                    all_resolved_files.insert(file.clone());
+                }
+                // Also mark the containing module
+                if let Some(parent) = file.parent() {
+                    let mod_name = if parent == src_root {
+                        "crate".to_string()
+                    } else {
+                        module_detect_name(&src_root, parent)
+                    };
+                    if !resolved_modules.contains(&mod_name) {
+                        resolved_modules.push(mod_name.clone());
+                    }
+                    all_affected_modules.insert(mod_name);
+                }
+            }
+        }
+
+        resolved_files.sort();
+        resolved_modules.sort();
+
+        mappings.push(FileResolutionMapping {
+            concept: area.concept.clone(),
+            resolved_files,
+            resolved_modules,
+        });
+    }
+
+    // Compute blast radius: find all files that transitively depend on resolved files
+    let blast_radius_files = compute_blast_radius(&import_graph, &all_resolved_files);
+
+    // Convert blast radius files to module names
+    let mut blast_modules: HashSet<String> = HashSet::new();
+    for file in &blast_radius_files {
+        if let Some(parent) = file.parent() {
+            let mod_name = if parent == src_root {
+                "crate".to_string()
+            } else {
+                module_detect_name(&src_root, parent)
+            };
+            blast_modules.insert(mod_name);
+        }
+    }
+    // Include the affected modules themselves
+    for m in &all_affected_modules {
+        blast_modules.insert(m.clone());
+    }
+    let mut blast_radius: Vec<String> = blast_modules.into_iter().collect();
+    blast_radius.sort();
+
+    let mut affected_modules: Vec<String> = all_affected_modules.into_iter().collect();
+    affected_modules.sort();
+
+    FileResolution {
+        task_id: task_id.to_string(),
+        base_commit: base_commit.to_string(),
+        intent_hash: intent_hash.to_string(),
+        mappings,
+        derived: DerivedFields {
+            affected_modules,
+            blast_radius,
+            boundary_signatures: Vec::new(), // Populated by the public API extractor (separate bead)
+        },
+    }
+}
+
+/// Split a concept name like `"auth_endpoints"` into keywords `["auth", "endpoints"]`.
+fn concept_to_keywords(concept: &str) -> Vec<String> {
+    concept
+        .split('_')
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_lowercase())
+        .collect()
+}
+
+/// Check if any keyword matches within a name (case-insensitive substring match).
+fn keywords_match_name(keywords: &[String], name: &str) -> bool {
+    let lower = name.to_lowercase();
+    keywords.iter().any(|kw| lower.contains(kw.as_str()))
+}
+
+/// Compute the relative path of a file from the src root (e.g., `"src/auth/handlers.rs"`).
+fn file_relative_path(src_root: &Path, file: &Path) -> String {
+    // Return path relative to src_root's parent (the repo root)
+    if let Some(repo_root) = src_root.parent() {
+        file.strip_prefix(repo_root)
+            .unwrap_or(file)
+            .to_string_lossy()
+            .to_string()
+    } else {
+        file.to_string_lossy().to_string()
+    }
+}
+
+/// Derive a module name from a directory path relative to src_root.
+fn module_detect_name(src_root: &Path, dir: &Path) -> String {
+    match dir.strip_prefix(src_root) {
+        Ok(rel) => rel
+            .components()
+            .map(|c| c.as_os_str().to_string_lossy().to_string())
+            .collect::<Vec<_>>()
+            .join("::"),
+        Err(_) => dir
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "unknown".to_string()),
+    }
+}
+
+/// Compute the transitive dependents (blast radius) of a set of files.
+///
+/// Returns all files that directly or transitively import from any file in `sources`.
+/// Uses a reverse graph (dependents → dependency) and BFS.
+fn compute_blast_radius(
+    import_graph: &HashMap<PathBuf, Vec<PathBuf>>,
+    sources: &HashSet<PathBuf>,
+) -> HashSet<PathBuf> {
+    // Build reverse graph: for each file, who imports it?
+    let mut reverse: HashMap<&PathBuf, Vec<&PathBuf>> = HashMap::new();
+    for (importer, deps) in import_graph {
+        for dep in deps {
+            reverse.entry(dep).or_default().push(importer);
+        }
+    }
+
+    // BFS from all source files
+    let mut visited: HashSet<PathBuf> = HashSet::new();
+    let mut queue: Vec<&PathBuf> = sources.iter().collect();
+
+    while let Some(file) = queue.pop() {
+        if let Some(dependents) = reverse.get(file) {
+            for dep in dependents {
+                if visited.insert((*dep).clone()) {
+                    queue.push(dep);
+                }
+            }
+        }
+    }
+
+    // Remove the source files themselves from the blast radius
+    // (blast radius is *other* files affected, not the files themselves)
+    for source in sources {
+        visited.remove(source);
+    }
+
+    visited
 }
 
 #[cfg(test)]
@@ -496,5 +703,280 @@ mod tests {
         let r2 = get(&conn, "task-b", "same-commit", "hb").unwrap().unwrap();
         assert_eq!(r1.mappings[0].concept, "auth");
         assert_eq!(r2.mappings[0].concept, "db");
+    }
+
+    // --- Resolution tests ---
+
+    fn setup_project(files: &[(&str, &str)]) -> tempfile::TempDir {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        for (path, content) in files {
+            let full = src.join(path);
+            if let Some(parent) = full.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(&full, content).unwrap();
+        }
+        tmp
+    }
+
+    #[test]
+    fn concept_keywords_split() {
+        assert_eq!(
+            concept_to_keywords("auth_endpoints"),
+            vec!["auth", "endpoints"]
+        );
+        assert_eq!(concept_to_keywords("config"), vec!["config"]);
+        assert_eq!(
+            concept_to_keywords("database_schema"),
+            vec!["database", "schema"]
+        );
+        assert_eq!(concept_to_keywords(""), Vec::<String>::new());
+    }
+
+    #[test]
+    fn keywords_match_basic() {
+        let kw = vec!["auth".to_string()];
+        assert!(keywords_match_name(&kw, "auth"));
+        assert!(keywords_match_name(&kw, "auth_handlers"));
+        assert!(!keywords_match_name(&kw, "config"));
+    }
+
+    #[test]
+    fn keywords_match_case_insensitive() {
+        let kw = vec!["auth".to_string()];
+        assert!(keywords_match_name(&kw, "Auth"));
+        assert!(keywords_match_name(&kw, "AUTH_HANDLERS"));
+    }
+
+    #[test]
+    fn keywords_match_any_keyword() {
+        let kw = vec!["auth".to_string(), "endpoints".to_string()];
+        assert!(keywords_match_name(&kw, "auth")); // matches first
+        assert!(keywords_match_name(&kw, "endpoints")); // matches second
+        assert!(keywords_match_name(&kw, "api_endpoints")); // substring match
+        assert!(!keywords_match_name(&kw, "config"));
+    }
+
+    #[test]
+    fn resolve_empty_concepts() {
+        let tmp = setup_project(&[("main.rs", "fn main() {}")]);
+        let res = resolve(tmp.path(), "task-1", "commit", "hash", &[]);
+        assert!(res.mappings.is_empty());
+        assert!(res.derived.affected_modules.is_empty());
+        assert!(res.derived.blast_radius.is_empty());
+    }
+
+    #[test]
+    fn resolve_matches_file_by_name() {
+        let tmp = setup_project(&[
+            ("main.rs", "mod config;\nfn main() {}"),
+            ("config.rs", "pub struct Config;"),
+        ]);
+        let areas = vec![TargetArea {
+            concept: "config".to_string(),
+            reasoning: "needs config".to_string(),
+        }];
+        let res = resolve(tmp.path(), "task-1", "commit", "hash", &areas);
+        assert_eq!(res.mappings.len(), 1);
+        assert!(!res.mappings[0].resolved_files.is_empty());
+        assert!(res.mappings[0]
+            .resolved_files
+            .iter()
+            .any(|f| f.contains("config.rs")));
+    }
+
+    #[test]
+    fn resolve_matches_module_directory() {
+        let tmp = setup_project(&[
+            ("main.rs", "mod adapters;\nfn main() {}"),
+            ("adapters/mod.rs", "pub mod claude;"),
+            ("adapters/claude.rs", "pub struct ClaudeAdapter;"),
+        ]);
+        let areas = vec![TargetArea {
+            concept: "adapters".to_string(),
+            reasoning: "adapter changes".to_string(),
+        }];
+        let res = resolve(tmp.path(), "task-1", "commit", "hash", &areas);
+        assert_eq!(res.mappings.len(), 1);
+        // Should match the adapters module and its files
+        assert!(res.mappings[0]
+            .resolved_modules
+            .contains(&"adapters".to_string()));
+        assert!(res.mappings[0]
+            .resolved_files
+            .iter()
+            .any(|f| f.contains("adapters")));
+        assert!(res
+            .derived
+            .affected_modules
+            .contains(&"adapters".to_string()));
+    }
+
+    #[test]
+    fn resolve_compound_concept_matches_any_keyword() {
+        let tmp = setup_project(&[
+            ("main.rs", "mod auth;\nmod config;\nfn main() {}"),
+            ("auth.rs", "pub fn login() {}"),
+            ("config.rs", "pub struct Config;"),
+        ]);
+        let areas = vec![TargetArea {
+            concept: "auth_config".to_string(),
+            reasoning: "auth config".to_string(),
+        }];
+        let res = resolve(tmp.path(), "task-1", "commit", "hash", &areas);
+        assert_eq!(res.mappings.len(), 1);
+        // Should match both auth.rs and config.rs (keywords "auth" and "config")
+        let files = &res.mappings[0].resolved_files;
+        assert!(files.iter().any(|f| f.contains("auth.rs")));
+        assert!(files.iter().any(|f| f.contains("config.rs")));
+    }
+
+    #[test]
+    fn resolve_no_match_returns_empty_mapping() {
+        let tmp = setup_project(&[
+            ("main.rs", "mod config;\nfn main() {}"),
+            ("config.rs", "pub struct Config;"),
+        ]);
+        let areas = vec![TargetArea {
+            concept: "database".to_string(),
+            reasoning: "needs db".to_string(),
+        }];
+        let res = resolve(tmp.path(), "task-1", "commit", "hash", &areas);
+        assert_eq!(res.mappings.len(), 1);
+        assert!(res.mappings[0].resolved_files.is_empty());
+        assert!(res.mappings[0].resolved_modules.is_empty());
+    }
+
+    #[test]
+    fn resolve_blast_radius_transitive() {
+        // main imports config, config imports db
+        // If we resolve "db", blast radius should include config and main (transitively)
+        let tmp = setup_project(&[
+            (
+                "main.rs",
+                "mod config;\nmod db;\nuse crate::config::Config;\nfn main() {}",
+            ),
+            ("config.rs", "use crate::db::Database;\npub struct Config;"),
+            ("db.rs", "pub struct Database;"),
+        ]);
+        let areas = vec![TargetArea {
+            concept: "db".to_string(),
+            reasoning: "db changes".to_string(),
+        }];
+        let res = resolve(tmp.path(), "task-1", "commit", "hash", &areas);
+
+        // blast_radius should include "crate" (main.rs and config.rs are both in crate module)
+        assert!(!res.derived.blast_radius.is_empty());
+        assert!(res.derived.blast_radius.contains(&"crate".to_string()));
+    }
+
+    #[test]
+    fn resolve_multiple_concepts() {
+        let tmp = setup_project(&[
+            ("main.rs", "mod auth;\nmod db;\nfn main() {}"),
+            ("auth.rs", "pub fn login() {}"),
+            ("db.rs", "pub struct Database;"),
+        ]);
+        let areas = vec![
+            TargetArea {
+                concept: "auth".to_string(),
+                reasoning: "auth".to_string(),
+            },
+            TargetArea {
+                concept: "db".to_string(),
+                reasoning: "db".to_string(),
+            },
+        ];
+        let res = resolve(tmp.path(), "task-1", "commit", "hash", &areas);
+        assert_eq!(res.mappings.len(), 2);
+        assert!(res.mappings[0]
+            .resolved_files
+            .iter()
+            .any(|f| f.contains("auth.rs")));
+        assert!(res.mappings[1]
+            .resolved_files
+            .iter()
+            .any(|f| f.contains("db.rs")));
+    }
+
+    #[test]
+    fn resolve_sets_task_and_commit_fields() {
+        let tmp = setup_project(&[("main.rs", "fn main() {}")]);
+        let res = resolve(tmp.path(), "task-42", "abc123", "hash-xyz", &[]);
+        assert_eq!(res.task_id, "task-42");
+        assert_eq!(res.base_commit, "abc123");
+        assert_eq!(res.intent_hash, "hash-xyz");
+    }
+
+    #[test]
+    fn compute_blast_radius_empty_sources() {
+        let graph: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
+        let sources: HashSet<PathBuf> = HashSet::new();
+        let result = compute_blast_radius(&graph, &sources);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn compute_blast_radius_direct_dependent() {
+        let a = PathBuf::from("a.rs");
+        let b = PathBuf::from("b.rs");
+        let mut graph = HashMap::new();
+        graph.insert(b.clone(), vec![a.clone()]); // b imports a
+        graph.insert(a.clone(), vec![]);
+
+        let mut sources = HashSet::new();
+        sources.insert(a);
+        let result = compute_blast_radius(&graph, &sources);
+        assert!(result.contains(&b));
+    }
+
+    #[test]
+    fn compute_blast_radius_transitive() {
+        let a = PathBuf::from("a.rs");
+        let b = PathBuf::from("b.rs");
+        let c = PathBuf::from("c.rs");
+        let mut graph = HashMap::new();
+        graph.insert(c.clone(), vec![b.clone()]); // c → b → a
+        graph.insert(b.clone(), vec![a.clone()]);
+        graph.insert(a.clone(), vec![]);
+
+        let mut sources = HashSet::new();
+        sources.insert(a);
+        let result = compute_blast_radius(&graph, &sources);
+        assert!(result.contains(&b));
+        assert!(result.contains(&c));
+    }
+
+    #[test]
+    fn compute_blast_radius_excludes_sources() {
+        let a = PathBuf::from("a.rs");
+        let b = PathBuf::from("b.rs");
+        let mut graph = HashMap::new();
+        graph.insert(b.clone(), vec![a.clone()]);
+        graph.insert(a.clone(), vec![]);
+
+        let mut sources = HashSet::new();
+        sources.insert(a.clone());
+        let result = compute_blast_radius(&graph, &sources);
+        assert!(!result.contains(&a)); // source not in blast radius
+        assert!(result.contains(&b));
+    }
+
+    #[test]
+    fn resolve_skips_generic_entry_points() {
+        // "main", "mod", "lib" stems should not match on keywords
+        let tmp = setup_project(&[
+            ("main.rs", "fn main() {}"),
+            ("lib.rs", "pub fn lib_thing() {}"),
+        ]);
+        let areas = vec![TargetArea {
+            concept: "main".to_string(),
+            reasoning: "main".to_string(),
+        }];
+        let res = resolve(tmp.path(), "task-1", "commit", "hash", &areas);
+        // main.rs should NOT match because we skip "main" stems
+        assert!(res.mappings[0].resolved_files.is_empty());
     }
 }

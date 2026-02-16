@@ -1,24 +1,27 @@
-## Last Session: Add module boundary detection from file tree (2026-02-15)
+## Last Session: Implement file resolution from intent concepts (2026-02-16)
 
 ### What Was Done
-- Implemented bead simple-agent-harness-75u: module boundary detection
-- Created src/module_detect.rs with:
-  - `Module` struct (name, root_path, files, has_entry_point, entry_point, submodules)
-  - `detect_modules(src_root, rs_files)` — groups .rs files by parent directory into logical modules
-  - `detect_modules_from_repo(repo_root)` — convenience wrapper that collects files and detects modules
-  - `module_name_from_path()` — derives module name from directory path (e.g., "adapters::claude")
-  - `find_entry_point()` — detects mod.rs/lib.rs/main.rs entry points
-  - `detect_submodules()` — finds direct child submodule directories
-- Added `mod module_detect;` to main.rs
-- 11 unit tests all pass covering: empty project, single file, sibling modules, subdir with mod.rs, nested submodules, submodule detection, no entry point, lib.rs entry point, name derivation, sorted files, integration with import_graph
+- Implemented bead simple-agent-harness-ikw: file resolution from intent concepts
+- Added `resolve()` function to src/file_resolution.rs that maps Layer 1 intent concepts to concrete files and modules
+- Core logic:
+  - `concept_to_keywords()` — splits concept names like "auth_endpoints" into keywords ["auth", "endpoints"]
+  - `keywords_match_name()` — case-insensitive substring matching of keywords against file/module names
+  - `resolve()` — scans module names and file stems for keyword matches, collects resolved files/modules per concept
+  - `compute_blast_radius()` — BFS on reverse import graph to find transitive dependents
+  - `file_relative_path()` — converts absolute paths to src-relative paths for storage
+  - `module_detect_name()` — derives module name from directory path
+- Skips generic entry points (main.rs, mod.rs, lib.rs) to avoid overly broad matches
+- Computes affected_modules (direct matches) and blast_radius (transitive dependents)
+- boundary_signatures left empty (populated by public API extractor bead)
+- 17 new tests (31 total in file_resolution module): keyword splitting, matching, resolve with file/module matches, compound concepts, blast radius (empty/direct/transitive), no-match, multiple concepts, field passthrough, entry point skipping
 
 ### Current State
-- Compilation clean (only pre-existing dead_code warnings)
-- Full test suite: 970 passed, 0 failed, 1 ignored
-- module_detect is ready for downstream beads (cycle detection, boundary violations, public API extraction)
+- Compilation clean (only pre-existing dead_code warnings for not-yet-wired modules)
+- Full test suite: 987 passed, 0 failed, 1 ignored
+- file_resolution::resolve() is ready for downstream beads (scheduler integration, metadata regeneration)
 
 ### Suggested Next Tasks
-- simple-agent-harness-ikw (P1): Implement file resolution from intent concepts (now unblocked)
-- simple-agent-harness-33k (P2): Add circular dependency detection for modules (now unblocked)
-- simple-agent-harness-aol (P2): Add boundary violation detector for module imports (now unblocked)
-- simple-agent-harness-ehy (P2): Add public API surface extractor for modules (now unblocked)
+- simple-agent-harness-ehy (P2): Add public API surface extractor for modules (populates boundary_signatures)
+- simple-agent-harness-q5v (P2): Add fan-in hotspot scoring for files
+- simple-agent-harness-33k (P2): Add circular dependency detection for modules
+- simple-agent-harness-90v (P2): Implement ensure_fresh_metadata for scheduler integration (now unblocked)
