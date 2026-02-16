@@ -430,6 +430,11 @@ impl WorkerPool {
         self.workers.get(worker_id as usize)?.worktree_path.clone()
     }
 
+    /// Get the worktrees directory path.
+    pub fn worktrees_dir(&self) -> &Path {
+        &self.worktrees_dir
+    }
+
     /// Get active worktree paths (for orphan cleanup).
     #[allow(dead_code)]
     pub fn active_worktree_paths(&self) -> Vec<PathBuf> {
@@ -484,6 +489,7 @@ fn spawn_agent_in_worktree(
     let mut child = Command::new(&agent_config.command)
         .args(&args)
         .current_dir(worktree_path)
+        .stdin(Stdio::null())
         .stdout(Stdio::from(output_file))
         .stderr(Stdio::from(output_file_stderr))
         .process_group(0)

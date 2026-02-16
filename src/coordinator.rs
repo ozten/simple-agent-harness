@@ -7,13 +7,13 @@
 use crate::config::HarnessConfig;
 use crate::cycle_detect;
 use crate::data_dir::DataDir;
-use crate::worktree;
 use crate::db;
 use crate::estimation::BeadNode;
 use crate::integrator::{CircuitBreaker, IntegrationQueue, TrippedFailure};
 use crate::pool::{PoolError, WorkerPool};
 use crate::scheduler::{self, InProgressAssignment, ReadyBead};
 use crate::signals::SignalHandler;
+use crate::worktree;
 use rusqlite::Connection;
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -85,23 +85,6 @@ pub async fn run(
         };
     }
 
-    // Recover orphaned in_progress beads from previous crash/kill.
-    // Since the singleton lock guarantees no other coordinator is running,
-    // any in_progress beads without an active worker are guaranteed orphaned.
-    recover_orphaned_beads();
-
-    // Clean up stale worktrees from a previous crash/stop.
-    // No workers are active yet, so pass an empty active_paths set.
-    match worktree::cleanup_orphans(&repo_dir, &worktrees_dir, &[]) {
-        Ok(cleaned) if !cleaned.is_empty() => {
-            tracing::info!(count = cleaned.len(), "cleaned up orphaned worktrees");
-        }
-        Err(e) => {
-            tracing::warn!(error = %e, "failed to clean up orphaned worktrees");
-        }
-        _ => {}
-    }
-
     // Load global iteration counter so worker output files use numeric naming
     let counter_path = data_dir.counter();
     let initial_session_id = load_counter(&counter_path);
@@ -112,7 +95,8 @@ pub async fn run(
         initial_session_id,
     );
     let output_dir = data_dir.sessions_dir();
-    let integration_queue = IntegrationQueue::new(repo_dir, config.workers.base_branch.clone());
+    let integration_queue =
+        IntegrationQueue::new(repo_dir.clone(), config.workers.base_branch.clone());
     let mut circuit_breaker = CircuitBreaker::new();
 
     // Ensure output directory exists
@@ -134,6 +118,23 @@ pub async fn run(
         max_workers = config.workers.max,
         "coordinator starting multi-agent mode"
     );
+
+    // Recover orphaned in_progress beads from previous crash/kill.
+    // Since the singleton lock guarantees no other coordinator is running,
+    // any in_progress beads without an active worker are guaranteed orphaned.
+    recover_orphaned_beads();
+
+    // Clean up stale worktrees from previous crash/kill.
+    // No workers are active yet, so every existing worktree is orphaned.
+    match worktree::cleanup_orphans(&repo_dir, pool.worktrees_dir(), &[]) {
+        Ok(cleaned) if !cleaned.is_empty() => {
+            tracing::info!(count = cleaned.len(), "cleaned up stale worktrees from previous run");
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to clean up stale worktrees");
+        }
+        _ => {}
+    }
 
     loop {
         // Check for shutdown signals
