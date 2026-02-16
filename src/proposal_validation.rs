@@ -226,8 +226,10 @@ fn simulate_module_split(
     let files_per_module = if proposal.proposed_modules.is_empty() {
         0
     } else {
-        (proposal.affected_files.len() + proposal.proposed_modules.len() - 1)
-            / proposal.proposed_modules.len()
+        proposal
+            .affected_files
+            .len()
+            .div_ceil(proposal.proposed_modules.len())
     };
 
     for (i, module_name) in proposal.proposed_modules.iter().enumerate() {
