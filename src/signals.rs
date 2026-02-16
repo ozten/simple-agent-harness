@@ -1,8 +1,8 @@
 /// Signal handling for graceful shutdown.
 ///
 /// Handles SIGINT (Ctrl-C), SIGTERM, and STOP file detection.
-/// First SIGINT: finish current session then exit.
-/// Second SIGINT (within 3s): kill current session immediately.
+/// First SIGINT: finish current session then exit (SIGTERM to child).
+/// Second SIGINT within 3s OR 3s timeout: SIGKILL child immediately.
 /// SIGTERM: same as single SIGINT.
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
@@ -18,7 +18,7 @@ pub struct SignalHandler {
 struct SignalState {
     /// Set on first SIGINT or SIGTERM — finish current session, then exit.
     shutdown_requested: AtomicBool,
-    /// Set on second SIGINT within 3s — kill child immediately.
+    /// Set on second SIGINT or 3s timeout — kill child immediately.
     force_kill: AtomicBool,
     /// PID of the current child process (0 = no child running).
     child_pid: AtomicI32,
@@ -61,7 +61,7 @@ impl SignalHandler {
     }
 
     /// Returns `true` if immediate force-kill was requested
-    /// (second SIGINT within 3 seconds).
+    /// (second SIGINT within 3s, or 3s timeout after first SIGINT).
     pub fn force_kill_requested(&self) -> bool {
         self.inner.force_kill.load(Ordering::SeqCst)
     }
@@ -107,7 +107,7 @@ impl SignalHandler {
 
     /// Spawn a tokio task that listens for SIGINT.
     /// First SIGINT → graceful shutdown + SIGTERM child so it can exit cleanly.
-    /// Second SIGINT (any time after first) → SIGKILL the child process group.
+    /// Second SIGINT within 3s OR 3s timeout → SIGKILL the child process group.
     fn spawn_sigint_listener(&self) {
         let state = self.inner.clone();
         tokio::spawn(async move {
@@ -117,7 +117,9 @@ impl SignalHandler {
 
             // Wait for first SIGINT
             sigint.recv().await;
-            tracing::warn!("caught SIGINT, finishing current session (Ctrl+C again to force-kill)");
+            tracing::warn!(
+                "caught SIGINT, finishing current session (Ctrl+C again or 3s to force-kill)"
+            );
             state.shutdown_requested.store(true, Ordering::SeqCst);
 
             // Send SIGTERM to child so it can exit gracefully
@@ -126,9 +128,16 @@ impl SignalHandler {
                 term_process_group(pid);
             }
 
-            // Wait indefinitely for a second SIGINT (no timeout)
-            sigint.recv().await;
-            tracing::warn!("double SIGINT: force-killing child process group");
+            // Wait up to 3 seconds for a second SIGINT, then auto-escalate
+            tokio::select! {
+                _ = sigint.recv() => {
+                    tracing::warn!("double SIGINT: force-killing child process group");
+                }
+                _ = tokio::time::sleep(std::time::Duration::from_secs(3)) => {
+                    tracing::warn!("3s timeout after SIGINT: force-killing child process group");
+                }
+            }
+
             state.force_kill.store(true, Ordering::SeqCst);
             state.force_kill_notify.notify_waiters();
 
