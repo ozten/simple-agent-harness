@@ -24,7 +24,7 @@ If you want to narrate what you're doing, include the narration AND the tool cal
 
 ### Rule C: After closing your bead, EXIT IMMEDIATELY.
 Do NOT triage other beads. Do NOT run `bd ready` to find more work. Do NOT explore what to do next.
-The sequence after closing is: write PROGRESS.txt → run `bd-finish.sh` → STOP.
+The sequence after closing is: write PROGRESS.txt → run `blacksmith finish` → STOP.
 Each session handles exactly ONE bead. The loop script handles picking the next one.
 
 ---
@@ -49,7 +49,7 @@ Before claiming a task, run `bd show <id>` and check its notes for `[FAILED-ATTE
 - **2+ prior failures**: Do NOT attempt implementation. Instead, decompose the bead into smaller sub-beads:
   1. Analyze the bead description and failure notes to understand why it keeps failing
   2. Break it into 2-5 smaller sub-beads (follow the break-down-issue workflow: create children, wire deps, make original blocked-by children)
-  3. Write PROGRESS.txt noting the decomposition, then exit cleanly via `bd-finish.sh`
+  3. Write PROGRESS.txt noting the decomposition, then exit cleanly via `blacksmith finish`
   4. The next session will pick up the newly-unblocked child beads
 
 If ALL top-priority ready beads have 2+ failures and you've decomposed them, move to the next priority level.
@@ -88,18 +88,18 @@ For the selected task (e.g., bd-X):
    **4c. Integration check:**
    Before closing, verify your changes don't break existing callers. Grep for the function/struct names you changed or renamed. If other code references them, confirm those references still work.
 
-5. **Finish** — write PROGRESS.txt and call bd-finish.sh, then STOP (Rule C):
+5. **Finish** — write PROGRESS.txt and call blacksmith finish, then STOP (Rule C):
    - **Write PROGRESS.txt** (overwrite, not append) with a short handoff note:
      - What you completed this session
      - Current state of the codebase
      - Suggested next tasks for the next session
-   - **Run the finish script**:
+   - **Run the finish command**:
      ```bash
-     ./bd-finish.sh bd-X "<brief description>" src/file1.rs src/file2.rs
+     blacksmith finish bd-X "<brief description>" src/file1.rs src/file2.rs
      ```
-     This handles: staging, committing, bd close, bd sync, auto-committing .beads/, appending to PROGRESS_LOG.txt, and git push — all in one command.
+     This handles: quality gates (check, test, lint, format), staging, committing, bd close, bd sync, auto-committing .beads/, appending to PROGRESS_LOG.txt, and git push — all in one command.
    - If no specific files to stage, omit the file list and it will stage all tracked modified files.
-   - **After bd-finish.sh completes, STOP. Do not triage more work. Do not run bd ready. Session is done.**
+   - **After blacksmith finish completes, STOP. Do not triage more work. Do not run bd ready. Session is done.**
 
 ## Turn Budget (R1)
 
@@ -121,7 +121,7 @@ Use a specific reason: `too-large`, `tests-failing`, `lint-unfixable`, `missing-
 
 ## Stop Conditions
 - Complete exactly ONE task per iteration, then STOP (Rule C)
-- After calling bd-finish.sh, do NOT continue. Do NOT triage. Do NOT run bd ready again.
+- After calling blacksmith finish, do NOT continue. Do NOT triage. Do NOT run bd ready again.
 - If task cannot be completed, mark the failure (see above), write PROGRESS.txt, exit cleanly
 - If tests fail, debug and fix within this iteration
 
@@ -157,5 +157,5 @@ Record improvements as you work — don't batch them to the end of the session.
 - Prefer small, atomic changes over large refactors
 - Always run `cargo test` before committing
 - Always run `cargo clippy --fix --allow-dirty` then `cargo fmt` before committing — exactly ONCE each
-- Always use `./bd-finish.sh` to close out — do NOT manually run git add/commit/push/bd close/bd sync
+- Always use `blacksmith finish` to close out — do NOT manually run git add/commit/push/bd close/bd sync
 - **EFFICIENCY**: Re-read Rules A, B, C above. Every text-only turn and every sequential-when-parallel tool call wastes your limited turn budget. Aim for 5+ parallel turns per session and 0 narration-only turns.

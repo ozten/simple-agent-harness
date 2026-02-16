@@ -2711,3 +2711,19 @@
 - simple-agent-harness-cgo (P2): Add refactor proposal generation from architecture analysis
 - simple-agent-harness-83g (P3): Add migration map generation for refactor tasks
 - simple-agent-harness-34d (P3): Add architecture agent configuration knobs
+
+--- 2026-02-16 03:00:02 | simple-agent-harness-u81 ---
+## Completed: simple-agent-harness-u81
+
+Updated defaults/PROMPT.md to replace all 7 occurrences of `bd-finish.sh` / `./bd-finish.sh` with `blacksmith finish`. This migrates the embedded prompt for deployed (non-dogfooding) mode to use the new Rust-native finish subcommand.
+
+Root PROMPT.md was intentionally left unchanged — it still references `bd-finish.sh` for backwards compat during the dogfooding transition.
+
+## Current state
+- defaults/PROMPT.md: 7 references to `blacksmith finish`, 0 references to `bd-finish`
+- Root PROMPT.md: unchanged, still uses `bd-finish.sh`
+- All 1171 tests pass
+- cargo check, clippy, fmt all clean
+
+## Suggested next tasks
+- Continue Milestone 2 migration work (any remaining beads that update prompts/configs for deployed mode)
