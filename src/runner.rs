@@ -911,10 +911,16 @@ fn load_counter(path: &std::path::Path) -> u64 {
     }
 }
 
-/// Save the global iteration counter to a file.
+/// Save the global iteration counter to a file (atomic write-rename).
 fn save_counter(path: &std::path::Path, value: u64) {
-    if let Err(e) = std::fs::write(path, value.to_string()) {
-        tracing::error!(error = %e, path = %path.display(), "failed to save iteration counter");
+    let dir = path.parent().unwrap_or(std::path::Path::new("."));
+    let tmp_path = dir.join(format!(".counter.tmp.{}", std::process::id()));
+    if let Err(e) = std::fs::write(&tmp_path, value.to_string()) {
+        tracing::error!(error = %e, path = %tmp_path.display(), "failed to write temp counter file");
+        return;
+    }
+    if let Err(e) = std::fs::rename(&tmp_path, path) {
+        tracing::error!(error = %e, path = %path.display(), "failed to rename temp counter file");
     }
 }
 
