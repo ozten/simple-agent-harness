@@ -113,8 +113,6 @@ enum Commands {
         #[arg(long)]
         export: bool,
     },
-    /// Generate performance brief for prompt injection
-    Brief,
     /// Manage improvement records (institutional memory)
     Improve {
         #[command(subcommand)]
@@ -241,6 +239,8 @@ enum MetricsAction {
     },
     /// Show per-bead timing report
     Beads,
+    /// Generate performance brief for prompt injection
+    Brief,
 }
 
 #[derive(Subcommand, Debug)]
@@ -1063,30 +1063,6 @@ async fn main() {
         return;
     }
 
-    if let Some(Commands::Brief) = &cli.command {
-        let config_for_brief = HarnessConfig::load(&cli.config).unwrap_or_default();
-        let dd = data_dir::DataDir::new(&config_for_brief.storage.data_dir);
-        let db_path = dd.db();
-        let targets = &config_for_brief.metrics.targets;
-        let targets_opt = if targets.rules.is_empty() {
-            None
-        } else {
-            Some(targets)
-        };
-        let adapter_name = adapters::resolve_adapter_name(
-            config_for_brief.agent.adapter.as_deref(),
-            &config_for_brief.agent.command,
-        );
-        let adapter = adapters::create_adapter(adapter_name);
-        let supported = adapter.supported_metrics();
-
-        if let Err(e) = brief::handle_brief(&db_path, targets_opt, Some(supported)) {
-            eprintln!("Error: {e}");
-            std::process::exit(1);
-        }
-        return;
-    }
-
     if let Some(Commands::Gc {
         dry_run,
         aggressive,
@@ -1371,6 +1347,21 @@ async fn main() {
                 )
             }
             MetricsAction::Beads => metrics_cmd::handle_beads(&db_path),
+            MetricsAction::Brief => {
+                let targets = &config_for_metrics.metrics.targets;
+                let targets_opt = if targets.rules.is_empty() {
+                    None
+                } else {
+                    Some(targets)
+                };
+                let adapter_name = adapters::resolve_adapter_name(
+                    config_for_metrics.agent.adapter.as_deref(),
+                    &config_for_metrics.agent.command,
+                );
+                let adapter = adapters::create_adapter(adapter_name);
+                let supported = adapter.supported_metrics();
+                brief::handle_brief(&db_path, targets_opt, Some(supported))
+            }
         };
 
         if let Err(e) = result {
