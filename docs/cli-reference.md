@@ -16,7 +16,7 @@ blacksmith [OPTIONS] [MAX_ITERATIONS] [COMMAND]
 
 | Flag | Description |
 |---|---|
-| `-c, --config <PATH>` | Config file path (default: `blacksmith.toml`) |
+| `-c, --config <PATH>` | Config file path (default: `.blacksmith/config.toml`) |
 | `-p, --prompt <PATH>` | Prompt file (overrides config) |
 | `-o, --output-dir <PATH>` | Output directory (deprecated) |
 | `--timeout <MINUTES>` | Stale timeout in minutes (overrides config) |
@@ -266,7 +266,7 @@ blacksmith finish <BEAD_ID> "<MESSAGE>" [FILES...]
 11. **[6]** Auto-commit `.beads/` if dirty
 12. **[7]** `git push` (non-fatal on failure)
 
-**Quality gates configuration** (in `blacksmith.toml`):
+**Quality gates configuration** (in `.blacksmith/config.toml`):
 
 ```toml
 [quality_gates]
