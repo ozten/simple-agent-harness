@@ -51,6 +51,8 @@ Every bead description MUST include these three sections:
 ## Affected files
 - <file1.rs> (new|modified)
 - <file2.rs> (modified)
+
+affected: <glob1>, <glob2>, ...
 ```
 
 **Rules for "Done when":**
@@ -67,6 +69,14 @@ Every bead description MUST include these three sections:
 - List every file the implementer will need to create or modify
 - Mark each as `new` or `modified`
 - This feeds the parallel agent scheduler's conflict detection
+
+**Rules for the `affected:` line:**
+- MUST appear after the "Affected files" section, as the last line of the description
+- Starts with lowercase `affected:` followed by a space
+- Comma-separated glob patterns matching the files listed in "Affected files"
+- Use exact paths for specific files (e.g., `src/pool.rs`) and globs for directories/patterns (e.g., `src/api/*.rs`, `**/*.md`)
+- Do NOT include `(new)` or `(modified)` annotations — just the path/glob
+- This line is machine-parsed by the scheduler for conflict detection
 
 **Splitting heuristic**: If a feature touches 3+ files AND requires both backend + frontend work AND needs new tests, it's likely too large for one bead. Split along these boundaries:
 - Data model / CPT changes (backend)
