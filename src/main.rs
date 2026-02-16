@@ -62,7 +62,7 @@ pub struct Cli {
     max_iterations: Option<u32>,
 
     /// Config file path
-    #[arg(short, long, default_value = "blacksmith.toml")]
+    #[arg(short, long, default_value = ".blacksmith/config.toml")]
     config: PathBuf,
 
     /// Prompt file path (overrides config)

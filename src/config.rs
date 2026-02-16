@@ -2,7 +2,8 @@ use regex::Regex;
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
-/// Top-level configuration loaded from blacksmith.toml (or harness.toml for backwards compat).
+/// Top-level configuration loaded from .blacksmith/config.toml (falls back to blacksmith.toml
+/// and harness.toml for backwards compat).
 #[derive(Debug, Deserialize)]
 #[serde(default)]
 #[derive(Default, Clone)]
@@ -26,9 +27,13 @@ pub struct HarnessConfig {
 }
 
 impl HarnessConfig {
-    /// Load configuration from a TOML file. If the file doesn't exist,
-    /// falls back to harness.toml for backwards compatibility.
-    /// If neither file exists, returns compiled defaults.
+    /// Load configuration from a TOML file.
+    ///
+    /// Fallback chain when the primary path (`.blacksmith/config.toml`) is not found:
+    /// 1. `blacksmith.toml` in project root (deprecated, prints migration warning)
+    /// 2. `harness.toml` in project root (deprecated, prints migration warning)
+    /// 3. Compiled defaults
+    ///
     /// Returns an error only if a file exists but can't be read or parsed.
     pub fn load(path: &Path) -> Result<Self, ConfigError> {
         match std::fs::read_to_string(path) {
@@ -41,16 +46,44 @@ impl HarnessConfig {
                 Ok(config)
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                // Try harness.toml fallback for backwards compatibility
-                let fallback = Path::new("harness.toml");
-                if path
+                let is_default_path = path
                     .file_name()
-                    .map(|f| f == "blacksmith.toml")
+                    .map(|f| f == "config.toml")
                     .unwrap_or(false)
-                    && fallback.exists()
-                {
-                    tracing::info!("blacksmith.toml not found, falling back to harness.toml");
-                    return Self::load(fallback);
+                    && path
+                        .parent()
+                        .and_then(|p| p.file_name())
+                        .map(|f| f == ".blacksmith")
+                        .unwrap_or(false);
+
+                if is_default_path {
+                    // Resolve fallback paths relative to the project root
+                    // (parent of .blacksmith/)
+                    let project_root = path
+                        .parent()
+                        .and_then(|p| p.parent())
+                        .unwrap_or_else(|| Path::new("."));
+
+                    // Try blacksmith.toml fallback (deprecated)
+                    let legacy = project_root.join("blacksmith.toml");
+                    if legacy.exists() {
+                        tracing::warn!(
+                            "Using deprecated config location blacksmith.toml — \
+                             please move to .blacksmith/config.toml: \
+                             mv blacksmith.toml .blacksmith/config.toml"
+                        );
+                        return Self::load(&legacy);
+                    }
+                    // Try harness.toml fallback (deprecated)
+                    let harness = project_root.join("harness.toml");
+                    if harness.exists() {
+                        tracing::warn!(
+                            "Using deprecated config location harness.toml — \
+                             please move to .blacksmith/config.toml: \
+                             mv harness.toml .blacksmith/config.toml"
+                        );
+                        return Self::load(&harness);
+                    }
                 }
                 Ok(Self::default())
             }
@@ -1024,6 +1057,68 @@ mod tests {
         let config = HarnessConfig::load(Path::new("/nonexistent/harness.toml")).unwrap();
         assert_eq!(config.session.max_iterations, 25);
         assert_eq!(config.watchdog.stale_timeout_mins, 20);
+    }
+
+    #[test]
+    fn test_load_falls_back_to_blacksmith_toml() {
+        let dir = tempfile::tempdir().unwrap();
+        let bs_dir = dir.path().join(".blacksmith");
+        std::fs::create_dir_all(&bs_dir).unwrap();
+        let primary = bs_dir.join("config.toml");
+        // Don't create primary — instead create legacy blacksmith.toml
+        let legacy = dir.path().join("blacksmith.toml");
+        std::fs::write(&legacy, "[session]\nmax_iterations = 99\n").unwrap();
+
+        let config = HarnessConfig::load(&primary).unwrap();
+        assert_eq!(config.session.max_iterations, 99);
+    }
+
+    #[test]
+    fn test_load_default_path_no_fallback_returns_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let bs_dir = dir.path().join(".blacksmith");
+        std::fs::create_dir_all(&bs_dir).unwrap();
+        let primary = bs_dir.join("config.toml");
+
+        // No legacy files exist either — should return defaults
+        let config = HarnessConfig::load(&primary).unwrap();
+        assert_eq!(config.session.max_iterations, 25);
+    }
+
+    #[test]
+    fn test_load_falls_back_to_harness_toml() {
+        let dir = tempfile::tempdir().unwrap();
+        let bs_dir = dir.path().join(".blacksmith");
+        std::fs::create_dir_all(&bs_dir).unwrap();
+        let primary = bs_dir.join("config.toml");
+        // Create only harness.toml (oldest legacy format)
+        let harness = dir.path().join("harness.toml");
+        std::fs::write(&harness, "[session]\nmax_iterations = 42\n").unwrap();
+
+        let config = HarnessConfig::load(&primary).unwrap();
+        assert_eq!(config.session.max_iterations, 42);
+    }
+
+    #[test]
+    fn test_load_prefers_blacksmith_toml_over_harness_toml() {
+        let dir = tempfile::tempdir().unwrap();
+        let bs_dir = dir.path().join(".blacksmith");
+        std::fs::create_dir_all(&bs_dir).unwrap();
+        let primary = bs_dir.join("config.toml");
+        // Both legacy files exist — blacksmith.toml should win
+        std::fs::write(
+            dir.path().join("blacksmith.toml"),
+            "[session]\nmax_iterations = 99\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("harness.toml"),
+            "[session]\nmax_iterations = 42\n",
+        )
+        .unwrap();
+
+        let config = HarnessConfig::load(&primary).unwrap();
+        assert_eq!(config.session.max_iterations, 99);
     }
 
     #[test]
