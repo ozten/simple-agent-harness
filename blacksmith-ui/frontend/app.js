@@ -235,6 +235,276 @@ function GlobalMetricsPanel({ metrics }) {
   `;
 }
 
+function StatusBar({ instance, statusData }) {
+  const iteration = instance?.iteration ?? statusData?.iteration ?? 0;
+  const maxIterations = instance?.max_iterations ?? statusData?.max_iterations ?? 0;
+  const workersActive = instance?.workers_active ?? statusData?.workers_active ?? 0;
+  const workersMax = instance?.workers_max ?? statusData?.workers_max ?? 0;
+  const uptime = statusData?.uptime_secs;
+
+  const formatUptime = (secs) => {
+    if (secs == null) return "-";
+    const h = Math.floor(secs / 3600);
+    const m = Math.floor((secs % 3600) / 60);
+    if (h > 0) return `${h}h ${m}m`;
+    return `${m}m`;
+  };
+
+  return html`
+    <div class="status-bar">
+      <div class="status-bar-item">
+        <${StatusDot} online=${instance?.online !== false} />
+        <span>${instance?.online !== false ? "Online" : "Offline"}</span>
+      </div>
+      <div class="status-bar-item">
+        <span class="status-label">Iteration</span>
+        <span class="status-value">${iteration}${maxIterations ? ` / ${maxIterations}` : ""}</span>
+      </div>
+      <div class="status-bar-item">
+        <span class="status-label">Workers</span>
+        <span class="status-value">${workersActive} / ${workersMax}</span>
+      </div>
+      <div class="status-bar-item">
+        <span class="status-label">Uptime</span>
+        <span class="status-value">${formatUptime(uptime)}</span>
+      </div>
+    </div>
+  `;
+}
+
+function BeadList({ beadsData }) {
+  const [filter, setFilter] = useState("all");
+  const [expanded, setExpanded] = useState(null);
+
+  const beads = beadsData?.items || beadsData?.beads || [];
+  const counts = {
+    all: beads.length,
+    open: beads.filter((b) => b.status === "open").length,
+    in_progress: beads.filter((b) => b.status === "in_progress").length,
+    closed: beads.filter((b) => b.status === "closed").length,
+  };
+
+  const filtered = filter === "all" ? beads : beads.filter((b) => b.status === filter);
+
+  const statusClass = (status) => {
+    if (status === "open") return "bead-open";
+    if (status === "in_progress") return "bead-in-progress";
+    if (status === "closed") return "bead-closed";
+    return "";
+  };
+
+  return html`
+    <div class="detail-section">
+      <div class="section-header">
+        <h3>Beads</h3>
+        <div class="filter-tabs">
+          ${["all", "open", "in_progress", "closed"].map(
+            (f) => html`
+              <button
+                key=${f}
+                class="filter-tab ${filter === f ? "active" : ""}"
+                onClick=${() => setFilter(f)}
+              >
+                ${f === "in_progress" ? "In Progress" : f.charAt(0).toUpperCase() + f.slice(1)}
+                <span class="filter-count">${counts[f]}</span>
+              </button>
+            `
+          )}
+        </div>
+      </div>
+      <div class="bead-list">
+        ${filtered.length === 0
+          ? html`<div class="bead-empty">No beads matching filter</div>`
+          : filtered.map(
+              (b) => html`
+                <div
+                  key=${b.id}
+                  class="bead-item ${expanded === b.id ? "expanded" : ""}"
+                  onClick=${() => setExpanded(expanded === b.id ? null : b.id)}
+                >
+                  <div class="bead-row">
+                    <span class="bead-status ${statusClass(b.status)}">${b.status}</span>
+                    <span class="bead-id">${b.id}</span>
+                    <span class="bead-title">${b.title}</span>
+                  </div>
+                  ${expanded === b.id &&
+                  html`
+                    <div class="bead-details">
+                      ${b.type && html`<div><strong>Type:</strong> ${b.type}</div>`}
+                      ${b.priority != null && html`<div><strong>Priority:</strong> P${b.priority}</div>`}
+                      ${b.assignee && html`<div><strong>Assignee:</strong> ${b.assignee}</div>`}
+                      ${b.description && html`<div class="bead-description">${b.description}</div>`}
+                    </div>
+                  `}
+                </div>
+              `
+            )}
+      </div>
+    </div>
+  `;
+}
+
+function ActiveSessions({ statusData }) {
+  const workers = statusData?.workers || [];
+
+  return html`
+    <div class="detail-section">
+      <div class="section-header">
+        <h3>Active Sessions</h3>
+      </div>
+      ${workers.length === 0
+        ? html`<div class="bead-empty">No active sessions</div>`
+        : html`
+            <div class="sessions-list">
+              ${workers.map(
+                (w) => html`
+                  <div key=${w.id || w.worker_id} class="session-item">
+                    <div class="session-worker">
+                      <span class="session-worker-id">${w.id || w.worker_id || "Worker"}</span>
+                      ${w.status && html`<span class="session-status">${w.status}</span>`}
+                    </div>
+                    <div class="session-meta">
+                      ${w.bead_id && html`<span class="session-bead">Bead: ${w.bead_id}</span>`}
+                      ${w.duration_secs != null &&
+                      html`<span class="session-duration">${Math.floor(w.duration_secs / 60)}m ${w.duration_secs % 60}s</span>`}
+                      ${w.transcript_url &&
+                      html`<a class="session-transcript" href=${w.transcript_url} target="_blank">View Transcript</a>`}
+                    </div>
+                  </div>
+                `
+              )}
+            </div>
+          `}
+    </div>
+  `;
+}
+
+function MetricsSummary({ metricsData }) {
+  if (!metricsData) return null;
+
+  const fmt = (v, decimals = 2) => (v != null ? Number(v).toFixed(decimals) : "-");
+  const fmtDur = (secs) => {
+    if (secs == null) return "-";
+    const m = Math.floor(secs / 60);
+    const s = Math.round(secs % 60);
+    return `${m}m ${s}s`;
+  };
+
+  return html`
+    <div class="detail-section">
+      <div class="section-header">
+        <h3>Metrics</h3>
+      </div>
+      <div class="metrics-grid">
+        <div class="card">
+          <div class="label">Avg Cost</div>
+          <div class="value">$${fmt(metricsData.avg_cost)}</div>
+        </div>
+        <div class="card">
+          <div class="label">Avg Tokens</div>
+          <div class="value">${metricsData.avg_tokens != null ? Math.round(metricsData.avg_tokens).toLocaleString() : "-"}</div>
+        </div>
+        <div class="card">
+          <div class="label">Avg Duration</div>
+          <div class="value">${fmtDur(metricsData.avg_duration_secs)}</div>
+        </div>
+        <div class="card">
+          <div class="label">Avg Turns</div>
+          <div class="value">${fmt(metricsData.avg_turns, 1)}</div>
+        </div>
+        <div class="card">
+          <div class="label">Cost Today</div>
+          <div class="value">$${fmt(metricsData.cost_today)}</div>
+        </div>
+        <div class="card">
+          <div class="label">Beads Closed Today</div>
+          <div class="value">${metricsData.beads_closed_today ?? "-"}</div>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function StopButton({ instanceUrl }) {
+  const [confirming, setConfirming] = useState(false);
+  const [stopping, setStopping] = useState(false);
+  const [result, setResult] = useState(null);
+
+  const doStop = async () => {
+    setStopping(true);
+    setResult(null);
+    try {
+      const resp = await fetch(`/api/instances/${encodeURIComponent(instanceUrl)}/stop`, {
+        method: "POST",
+      });
+      if (resp.ok) {
+        setResult("success");
+      } else {
+        const data = await resp.json().catch(() => ({}));
+        setResult(data.error || "Failed to stop");
+      }
+    } catch (err) {
+      setResult(err.message);
+    } finally {
+      setStopping(false);
+      setConfirming(false);
+    }
+  };
+
+  return html`
+    <div class="detail-section stop-section">
+      ${confirming
+        ? html`
+            <div class="stop-confirm">
+              <p>Are you sure you want to stop this project? This will create a STOP file on the instance.</p>
+              <div class="stop-actions">
+                <button class="stop-confirm-btn" onClick=${doStop} disabled=${stopping}>
+                  ${stopping ? "Stopping..." : "Confirm Stop"}
+                </button>
+                <button class="stop-cancel-btn" onClick=${() => setConfirming(false)}>Cancel</button>
+              </div>
+            </div>
+          `
+        : html`<button class="stop-btn" onClick=${() => setConfirming(true)}>Stop Project</button>`}
+      ${result === "success" && html`<div class="stop-result success">Stop signal sent</div>`}
+      ${result && result !== "success" && html`<div class="stop-result error">${result}</div>`}
+    </div>
+  `;
+}
+
+function ProjectDetail({ instance, instanceUrl }) {
+  const [pollData, setPollData] = useState(null);
+
+  const fetchPollData = useCallback(async () => {
+    try {
+      const resp = await fetch(`/api/instances/${encodeURIComponent(instanceUrl)}/poll-data`);
+      if (resp.ok) {
+        const data = await resp.json();
+        setPollData(data);
+      }
+    } catch (_) {}
+  }, [instanceUrl]);
+
+  useEffect(() => {
+    fetchPollData();
+    const interval = setInterval(fetchPollData, 10000);
+    return () => clearInterval(interval);
+  }, [fetchPollData]);
+
+  const name = instance?.name || instanceUrl;
+
+  return html`
+    <div class="project-detail">
+      <h2>${name}</h2>
+      <${StatusBar} instance=${instance} statusData=${pollData?.status_data} />
+      <${BeadList} beadsData=${pollData?.beads_data} />
+      <${ActiveSessions} statusData=${pollData?.status_data} />
+      <${MetricsSummary} metricsData=${pollData?.metrics_data} />
+      <${StopButton} instanceUrl=${instanceUrl} />
+    </div>
+  `;
+}
+
 function App() {
   const [instances, setInstances] = useState([]);
   const [aggregate, setAggregate] = useState(null);
@@ -271,6 +541,8 @@ function App() {
     return () => clearInterval(interval);
   }, [fetchData]);
 
+  const selectedInstance = instances.find((i) => i.url === selected);
+
   return html`
     <${Sidebar}
       instances=${instances}
@@ -279,19 +551,16 @@ function App() {
       onRefresh=${fetchData}
     />
     <div class="main-content">
-      <h2>Overview</h2>
-      <${AggregateCards} aggregate=${aggregate} />
-      <${GlobalMetricsPanel} metrics=${globalMetrics} />
       ${selected
-        ? html`<div class="card" style="margin-top: 16px;">
-            <div class="label">Selected Project</div>
-            <div class="value" style="font-size: 16px; margin-top: 8px;">
-              ${instances.find((i) => i.url === selected)?.name || selected}
+        ? html`<${ProjectDetail} instance=${selectedInstance} instanceUrl=${selected} />`
+        : html`
+            <h2>Overview</h2>
+            <${AggregateCards} aggregate=${aggregate} />
+            <${GlobalMetricsPanel} metrics=${globalMetrics} />
+            <div class="empty-state">
+              Select a project from the sidebar to view details
             </div>
-          </div>`
-        : html`<div class="empty-state">
-            Select a project from the sidebar to view details
-          </div>`}
+          `}
     </div>
   `;
 }

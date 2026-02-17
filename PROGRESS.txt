@@ -1,26 +1,25 @@
-## Session: Implement global metrics aggregation (simple-agent-harness-p4um)
+## Session: Implement project detail view in frontend (simple-agent-harness-k760)
 
 ### Completed
-- Bead simple-agent-harness-p4um: Implement global metrics aggregation
-- Added GlobalMetrics and SessionOutcomes structs to blacksmith-ui/src/poller.rs
-- Extended MetricsSummary deserialization to include cost_this_week, beads_closed_today, session_outcomes
-- Added compute_global_metrics() function that aggregates across all polled instances
-- GlobalMetrics stored in PollDataStore alongside existing Aggregate, recomputed each poll cycle
-- Added /api/global-metrics endpoint in blacksmith-ui/src/main.rs
-- Added GlobalMetricsPanel component in blacksmith-ui/frontend/app.js:
-  - Displays cost today/this week, beads velocity (/day), worker utilization (% with progress bar)
-  - Stacked bar chart for session outcomes (success/failed/timed out) with legend
-- Added global metrics CSS styles in blacksmith-ui/frontend/style.css:
-  - Grid layout, progress bar, stacked bar chart, outcome legend with color dots
-- App component fetches /api/global-metrics alongside existing endpoints
+- Bead simple-agent-harness-k760: Implement project detail view in frontend
+- Added ProjectDetail component in blacksmith-ui/frontend/app.js that fetches /api/instances/:url/poll-data
+- StatusBar section: shows online/offline status, iteration count (with max), worker count, uptime
+- BeadList section: renders beads from poll data with status filter tabs (all/open/in_progress/closed), click-to-expand details showing type, priority, assignee, description
+- ActiveSessions section: shows worker assignments with ID, status, bead assignment, duration, transcript link
+- MetricsSummary section: displays avg cost, tokens, duration, turns, cost today, beads closed today in a grid
+- StopButton section: confirmation dialog pattern, POSTs to /api/instances/:url/stop proxy endpoint
+- Added /api/instances/:url/stop proxy endpoint in blacksmith-ui/src/main.rs that forwards POST to the instance's /api/stop
+- App component now shows ProjectDetail when a project is selected (replaces overview), shows overview when no project selected
+- Added comprehensive CSS styles in blacksmith-ui/frontend/style.css for all 5 detail sections
 - All 1080 tests pass, zero clippy warnings, fmt clean
 
 ### Current State
 - Codebase is clean: tests pass, clippy clean, fmt clean
-- /api/global-metrics endpoint returns JSON with total_cost_today, total_cost_this_week, beads_velocity, worker_utilization, workers_active, workers_max, outcomes
-- Frontend renders the GlobalMetricsPanel in the main content area between AggregateCards and project detail
+- Project detail view has all 5 required sections: status bar, bead list, active sessions, metrics summary, stop button
+- Data auto-refreshes at 10s poll interval via useEffect
+- Stop button proxied through dashboard backend to instance /api/stop
 
 ### Suggested Next Tasks
-- simple-agent-harness-fsnv: Implement serve port auto-allocation (P2, unblocked)
-- simple-agent-harness-k760: Implement project detail view in frontend (P2, unblocked)
+- simple-agent-harness-0qvp: Implement transcript viewer with live SSE (P2, was blocked by this bead)
+- simple-agent-harness-peh7: Implement ETA display with what-if worker slider (P2, was blocked by this bead)
 - simple-agent-harness-z38u: Implement dependency DAG visualization (P2, unblocked)
