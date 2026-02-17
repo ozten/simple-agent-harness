@@ -1,21 +1,18 @@
-## Session: Implement GET /api/beads endpoint (simple-agent-harness-zcli)
+## Session: Implement POST /api/stop endpoint (simple-agent-harness-oadl)
 
 ### Completed
-- Added GET /api/beads endpoint to serve API
-- Reads .beads/issues.jsonl from project root directory
-- Returns JSON with open_count, in_progress_count, and items array
-- Each item includes: id, title, status, type, priority, assignee, description
-- Supports ?status= query parameter to filter beads by status
-- Added beads_dir to AppState for accessing .beads directory
+- Added POST /api/stop endpoint to serve API
+- Touches the STOP file (from config.shutdown.stop_file) to signal graceful shutdown
+- Returns {ok: true} on success, 500 on write failure
+- Added stop_file field to AppState, populated from HarnessConfig
 - All 1080 tests pass, zero clippy warnings, fmt clean
 
 ### Files Changed
-- src/serve.rs: Added BeadsQuery, BeadItem, BeadsResponse structs; api_beads handler; beads_dir to AppState; /api/beads route
+- src/serve.rs: Added stop_file to AppState; api_stop handler; POST /api/stop route
 
 ### Current State
 - Codebase is clean: tests pass, clippy clean, fmt clean
-- GET /api/beads returns JSON with bead listing and counts
-- Counts reflect all beads regardless of filter; items respect ?status= filter
+- POST /api/stop writes empty STOP file to trigger graceful shutdown
 
 ### Suggested Next Tasks
-- Other serve API endpoints (simple-agent-harness-3hps, k57l, oadl, sqpv, ts82)
+- Remaining serve API endpoints (simple-agent-harness-3hps, k57l, sqpv, ts82)

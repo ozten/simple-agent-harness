@@ -6,11 +6,15 @@ use crate::data_dir::DataDir;
 struct AppState {
     db_path: std::path::PathBuf,
     beads_dir: std::path::PathBuf,
+    stop_file: std::path::PathBuf,
 }
 
 #[cfg(feature = "serve")]
 pub async fn run(config: &HarnessConfig) -> Result<(), Box<dyn std::error::Error>> {
-    use axum::{routing::get, Router};
+    use axum::{
+        routing::{get, post},
+        Router,
+    };
     use tower_http::cors::CorsLayer;
 
     let dd = DataDir::new(&config.storage.data_dir);
@@ -18,12 +22,14 @@ pub async fn run(config: &HarnessConfig) -> Result<(), Box<dyn std::error::Error
     let state = AppState {
         db_path: dd.db(),
         beads_dir,
+        stop_file: config.shutdown.stop_file.clone(),
     };
 
     let app = Router::new()
         .route("/api/health", get(health))
         .route("/api/improvements", get(api_improvements))
         .route("/api/beads", get(api_beads))
+        .route("/api/stop", post(api_stop))
         .with_state(state)
         .layer(CorsLayer::permissive());
 
@@ -45,6 +51,15 @@ pub async fn run(config: &HarnessConfig) -> Result<(), Box<dyn std::error::Error
 #[cfg(feature = "serve")]
 async fn health() -> axum::Json<serde_json::Value> {
     axum::Json(serde_json::json!({"ok": true}))
+}
+
+#[cfg(feature = "serve")]
+async fn api_stop(
+    axum::extract::State(state): axum::extract::State<AppState>,
+) -> Result<axum::Json<serde_json::Value>, axum::http::StatusCode> {
+    std::fs::write(&state.stop_file, "")
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(axum::Json(serde_json::json!({"ok": true})))
 }
 
 #[cfg(feature = "serve")]
