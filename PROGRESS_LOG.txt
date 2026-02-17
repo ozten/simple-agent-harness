@@ -3186,3 +3186,23 @@ Implemented three features for the self-improvement feedback loop:
 
 ### Suggested Next Tasks
 - simple-agent-harness-950: blacksmith init should create .blacksmith/config.yaml by default
+
+--- 2026-02-17 04:29:59 | simple-agent-harness-950 ---
+## Session: blacksmith init creates config.toml (simple-agent-harness-950)
+
+### Completed
+- Added `config()` accessor to `DataDir` returning `.blacksmith/config.toml` path
+- Updated `DataDir::init()` to write a default `config.toml` when it doesn't already exist
+- Default config includes commented sections for [agent], [session], and [storage]
+- Existing config is never overwritten (idempotent behavior preserved)
+- Added 3 new tests: config_path, init_creates_config, init_does_not_overwrite_existing_config
+
+### Files Changed
+- src/data_dir.rs: Added config() accessor, DEFAULT_CONFIG const, config write in init(), new tests
+
+### Current State
+- All 1096 tests pass
+- Zero clippy warnings, formatting clean
+
+### Suggested Next Tasks
+- simple-agent-harness-949: Add end-to-end smoke verification for blacksmith-ui against cantrip
