@@ -1,5 +1,6 @@
 mod config;
 mod discovery;
+mod poller;
 
 use axum::{
     extract::State,
@@ -8,6 +9,7 @@ use axum::{
     Json, Router,
 };
 use discovery::{Instance, InstanceRegistry, Registry};
+use poller::{Aggregate, PollDataStore, PollStore};
 use serde::Deserialize;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -16,6 +18,7 @@ use tower_http::cors::CorsLayer;
 #[derive(Clone)]
 struct AppState {
     registry: Registry,
+    poll_store: PollStore,
 }
 
 #[tokio::main]
@@ -40,17 +43,30 @@ async fn main() {
     }
 
     let registry = Arc::new(RwLock::new(registry));
+    let poll_store = Arc::new(RwLock::new(PollDataStore::new()));
 
     // Spawn UDP listener and sweep task
     discovery::spawn_udp_listener(Arc::clone(&registry));
     discovery::spawn_sweep_task(Arc::clone(&registry));
 
-    let state = AppState { registry };
+    // Spawn polling loop
+    poller::spawn_poller(
+        Arc::clone(&registry),
+        Arc::clone(&poll_store),
+        cfg.dashboard.poll_interval_secs,
+    );
+
+    let state = AppState {
+        registry,
+        poll_store,
+    };
 
     let app = Router::new()
         .route("/api/health", get(health))
         .route("/api/instances", get(list_instances))
         .route("/api/instances", post(add_instance))
+        .route("/api/aggregate", get(get_aggregate))
+        .route("/api/instances/:url/poll-data", get(get_instance_poll_data))
         .layer(CorsLayer::permissive())
         .with_state(state);
 
@@ -69,6 +85,23 @@ async fn health() -> Json<serde_json::Value> {
 async fn list_instances(State(state): State<AppState>) -> Json<Vec<Instance>> {
     let reg = state.registry.read().await;
     Json(reg.list())
+}
+
+async fn get_aggregate(State(state): State<AppState>) -> Json<Aggregate> {
+    let store = state.poll_store.read().await;
+    Json(store.aggregate.clone())
+}
+
+async fn get_instance_poll_data(
+    State(state): State<AppState>,
+    axum::extract::Path(url): axum::extract::Path<String>,
+) -> Json<serde_json::Value> {
+    let key = url.trim_end_matches('/').to_lowercase();
+    let store = state.poll_store.read().await;
+    match store.data.get(&key) {
+        Some(data) => Json(serde_json::to_value(data).unwrap_or_default()),
+        None => Json(serde_json::json!({})),
+    }
 }
 
 #[derive(Deserialize)]

@@ -1,26 +1,29 @@
-## Session: Implement instance discovery and registry (simple-agent-harness-k5z6)
+## Session: Implement polling and cross-project aggregation (simple-agent-harness-rxsx)
 
 ### Completed
-- Bead simple-agent-harness-k5z6: Implement instance discovery and registry
-- Converted project to Cargo workspace with members = [".", "blacksmith-ui"]
-- Created blacksmith-ui crate with dependencies: axum, tower-http, reqwest, socket2, serde, tokio, toml, tracing
-- Implemented config.rs: UiConfig with DashboardConfig (port/bind/poll_interval) and [[projects]] array, plus runtime instance persistence to .blacksmith-ui-instances.json
-- Implemented discovery.rs: InstanceRegistry with three-layer discovery:
-  1. UDP multicast listener on 239.66.83.77:8421 that receives heartbeat packets
-  2. Manual [[projects]] entries from blacksmith-ui.toml
-  3. Runtime POST /api/instances endpoint that probes /api/health before adding
-- Deduplication by normalized URL (lowercase, trailing slash stripped)
-- Sweep task marks instances offline after 90s without heartbeat
-- Runtime-added instances persisted to JSON file for restart survival
-- Routes: GET /api/health, GET /api/instances, POST /api/instances
+- Bead simple-agent-harness-rxsx: Implement polling and cross-project aggregation
+- Created blacksmith-ui/src/poller.rs with:
+  - PollDataStore: per-instance polled data keyed by normalized URL
+  - Aggregate struct: total_beads_open, total_beads_in_progress, total_cost_today, worker_utilization, instances_online/total
+  - spawn_poller(): main polling loop that polls all instances concurrently at configurable interval
+  - Per-instance polling: /api/health every poll, /api/status every poll, /api/beads every poll, /api/metrics/summary every poll, /api/project once on discovery, /api/improvements every 30s
+  - Graceful degradation: 404s and errors return None, offline instances preserve last known state
+  - Cross-project aggregate computation from beads + metrics data, with fallback to heartbeat worker counts
+- Modified blacksmith-ui/src/discovery.rs:
+  - Added set_online_status() method to InstanceRegistry for poller to update online/offline state
+- Modified blacksmith-ui/src/main.rs:
+  - Added poller module, PollStore in AppState
+  - Spawns poller loop on startup with configurable poll interval
+  - New endpoints: GET /api/aggregate (cross-project aggregates), GET /api/instances/:url/poll-data (per-instance polled data)
 - All 1080 existing tests pass, zero clippy warnings, fmt clean
+- Poll interval configurable via blacksmith-ui.toml dashboard.poll_interval_secs (default 10s)
 
 ### Current State
 - Codebase is clean: tests pass, clippy clean, fmt clean
-- blacksmith-ui is a separate workspace member with its own binary
-- Discovery system supports all three sources with merge/dedup
+- Polling system is fully operational with graceful offline handling
+- Polled endpoints that don't yet exist on serve instances (status, beads, metrics, project, improvements) return None gracefully
 
 ### Suggested Next Tasks
-- simple-agent-harness-rxsx: Implement polling and cross-project aggregation (P1, now unblocked)
+- simple-agent-harness-g7hg: Scaffold embedded frontend with project list sidebar (P1, now unblocked by this bead)
 - simple-agent-harness-fsnv: Implement serve port auto-allocation (P2, ready)
 - simple-agent-harness-xi2k: Add estimate API endpoint (P2, ready)

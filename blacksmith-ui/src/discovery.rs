@@ -220,6 +220,17 @@ impl InstanceRegistry {
         }
     }
 
+    /// Set online/offline status for an instance by URL.
+    pub fn set_online_status(&mut self, url: &str, online: bool) {
+        let key = normalize_url(url);
+        if let Some(entry) = self.entries.get_mut(&key) {
+            entry.instance.online = online;
+            if online {
+                entry.last_seen = Instant::now();
+            }
+        }
+    }
+
     /// Get all instances as a sorted list.
     pub fn list(&self) -> Vec<Instance> {
         let mut instances: Vec<Instance> =
