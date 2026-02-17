@@ -3098,3 +3098,22 @@ Implemented three features for the self-improvement feedback loop:
 ### Suggested Next Tasks
 - Remaining serve API endpoints if any
 - Dashboard integration testing with the new estimate endpoint
+
+--- 2026-02-17 02:12:04 | simple-agent-harness-7qtr ---
+## Session: Adaptive heartbeat timing (simple-agent-harness-7qtr)
+
+### Completed
+- Changed heartbeat from fixed 30s interval to adaptive: 2s burst for first 30s, then 10s settled
+- New instances now discoverable in ~2-4s instead of ~50s
+- Updated log message to reflect new behavior
+
+### Files Changed
+- src/serve.rs: heartbeat_loop now uses BURST_INTERVAL (2s), SETTLED_INTERVAL (10s), BURST_DURATION (30s) constants with tokio::time::Instant to determine interval
+
+### Current State
+- All 1080 tests pass, zero clippy warnings, formatting clean
+- Simple, contained change in heartbeat_loop function
+
+### Suggested Next Tasks
+- Adaptive backend polling (simple-agent-harness-uurh) - complementary feature for UI side
+- Frontend poll interval/SSE push (simple-agent-harness-v2j0)

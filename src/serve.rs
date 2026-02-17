@@ -265,15 +265,25 @@ async fn heartbeat_loop(config: HeartbeatConfig, ctx: HeartbeatContext) {
     let version = env!("CARGO_PKG_VERSION");
     let status_file = StatusFile::new(ctx.status_path);
 
+    // Adaptive heartbeat: fast burst (2s) for first 30s, then settle to 10s
+    const BURST_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
+    const SETTLED_INTERVAL: std::time::Duration = std::time::Duration::from_secs(10);
+    const BURST_DURATION: std::time::Duration = std::time::Duration::from_secs(30);
+
+    let start = tokio::time::Instant::now();
+
     tracing::info!(
-        "heartbeat: broadcasting to {} every 30s",
+        "heartbeat: broadcasting to {} (2s burst → 10s settled)",
         config.multicast_addr
     );
 
     loop {
         // Read live state from the status file written by the coordinator/runner
         let (state, iteration) = match status_file.read() {
-            Ok(Some(data)) => (format!("{:?}", data.state).to_lowercase(), data.global_iteration),
+            Ok(Some(data)) => (
+                format!("{:?}", data.state).to_lowercase(),
+                data.global_iteration,
+            ),
             _ => ("idle".to_string(), 0),
         };
 
@@ -294,7 +304,12 @@ async fn heartbeat_loop(config: HeartbeatConfig, ctx: HeartbeatContext) {
             tracing::debug!("heartbeat: send failed: {e}");
         }
 
-        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        let interval = if start.elapsed() < BURST_DURATION {
+            BURST_INTERVAL
+        } else {
+            SETTLED_INTERVAL
+        };
+        tokio::time::sleep(interval).await;
     }
 }
 

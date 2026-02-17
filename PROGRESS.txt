@@ -1,19 +1,17 @@
-## Session: Implement GET /api/estimate endpoint (simple-agent-harness-1p09)
+## Session: Adaptive heartbeat timing (simple-agent-harness-7qtr)
 
 ### Completed
-- Added GET /api/estimate endpoint to serve API
-- Accepts optional ?workers=N query parameter (defaults to 1)
-- Uses existing estimation module (estimation::estimate) with db connection and open beads from bd CLI
-- Returns JSON: {beads_remaining, serial_eta_secs, parallel_eta_secs, critical_path, workers, completed_count, avg_time_per_bead}
-- All 1080 tests pass, zero clippy warnings
+- Changed heartbeat from fixed 30s interval to adaptive: 2s burst for first 30s, then 10s settled
+- New instances now discoverable in ~2-4s instead of ~50s
+- Updated log message to reflect new behavior
 
 ### Files Changed
-- src/serve.rs: Added EstimateQuery, EstimateResponse structs; api_estimate handler; GET /api/estimate route
+- src/serve.rs: heartbeat_loop now uses BURST_INTERVAL (2s), SETTLED_INTERVAL (10s), BURST_DURATION (30s) constants with tokio::time::Instant to determine interval
 
 ### Current State
-- Codebase is clean: tests pass, clippy clean
-- All serve API endpoints now implemented: health, beads, improvements, stop, estimate
+- All 1080 tests pass, zero clippy warnings, formatting clean
+- Simple, contained change in heartbeat_loop function
 
 ### Suggested Next Tasks
-- Remaining serve API endpoints if any
-- Dashboard integration testing with the new estimate endpoint
+- Adaptive backend polling (simple-agent-harness-uurh) - complementary feature for UI side
+- Frontend poll interval/SSE push (simple-agent-harness-v2j0)
