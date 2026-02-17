@@ -38,6 +38,7 @@ mod session;
 mod signal_correlator;
 mod signals;
 mod singleton;
+mod skills;
 mod status;
 mod structural_metrics;
 mod task_manifest;
@@ -999,6 +1000,18 @@ async fn main() {
             Err(e) => {
                 eprintln!("Error initializing data directory: {e}");
                 std::process::exit(1);
+            }
+        }
+        // Install bundled Claude Code skills (idempotent — skips existing files)
+        let project_root = std::env::current_dir().unwrap_or_else(|e| {
+            eprintln!("Cannot determine current directory: {e}");
+            std::process::exit(1);
+        });
+        match skills::install_bundled_skills(&project_root) {
+            Ok(0) => {} // all skills already present
+            Ok(n) => println!("Installed {n} bundled Claude skill(s) to .claude/skills/"),
+            Err(e) => {
+                eprintln!("Warning: could not install bundled skills: {e}");
             }
         }
         return;

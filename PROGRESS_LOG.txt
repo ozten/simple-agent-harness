@@ -3117,3 +3117,23 @@ Implemented three features for the self-improvement feedback loop:
 ### Suggested Next Tasks
 - Adaptive backend polling (simple-agent-harness-uurh) - complementary feature for UI side
 - Frontend poll interval/SSE push (simple-agent-harness-v2j0)
+
+--- 2026-02-17 04:10:50 | simple-agent-harness-h9ph ---
+## Session: Init copies bundled Claude skills (simple-agent-harness-h9ph)
+
+### Completed
+- Added `src/skills.rs` module that embeds 3 Claude Code skills (break-down-issue, prd-to-beads, self-improvement) using `include_str!`
+- `install_bundled_skills(project_root)` copies skills to `.claude/skills/` — idempotent, never overwrites existing files
+- Updated `blacksmith init` handler in `src/main.rs` to call `install_bundled_skills` after data dir initialization
+- Skills are embedded at compile time from `.claude/skills/*/SKILL.md`
+
+### Files Changed
+- src/skills.rs (new): Bundled skills module with `BUNDLED_SKILLS` const and `install_bundled_skills()` function, plus 2 tests
+- src/main.rs (modified): Added `mod skills;` declaration and skill installation call in Init handler
+
+### Current State
+- All 1082 tests pass (+1 ignored), zero clippy warnings, formatting clean
+- 2 new tests: test_install_creates_skills, test_install_is_idempotent
+
+### Suggested Next Tasks
+- Init: auto-detect project type and populate PROMPT.md verification section (simple-agent-harness-10qw)
