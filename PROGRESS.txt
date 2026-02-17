@@ -1,22 +1,23 @@
-## Session 178: Scaffold serve subcommand with feature gate and health endpoint
+## Session: Implement UDP multicast heartbeat (simple-agent-harness-i7t0)
 
 ### Completed
-- Bead simple-agent-harness-72hv: Scaffold serve subcommand
-- Added axum + tower-http as optional deps behind `serve` Cargo feature flag
-- Created src/serve.rs with axum router and GET /api/health endpoint returning {"ok":true}
-- Added Serve variant to CLI Commands enum with --port and --bind args
-- Added ServeConfig to config.rs with port (default 8420) and bind (default 0.0.0.0)
-- CORS headers configured via CorsLayer::permissive()
-- `cargo build` without features does NOT pull in axum (verified via cargo tree)
-- `cargo build --features serve` compiles cleanly
-- All 1077 tests pass, zero clippy warnings
+- Bead simple-agent-harness-i7t0: Implement UDP multicast heartbeat
+- Added socket2 v0.5 as optional dep behind `serve` Cargo feature flag
+- Extended ServeConfig with heartbeat (bool), heartbeat_address (String), api_advertise (Option<String>)
+- Implemented heartbeat_loop in serve.rs: spawns a tokio background task that sends JSON UDP multicast every 30s
+- Heartbeat payload includes: v (version), project (from cwd), api (bound addr), status, workers_active, workers_max, iteration, max_iterations, pid
+- api_advertise config allows NAT override of the advertised API URL
+- heartbeat=false in config suppresses heartbeat entirely
+- Multiple instances can coexist on same machine (SO_REUSEADDR + non-blocking socket)
+- Also fixed 2 pre-existing test failures in config::tests (quality gates defaults expected "cargo check" but actual default was "cargo check --release")
+- All 1080 tests pass, zero clippy warnings, fmt clean
 
 ### Current State
 - Codebase is clean: tests pass, clippy clean, fmt clean
-- The serve feature is fully gated behind `--features serve`
-- 7 beads are now unblocked by this work (72hv was the bottleneck)
+- Heartbeat feature is fully gated behind `--features serve`
+- k5z6 (instance discovery) is now unblocked by this work
 
 ### Suggested Next Tasks
-- simple-agent-harness-srg0: Create blacksmith-ui workspace crate (P1, ready)
-- simple-agent-harness-9b6v: Implement project and status API endpoints (P1, now unblocked)
-- simple-agent-harness-i7t0: Implement UDP multicast heartbeat (P2, now unblocked)
+- simple-agent-harness-k5z6: Implement instance discovery and registry (P1, now unblocked)
+- simple-agent-harness-fsnv: Implement serve port auto-allocation (P2, ready)
+- simple-agent-harness-xi2k: Add estimate API endpoint (P2, ready)

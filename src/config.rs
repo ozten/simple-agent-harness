@@ -644,6 +644,12 @@ pub struct ServeConfig {
     pub port: u16,
     /// Bind address. Default: 0.0.0.0
     pub bind: String,
+    /// Enable UDP multicast heartbeat. Default: true
+    pub heartbeat: bool,
+    /// Multicast group address and port for heartbeat. Default: 239.66.83.77:8421
+    pub heartbeat_address: String,
+    /// Override the advertised API URL (for NAT/proxy scenarios)
+    pub api_advertise: Option<String>,
 }
 
 impl Default for ServeConfig {
@@ -651,6 +657,9 @@ impl Default for ServeConfig {
         Self {
             port: 8420,
             bind: "0.0.0.0".to_string(),
+            heartbeat: true,
+            heartbeat_address: "239.66.83.77:8421".to_string(),
+            api_advertise: None,
         }
     }
 }
@@ -2487,8 +2496,8 @@ refactor_auto_approve = true
     #[test]
     fn test_default_quality_gates() {
         let config = HarnessConfig::default();
-        assert_eq!(config.quality_gates.check, vec!["cargo check"]);
-        assert_eq!(config.quality_gates.test, vec!["cargo test"]);
+        assert_eq!(config.quality_gates.check, vec!["cargo check --release"]);
+        assert_eq!(config.quality_gates.test, vec!["cargo test --release"]);
         assert_eq!(
             config.quality_gates.lint,
             vec!["cargo clippy --fix --allow-dirty"]
@@ -2531,8 +2540,8 @@ max_iterations = 10
         )
         .unwrap();
         let config = HarnessConfig::load(&path).unwrap();
-        assert_eq!(config.quality_gates.check, vec!["cargo check"]);
-        assert_eq!(config.quality_gates.test, vec!["cargo test"]);
+        assert_eq!(config.quality_gates.check, vec!["cargo check --release"]);
+        assert_eq!(config.quality_gates.test, vec!["cargo test --release"]);
     }
 
     // --- Improvements config tests ---

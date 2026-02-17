@@ -2809,3 +2809,28 @@ Implemented three features for the self-improvement feedback loop:
 - File new beads from PRD if there's a V4 spec or new requirements
 - Consider performance profiling or integration testing
 - The singleton lock issue (MEMORY.md) may still need addressing
+
+--- 2026-02-17 00:19:00 | simple-agent-harness-i7t0 ---
+## Session: Implement UDP multicast heartbeat (simple-agent-harness-i7t0)
+
+### Completed
+- Bead simple-agent-harness-i7t0: Implement UDP multicast heartbeat
+- Added socket2 v0.5 as optional dep behind `serve` Cargo feature flag
+- Extended ServeConfig with heartbeat (bool), heartbeat_address (String), api_advertise (Option<String>)
+- Implemented heartbeat_loop in serve.rs: spawns a tokio background task that sends JSON UDP multicast every 30s
+- Heartbeat payload includes: v (version), project (from cwd), api (bound addr), status, workers_active, workers_max, iteration, max_iterations, pid
+- api_advertise config allows NAT override of the advertised API URL
+- heartbeat=false in config suppresses heartbeat entirely
+- Multiple instances can coexist on same machine (SO_REUSEADDR + non-blocking socket)
+- Also fixed 2 pre-existing test failures in config::tests (quality gates defaults expected "cargo check" but actual default was "cargo check --release")
+- All 1080 tests pass, zero clippy warnings, fmt clean
+
+### Current State
+- Codebase is clean: tests pass, clippy clean, fmt clean
+- Heartbeat feature is fully gated behind `--features serve`
+- k5z6 (instance discovery) is now unblocked by this work
+
+### Suggested Next Tasks
+- simple-agent-harness-k5z6: Implement instance discovery and registry (P1, now unblocked)
+- simple-agent-harness-fsnv: Implement serve port auto-allocation (P2, ready)
+- simple-agent-harness-xi2k: Add estimate API endpoint (P2, ready)
