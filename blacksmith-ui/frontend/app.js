@@ -8,6 +8,7 @@ import {
   useState,
   useEffect,
   useCallback,
+  useRef,
 } from "https://esm.sh/preact@10.19.3/hooks";
 
 const html = htm.bind(h);
@@ -344,7 +345,7 @@ function BeadList({ beadsData }) {
   `;
 }
 
-function ActiveSessions({ statusData }) {
+function ActiveSessions({ statusData, onViewTranscript }) {
   const workers = statusData?.workers || [];
 
   return html`
@@ -367,8 +368,10 @@ function ActiveSessions({ statusData }) {
                       ${w.bead_id && html`<span class="session-bead">Bead: ${w.bead_id}</span>`}
                       ${w.duration_secs != null &&
                       html`<span class="session-duration">${Math.floor(w.duration_secs / 60)}m ${w.duration_secs % 60}s</span>`}
-                      ${w.transcript_url &&
-                      html`<a class="session-transcript" href=${w.transcript_url} target="_blank">View Transcript</a>`}
+                      <button
+                        class="session-transcript-btn"
+                        onClick=${() => onViewTranscript(w.session_id || w.id || w.worker_id, w.status)}
+                      >View Transcript</button>
                     </div>
                   </div>
                 `
@@ -472,8 +475,206 @@ function StopButton({ instanceUrl }) {
   `;
 }
 
+function TranscriptViewer({ instanceUrl, sessionId, sessionStatus, onClose }) {
+  const [turns, setTurns] = useState([]);
+  const [error, setError] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [autoScroll, setAutoScroll] = useState(true);
+  const containerRef = useRef(null);
+  const userScrolledRef = useRef(false);
+
+  // Auto-scroll logic
+  useEffect(() => {
+    if (autoScroll && containerRef.current) {
+      containerRef.current.scrollTop = containerRef.current.scrollHeight;
+    }
+  }, [turns, autoScroll]);
+
+  const handleScroll = useCallback(() => {
+    if (!containerRef.current) return;
+    const el = containerRef.current;
+    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 50;
+    if (!atBottom) {
+      userScrolledRef.current = true;
+      setAutoScroll(false);
+    } else if (userScrolledRef.current) {
+      userScrolledRef.current = false;
+      setAutoScroll(true);
+    }
+  }, []);
+
+  // For live sessions, connect via SSE
+  useEffect(() => {
+    const isLive = sessionStatus === "running" || sessionStatus === "in_progress";
+
+    if (isLive) {
+      const url = `/api/instances/${encodeURIComponent(instanceUrl)}/sessions/${encodeURIComponent(sessionId)}/stream`;
+      const evtSource = new EventSource(url);
+
+      evtSource.onmessage = (event) => {
+        try {
+          const turn = JSON.parse(event.data);
+          setTurns((prev) => [...prev, turn]);
+          setLoading(false);
+        } catch (_) {}
+      };
+
+      evtSource.addEventListener("turn", (event) => {
+        try {
+          const turn = JSON.parse(event.data);
+          setTurns((prev) => [...prev, turn]);
+          setLoading(false);
+        } catch (_) {}
+      });
+
+      evtSource.onerror = () => {
+        setLoading(false);
+        // SSE might close when session ends — not necessarily an error
+      };
+
+      return () => evtSource.close();
+    } else {
+      // Completed session: fetch full transcript
+      const fetchTranscript = async () => {
+        try {
+          const resp = await fetch(
+            `/api/instances/${encodeURIComponent(instanceUrl)}/sessions/${encodeURIComponent(sessionId)}/transcript`
+          );
+          if (resp.ok) {
+            const data = await resp.json();
+            setTurns(data.turns || data.messages || (Array.isArray(data) ? data : []));
+          } else {
+            setError("Failed to load transcript");
+          }
+        } catch (err) {
+          setError(err.message);
+        } finally {
+          setLoading(false);
+        }
+      };
+      fetchTranscript();
+    }
+  }, [instanceUrl, sessionId, sessionStatus]);
+
+  const roleClass = (role) => {
+    if (role === "assistant") return "turn-assistant";
+    if (role === "tool" || role === "tool_result") return "turn-tool";
+    if (role === "user") return "turn-user";
+    return "turn-system";
+  };
+
+  const roleLabel = (role) => {
+    if (role === "assistant") return "Assistant";
+    if (role === "tool" || role === "tool_result") return "Tool";
+    if (role === "user") return "User";
+    return role || "System";
+  };
+
+  const highlightSearch = (text, query) => {
+    if (!query || !text) return text;
+    const parts = text.split(new RegExp(`(${query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")})`, "gi"));
+    return parts.map((part, i) =>
+      part.toLowerCase() === query.toLowerCase()
+        ? html`<mark class="search-highlight" key=${i}>${part}</mark>`
+        : part
+    );
+  };
+
+  const renderContent = (turn) => {
+    const content = turn.content || turn.text || turn.message || "";
+    if (typeof content === "string") {
+      // Detect code blocks
+      const parts = content.split(/(```[\s\S]*?```)/g);
+      return parts.map((part, i) => {
+        if (part.startsWith("```") && part.endsWith("```")) {
+          const lines = part.slice(3, -3);
+          const firstNewline = lines.indexOf("\n");
+          const code = firstNewline >= 0 ? lines.slice(firstNewline + 1) : lines;
+          return html`<pre class="code-block" key=${i}><code>${highlightSearch(code, searchQuery)}</code></pre>`;
+        }
+        return html`<span key=${i}>${highlightSearch(part, searchQuery)}</span>`;
+      });
+    }
+    // If content is an array (multi-part messages)
+    if (Array.isArray(content)) {
+      return content.map((block, i) => {
+        if (typeof block === "string") {
+          return html`<span key=${i}>${highlightSearch(block, searchQuery)}</span>`;
+        }
+        if (block.type === "text") {
+          return html`<span key=${i}>${highlightSearch(block.text, searchQuery)}</span>`;
+        }
+        if (block.type === "tool_use") {
+          return html`<pre class="code-block" key=${i}><code>${highlightSearch(JSON.stringify(block.input, null, 2), searchQuery)}</code></pre>`;
+        }
+        if (block.type === "tool_result") {
+          const text = typeof block.content === "string" ? block.content : JSON.stringify(block.content, null, 2);
+          return html`<pre class="code-block" key=${i}><code>${highlightSearch(text, searchQuery)}</code></pre>`;
+        }
+        return html`<pre class="code-block" key=${i}><code>${highlightSearch(JSON.stringify(block, null, 2), searchQuery)}</code></pre>`;
+      });
+    }
+    return html`<pre class="code-block"><code>${highlightSearch(JSON.stringify(content, null, 2), searchQuery)}</code></pre>`;
+  };
+
+  const matchesSearch = (turn) => {
+    if (!searchQuery) return true;
+    const q = searchQuery.toLowerCase();
+    const content = turn.content || turn.text || turn.message || "";
+    const text = typeof content === "string" ? content : JSON.stringify(content);
+    return text.toLowerCase().includes(q);
+  };
+
+  const filteredTurns = searchQuery ? turns.filter(matchesSearch) : turns;
+
+  return html`
+    <div class="transcript-overlay" onClick=${(e) => { if (e.target.classList.contains("transcript-overlay")) onClose(); }}>
+      <div class="transcript-panel">
+        <div class="transcript-header">
+          <h3>Transcript — ${sessionId}</h3>
+          <div class="transcript-controls">
+            <input
+              type="text"
+              class="transcript-search"
+              placeholder="Search transcript..."
+              value=${searchQuery}
+              onInput=${(e) => setSearchQuery(e.target.value)}
+            />
+            <button
+              class="transcript-autoscroll ${autoScroll ? "active" : ""}"
+              onClick=${() => { setAutoScroll(!autoScroll); userScrolledRef.current = !autoScroll ? false : true; }}
+              title=${autoScroll ? "Auto-scroll ON" : "Auto-scroll OFF"}
+            >
+              ${autoScroll ? "Following" : "Paused"}
+            </button>
+            <button class="transcript-close" onClick=${onClose}>Close</button>
+          </div>
+        </div>
+        <div class="transcript-body" ref=${containerRef} onScroll=${handleScroll}>
+          ${loading && html`<div class="transcript-loading">Loading transcript...</div>`}
+          ${error && html`<div class="transcript-error">${error}</div>`}
+          ${!loading && !error && filteredTurns.length === 0 && html`
+            <div class="transcript-empty">${searchQuery ? "No matching turns" : "No turns yet"}</div>
+          `}
+          ${filteredTurns.map((turn, i) => html`
+            <div key=${i} class="transcript-turn ${roleClass(turn.role)}">
+              <div class="turn-header">
+                <span class="turn-role">${roleLabel(turn.role)}</span>
+                ${turn.timestamp && html`<span class="turn-time">${new Date(turn.timestamp).toLocaleTimeString()}</span>`}
+              </div>
+              <div class="turn-content">${renderContent(turn)}</div>
+            </div>
+          `)}
+        </div>
+      </div>
+    </div>
+  `;
+}
+
 function ProjectDetail({ instance, instanceUrl }) {
   const [pollData, setPollData] = useState(null);
+  const [viewingTranscript, setViewingTranscript] = useState(null);
 
   const fetchPollData = useCallback(async () => {
     try {
@@ -493,14 +694,26 @@ function ProjectDetail({ instance, instanceUrl }) {
 
   const name = instance?.name || instanceUrl;
 
+  const handleViewTranscript = useCallback((sessionId, status) => {
+    setViewingTranscript({ sessionId, status });
+  }, []);
+
   return html`
     <div class="project-detail">
       <h2>${name}</h2>
       <${StatusBar} instance=${instance} statusData=${pollData?.status_data} />
       <${BeadList} beadsData=${pollData?.beads_data} />
-      <${ActiveSessions} statusData=${pollData?.status_data} />
+      <${ActiveSessions} statusData=${pollData?.status_data} onViewTranscript=${handleViewTranscript} />
       <${MetricsSummary} metricsData=${pollData?.metrics_data} />
       <${StopButton} instanceUrl=${instanceUrl} />
+      ${viewingTranscript && html`
+        <${TranscriptViewer}
+          instanceUrl=${instanceUrl}
+          sessionId=${viewingTranscript.sessionId}
+          sessionStatus=${viewingTranscript.status}
+          onClose=${() => setViewingTranscript(null)}
+        />
+      `}
     </div>
   `;
 }

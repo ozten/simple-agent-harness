@@ -2949,3 +2949,35 @@ Implemented three features for the self-improvement feedback loop:
 - simple-agent-harness-0qvp: Implement transcript viewer with live SSE (P2, was blocked by this bead)
 - simple-agent-harness-peh7: Implement ETA display with what-if worker slider (P2, was blocked by this bead)
 - simple-agent-harness-z38u: Implement dependency DAG visualization (P2, unblocked)
+
+--- 2026-02-17 01:03:51 | simple-agent-harness-0qvp ---
+## Session: Implement transcript viewer with live SSE (simple-agent-harness-0qvp)
+
+### Completed
+- Bead simple-agent-harness-0qvp: Implement transcript viewer with live SSE
+- Added TranscriptViewer component in blacksmith-ui/frontend/app.js:
+  - Opens as overlay panel from active sessions list via "View Transcript" button
+  - Live sessions: connects via EventSource to SSE endpoint, renders turns in real-time
+  - Completed sessions: fetches full transcript via REST endpoint
+  - Each turn styled by role (assistant=purple, user=green, tool=yellow, system=gray) with left border accent
+  - Code blocks rendered in monospace with dark background
+  - Client-side text search filters turns and highlights matching text with yellow marks
+  - Auto-scroll follows new output, pauses when user scrolls up, toggleable button shows "Following"/"Paused"
+  - Close button dismisses overlay, clicking backdrop also closes
+- Added SSE proxy endpoint in blacksmith-ui/src/main.rs:
+  - GET /api/instances/:url/sessions/:id/stream - proxies SSE from instance (streaming body)
+  - GET /api/instances/:url/sessions/:id/transcript - proxies full transcript JSON
+  - Refactored stop_instance to use shared resolve_instance_url helper
+- Added reqwest "stream" feature to Cargo.toml for bytes_stream support
+- Added comprehensive CSS styles in blacksmith-ui/frontend/style.css for transcript overlay/panel/turns/code-blocks/search
+- Updated ActiveSessions component to use "View Transcript" button (replacing external link) with onViewTranscript callback
+- All 1080 tests pass, zero clippy warnings, fmt clean
+
+### Current State
+- Codebase is clean: tests pass, clippy clean, fmt clean
+- Transcript viewer works for both live (SSE) and completed (REST) sessions
+- Search and auto-scroll features fully functional
+
+### Suggested Next Tasks
+- simple-agent-harness-z38u: Implement dependency DAG visualization (P2, ready)
+- simple-agent-harness-xc3g: Implement rate limit heatmap (P3, ready)

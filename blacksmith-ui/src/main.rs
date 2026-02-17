@@ -3,6 +3,7 @@ mod discovery;
 mod poller;
 
 use axum::{
+    body::Body,
     extract::State,
     http::StatusCode,
     response::{IntoResponse, Response},
@@ -75,6 +76,14 @@ async fn main() {
         .route("/api/global-metrics", get(get_global_metrics))
         .route("/api/instances/:url/poll-data", get(get_instance_poll_data))
         .route("/api/instances/:url/stop", post(stop_instance))
+        .route(
+            "/api/instances/:url/sessions/:session_id/stream",
+            get(proxy_session_stream),
+        )
+        .route(
+            "/api/instances/:url/sessions/:session_id/transcript",
+            get(proxy_session_transcript),
+        )
         .fallback(get(static_handler))
         .layer(CorsLayer::permissive())
         .with_state(state);
@@ -154,23 +163,14 @@ async fn stop_instance(
     State(state): State<AppState>,
     axum::extract::Path(url): axum::extract::Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
-    // Find the instance URL from the registry
-    let instance_url = {
-        let reg = state.registry.read().await;
-        let instances = reg.list();
-        let key = url.trim_end_matches('/').to_lowercase();
-        instances
-            .into_iter()
-            .find(|i| i.url.trim_end_matches('/').to_lowercase() == key)
-            .map(|i| i.url)
-    };
-
-    let instance_url = instance_url.ok_or_else(|| {
-        (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": "Instance not found"})),
-        )
-    })?;
+    let instance_url = resolve_instance_url(&state.registry, &url)
+        .await
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": "Instance not found"})),
+            )
+        })?;
 
     let stop_url = format!("{instance_url}/api/stop");
     let client = reqwest::Client::builder()
@@ -198,6 +198,111 @@ async fn stop_instance(
             Json(serde_json::json!({"error": format!("stop returned {}", resp.status())})),
         ))
     }
+}
+
+async fn resolve_instance_url(registry: &Registry, url: &str) -> Option<String> {
+    let reg = registry.read().await;
+    let instances = reg.list();
+    let key = url.trim_end_matches('/').to_lowercase();
+    instances
+        .into_iter()
+        .find(|i| i.url.trim_end_matches('/').to_lowercase() == key)
+        .map(|i| i.url)
+}
+
+async fn proxy_session_stream(
+    State(state): State<AppState>,
+    axum::extract::Path((url, session_id)): axum::extract::Path<(String, String)>,
+) -> Result<Response, (StatusCode, Json<serde_json::Value>)> {
+    let instance_url = resolve_instance_url(&state.registry, &url)
+        .await
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": "Instance not found"})),
+            )
+        })?;
+
+    let stream_url = format!("{instance_url}/api/sessions/{session_id}/stream");
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(3600))
+        .build()
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": format!("http client error: {e}")})),
+            )
+        })?;
+
+    let resp = client.get(&stream_url).send().await.map_err(|e| {
+        (
+            StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({"error": format!("stream request failed: {e}")})),
+        )
+    })?;
+
+    if !resp.status().is_success() {
+        return Err((
+            StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({"error": format!("stream returned {}", resp.status())})),
+        ));
+    }
+
+    let body = Body::from_stream(resp.bytes_stream());
+    Ok(Response::builder()
+        .header("Content-Type", "text/event-stream")
+        .header("Cache-Control", "no-cache")
+        .header("Connection", "keep-alive")
+        .body(body)
+        .unwrap())
+}
+
+async fn proxy_session_transcript(
+    State(state): State<AppState>,
+    axum::extract::Path((url, session_id)): axum::extract::Path<(String, String)>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let instance_url = resolve_instance_url(&state.registry, &url)
+        .await
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": "Instance not found"})),
+            )
+        })?;
+
+    let transcript_url = format!("{instance_url}/api/sessions/{session_id}/transcript");
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": format!("http client error: {e}")})),
+            )
+        })?;
+
+    let resp = client.get(&transcript_url).send().await.map_err(|e| {
+        (
+            StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({"error": format!("transcript request failed: {e}")})),
+        )
+    })?;
+
+    if !resp.status().is_success() {
+        return Err((
+            StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({"error": format!("transcript returned {}", resp.status())})),
+        ));
+    }
+
+    let data: serde_json::Value = resp.json().await.map_err(|e| {
+        (
+            StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({"error": format!("invalid transcript json: {e}")})),
+        )
+    })?;
+
+    Ok(Json(data))
 }
 
 async fn add_instance(
