@@ -1,29 +1,30 @@
-## Session: Implement polling and cross-project aggregation (simple-agent-harness-rxsx)
+## Session: Scaffold embedded frontend with project list sidebar (simple-agent-harness-g7hg)
 
 ### Completed
-- Bead simple-agent-harness-rxsx: Implement polling and cross-project aggregation
-- Created blacksmith-ui/src/poller.rs with:
-  - PollDataStore: per-instance polled data keyed by normalized URL
-  - Aggregate struct: total_beads_open, total_beads_in_progress, total_cost_today, worker_utilization, instances_online/total
-  - spawn_poller(): main polling loop that polls all instances concurrently at configurable interval
-  - Per-instance polling: /api/health every poll, /api/status every poll, /api/beads every poll, /api/metrics/summary every poll, /api/project once on discovery, /api/improvements every 30s
-  - Graceful degradation: 404s and errors return None, offline instances preserve last known state
-  - Cross-project aggregate computation from beads + metrics data, with fallback to heartbeat worker counts
-- Modified blacksmith-ui/src/discovery.rs:
-  - Added set_online_status() method to InstanceRegistry for poller to update online/offline state
+- Bead simple-agent-harness-g7hg: Scaffold embedded frontend with project list sidebar
+- Added rust-embed and mime_guess dependencies to blacksmith-ui/Cargo.toml
+- Created blacksmith-ui/frontend/index.html: minimal HTML shell loading app.js + style.css
+- Created blacksmith-ui/frontend/app.js: Preact + HTM (no build step) application with:
+  - Sidebar component showing project list with status dots (green=online, gray=offline)
+  - Worker count display per project
+  - Click-to-select with visual highlight
+  - Add Project form with URL input, name input, error handling
+  - Aggregate overview cards (open beads, in progress, workers, instances online, cost today)
+  - Auto-refresh every 10 seconds via polling /api/instances and /api/aggregate
+- Created blacksmith-ui/frontend/style.css: dark theme dashboard styles, 280px sidebar, responsive cards
 - Modified blacksmith-ui/src/main.rs:
-  - Added poller module, PollStore in AppState
-  - Spawns poller loop on startup with configurable poll interval
-  - New endpoints: GET /api/aggregate (cross-project aggregates), GET /api/instances/:url/poll-data (per-instance polled data)
-- All 1080 existing tests pass, zero clippy warnings, fmt clean
-- Poll interval configurable via blacksmith-ui.toml dashboard.poll_interval_secs (default 10s)
+  - Added rust-embed FrontendAssets struct embedding frontend/ directory
+  - Added static_handler fallback route serving embedded files with correct MIME types
+  - SPA fallback: non-file paths serve index.html
+- All 1080 tests pass, zero clippy warnings, fmt clean
 
 ### Current State
 - Codebase is clean: tests pass, clippy clean, fmt clean
-- Polling system is fully operational with graceful offline handling
-- Polled endpoints that don't yet exist on serve instances (status, beads, metrics, project, improvements) return None gracefully
+- Opening http://localhost:8080 serves the embedded dashboard
+- Frontend uses CDN-loaded Preact+HTM (no build step needed)
+- Frontend assets are compiled into the binary via rust-embed
 
 ### Suggested Next Tasks
-- simple-agent-harness-g7hg: Scaffold embedded frontend with project list sidebar (P1, now unblocked by this bead)
-- simple-agent-harness-fsnv: Implement serve port auto-allocation (P2, ready)
-- simple-agent-harness-xi2k: Add estimate API endpoint (P2, ready)
+- simple-agent-harness-k760: Implement project detail view in frontend (P2, unblocked by this)
+- simple-agent-harness-9t4l: Implement cost and performance trend charts (P2, unblocked by this)
+- simple-agent-harness-vs6h: Implement worker timeline visualization (P2, unblocked by this)

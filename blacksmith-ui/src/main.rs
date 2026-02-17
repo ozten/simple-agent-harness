@@ -5,15 +5,21 @@ mod poller;
 use axum::{
     extract::State,
     http::StatusCode,
+    response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };
 use discovery::{Instance, InstanceRegistry, Registry};
 use poller::{Aggregate, PollDataStore, PollStore};
+use rust_embed::Embed;
 use serde::Deserialize;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tower_http::cors::CorsLayer;
+
+#[derive(Embed)]
+#[folder = "frontend/"]
+struct FrontendAssets;
 
 #[derive(Clone)]
 struct AppState {
@@ -67,6 +73,7 @@ async fn main() {
         .route("/api/instances", post(add_instance))
         .route("/api/aggregate", get(get_aggregate))
         .route("/api/instances/:url/poll-data", get(get_instance_poll_data))
+        .fallback(get(static_handler))
         .layer(CorsLayer::permissive())
         .with_state(state);
 
@@ -109,6 +116,31 @@ struct AddInstanceRequest {
     url: String,
     #[serde(default)]
     name: Option<String>,
+}
+
+async fn static_handler(uri: axum::http::Uri) -> Response {
+    let path = uri.path().trim_start_matches('/');
+    let path = if path.is_empty() { "index.html" } else { path };
+
+    match FrontendAssets::get(path) {
+        Some(file) => {
+            let mime = mime_guess::from_path(path).first_or_octet_stream();
+            (
+                [(axum::http::header::CONTENT_TYPE, mime.as_ref())],
+                file.data,
+            )
+                .into_response()
+        }
+        None => {
+            // SPA fallback: serve index.html for non-file paths
+            match FrontendAssets::get("index.html") {
+                Some(file) => {
+                    ([(axum::http::header::CONTENT_TYPE, "text/html")], file.data).into_response()
+                }
+                None => (StatusCode::NOT_FOUND, "not found").into_response(),
+            }
+        }
+    }
 }
 
 async fn add_instance(
