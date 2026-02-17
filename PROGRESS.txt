@@ -1,18 +1,21 @@
-## Session: Init copies bundled Claude skills (simple-agent-harness-h9ph)
+## Session: Init guidance message for PROMPT.md (simple-agent-harness-znvp)
 
 ### Completed
-- Added `src/skills.rs` module that embeds 3 Claude Code skills (break-down-issue, prd-to-beads, self-improvement) using `include_str!`
-- `install_bundled_skills(project_root)` copies skills to `.claude/skills/` — idempotent, never overwrites existing files
-- Updated `blacksmith init` handler in `src/main.rs` to call `install_bundled_skills` after data dir initialization
-- Skills are embedded at compile time from `.claude/skills/*/SKILL.md`
+- Added `src/init.rs` module with project type auto-detection and PROMPT.md generation
+- `detect_project_type()` checks for Cargo.toml, package.json, pyproject.toml/setup.py/requirements.txt, go.mod
+- `default_commands()` returns appropriate verification commands (test/lint/format) per project type
+- `generate_prompt_md()` creates a PROMPT.md template with populated verification section
+- `write_prompt_md_if_missing()` writes PROMPT.md only if it doesn't exist (idempotent)
+- `guidance_message()` formats a user-facing message showing detected project type, auto-populated commands, and prompting customization
+- Updated `blacksmith init` handler in `src/main.rs` to detect project type, generate PROMPT.md, and print guidance
 
 ### Files Changed
-- src/skills.rs (new): Bundled skills module with `BUNDLED_SKILLS` const and `install_bundled_skills()` function, plus 2 tests
-- src/main.rs (modified): Added `mod skills;` declaration and skill installation call in Init handler
+- src/init.rs (new): Project detection + PROMPT.md generation + guidance message, with 16 tests
+- src/main.rs (modified): Added `mod init;` and init handler integration
 
 ### Current State
-- All 1082 tests pass (+1 ignored), zero clippy warnings, formatting clean
-- 2 new tests: test_install_creates_skills, test_install_is_idempotent
+- All 1098 tests pass (+16 new init tests), zero clippy warnings, formatting clean
+- The init handler now: (1) initializes data dir, (2) installs skills, (3) detects project type, (4) generates PROMPT.md with verification commands, (5) prints guidance message
 
 ### Suggested Next Tasks
-- Init: auto-detect project type and populate PROMPT.md verification section (simple-agent-harness-10qw)
+- Any remaining init-related beads (e.g., config file scaffolding)

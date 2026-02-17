@@ -3137,3 +3137,26 @@ Implemented three features for the self-improvement feedback loop:
 
 ### Suggested Next Tasks
 - Init: auto-detect project type and populate PROMPT.md verification section (simple-agent-harness-10qw)
+
+--- 2026-02-17 04:15:13 | simple-agent-harness-znvp ---
+## Session: Init guidance message for PROMPT.md (simple-agent-harness-znvp)
+
+### Completed
+- Added `src/init.rs` module with project type auto-detection and PROMPT.md generation
+- `detect_project_type()` checks for Cargo.toml, package.json, pyproject.toml/setup.py/requirements.txt, go.mod
+- `default_commands()` returns appropriate verification commands (test/lint/format) per project type
+- `generate_prompt_md()` creates a PROMPT.md template with populated verification section
+- `write_prompt_md_if_missing()` writes PROMPT.md only if it doesn't exist (idempotent)
+- `guidance_message()` formats a user-facing message showing detected project type, auto-populated commands, and prompting customization
+- Updated `blacksmith init` handler in `src/main.rs` to detect project type, generate PROMPT.md, and print guidance
+
+### Files Changed
+- src/init.rs (new): Project detection + PROMPT.md generation + guidance message, with 16 tests
+- src/main.rs (modified): Added `mod init;` and init handler integration
+
+### Current State
+- All 1098 tests pass (+16 new init tests), zero clippy warnings, formatting clean
+- The init handler now: (1) initializes data dir, (2) installs skills, (3) detects project type, (4) generates PROMPT.md with verification commands, (5) prints guidance message
+
+### Suggested Next Tasks
+- Any remaining init-related beads (e.g., config file scaffolding)

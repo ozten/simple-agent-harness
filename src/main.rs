@@ -19,6 +19,7 @@ mod hooks;
 mod import_graph;
 mod improve;
 mod ingest;
+mod init;
 mod integrator;
 mod metrics;
 mod metrics_cmd;
@@ -1014,6 +1015,23 @@ async fn main() {
                 eprintln!("Warning: could not install bundled skills: {e}");
             }
         }
+
+        // Detect project type and generate PROMPT.md with verification commands
+        let project_type = init::detect_project_type(&project_root);
+        let commands = init::default_commands(&project_type);
+        let prompt_content = init::generate_prompt_md(&commands);
+        let prompt_created = match init::write_prompt_md_if_missing(&project_root, &prompt_content)
+        {
+            Ok(created) => created,
+            Err(e) => {
+                eprintln!("Warning: could not write PROMPT.md: {e}");
+                false
+            }
+        };
+        print!(
+            "{}",
+            init::guidance_message(&project_type, &commands, prompt_created)
+        );
         return;
     }
 
