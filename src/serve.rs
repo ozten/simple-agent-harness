@@ -30,6 +30,7 @@ pub async fn run(config: &HarnessConfig) -> Result<(), Box<dyn std::error::Error
         .route("/api/improvements", get(api_improvements))
         .route("/api/beads", get(api_beads))
         .route("/api/stop", post(api_stop))
+        .route("/api/estimate", get(api_estimate))
         .with_state(state)
         .layer(CorsLayer::permissive());
 
@@ -150,6 +151,49 @@ async fn api_beads(
         open_count,
         in_progress_count,
         items: all_items,
+    }))
+}
+
+#[cfg(feature = "serve")]
+#[derive(serde::Deserialize)]
+struct EstimateQuery {
+    workers: Option<u32>,
+}
+
+#[cfg(feature = "serve")]
+#[derive(serde::Serialize)]
+struct EstimateResponse {
+    beads_remaining: usize,
+    serial_eta_secs: Option<f64>,
+    parallel_eta_secs: Option<f64>,
+    critical_path: usize,
+    workers: u32,
+    completed_count: usize,
+    avg_time_per_bead: Option<f64>,
+}
+
+#[cfg(feature = "serve")]
+async fn api_estimate(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    axum::extract::Query(query): axum::extract::Query<EstimateQuery>,
+) -> Result<axum::Json<EstimateResponse>, axum::http::StatusCode> {
+    let workers = query.workers.unwrap_or(1);
+
+    let conn = crate::db::open_or_create(&state.db_path)
+        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let open_beads = crate::estimation::query_open_beads();
+
+    let est = crate::estimation::estimate(&conn, &open_beads, workers);
+
+    Ok(axum::Json(EstimateResponse {
+        beads_remaining: est.open_count,
+        serial_eta_secs: est.serial_secs,
+        parallel_eta_secs: est.parallel_secs,
+        critical_path: est.critical_path_len,
+        workers: est.workers,
+        completed_count: est.completed_count,
+        avg_time_per_bead: est.avg_time_per_bead,
     }))
 }
 

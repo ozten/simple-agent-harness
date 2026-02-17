@@ -3077,3 +3077,24 @@ Implemented three features for the self-improvement feedback loop:
 
 ### Suggested Next Tasks
 - Remaining serve API endpoints (simple-agent-harness-3hps, k57l, sqpv, ts82)
+
+--- 2026-02-17 02:00:10 | simple-agent-harness-1p09 ---
+## Session: Implement GET /api/estimate endpoint (simple-agent-harness-1p09)
+
+### Completed
+- Added GET /api/estimate endpoint to serve API
+- Accepts optional ?workers=N query parameter (defaults to 1)
+- Uses existing estimation module (estimation::estimate) with db connection and open beads from bd CLI
+- Returns JSON: {beads_remaining, serial_eta_secs, parallel_eta_secs, critical_path, workers, completed_count, avg_time_per_bead}
+- All 1080 tests pass, zero clippy warnings
+
+### Files Changed
+- src/serve.rs: Added EstimateQuery, EstimateResponse structs; api_estimate handler; GET /api/estimate route
+
+### Current State
+- Codebase is clean: tests pass, clippy clean
+- All serve API endpoints now implemented: health, beads, improvements, stop, estimate
+
+### Suggested Next Tasks
+- Remaining serve API endpoints if any
+- Dashboard integration testing with the new estimate endpoint
