@@ -1,21 +1,32 @@
-## Session: Init guidance message for PROMPT.md (simple-agent-harness-znvp)
+## Session: E2E smoke test for blacksmith-ui (simple-agent-harness-949)
 
 ### Completed
-- Added `src/init.rs` module with project type auto-detection and PROMPT.md generation
-- `detect_project_type()` checks for Cargo.toml, package.json, pyproject.toml/setup.py/requirements.txt, go.mod
-- `default_commands()` returns appropriate verification commands (test/lint/format) per project type
-- `generate_prompt_md()` creates a PROMPT.md template with populated verification section
-- `write_prompt_md_if_missing()` writes PROMPT.md only if it doesn't exist (idempotent)
-- `guidance_message()` formats a user-facing message showing detected project type, auto-populated commands, and prompting customization
-- Updated `blacksmith init` handler in `src/main.rs` to detect project type, generate PROMPT.md, and print guidance
+- Created `scripts/smoke-test-ui.sh` — automated smoke test that:
+  - Starts `blacksmith serve` on a test port (18420) against a real project
+  - Validates all serve API endpoints return HTTP 200
+  - Checks JSON payload fields (health.ok, project.name)
+  - Tests session/transcript/stream endpoints if sessions exist
+  - Starts `blacksmith-ui` with a temporary config pointing at the serve instance
+  - Validates all dashboard API endpoints including proxied transcript routes
+  - Reports PASS/FAIL summary with failure signatures
+  - Clean teardown of both processes on exit
+- Updated `docs/dashboard.md` with Smoke Testing section documenting:
+  - Quick start commands
+  - What each phase checks
+  - How to detect regressions
+  - Expected output format
+  - Failure signature table
+- Updated `docs/troubleshooting.md` with Dashboard Smoke Test Failures section
 
 ### Files Changed
-- src/init.rs (new): Project detection + PROMPT.md generation + guidance message, with 16 tests
-- src/main.rs (modified): Added `mod init;` and init handler integration
+- scripts/smoke-test-ui.sh (new)
+- docs/dashboard.md (added Smoke Testing section)
+- docs/troubleshooting.md (added Dashboard Smoke Test Failures section)
 
 ### Current State
-- All 1098 tests pass (+16 new init tests), zero clippy warnings, formatting clean
-- The init handler now: (1) initializes data dir, (2) installs skills, (3) detects project type, (4) generates PROMPT.md with verification commands, (5) prints guidance message
+- All 1096 tests pass
+- Zero clippy warnings, formatting clean
 
 ### Suggested Next Tasks
-- Any remaining init-related beads (e.g., config file scaffolding)
+- Run the smoke test against cantrip to validate it works end-to-end
+- Consider adding the smoke test to CI once infrastructure supports it

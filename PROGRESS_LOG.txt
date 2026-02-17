@@ -3118,45 +3118,125 @@ Implemented three features for the self-improvement feedback loop:
 - Adaptive backend polling (simple-agent-harness-uurh) - complementary feature for UI side
 - Frontend poll interval/SSE push (simple-agent-harness-v2j0)
 
---- 2026-02-17 04:10:50 | simple-agent-harness-h9ph ---
-## Session: Init copies bundled Claude skills (simple-agent-harness-h9ph)
+--- 2026-02-17 04:13:36 | simple-agent-harness-946 ---
+## Session: Restore core poll endpoints (simple-agent-harness-946)
 
 ### Completed
-- Added `src/skills.rs` module that embeds 3 Claude Code skills (break-down-issue, prd-to-beads, self-improvement) using `include_str!`
-- `install_bundled_skills(project_root)` copies skills to `.claude/skills/` — idempotent, never overwrites existing files
-- Updated `blacksmith init` handler in `src/main.rs` to call `install_bundled_skills` after data dir initialization
-- Skills are embedded at compile time from `.claude/skills/*/SKILL.md`
+- Added GET /api/status endpoint: reads StatusData from status file, returns JSON (or {"state":"idle"} if no file)
+- Added GET /api/project endpoint: returns project name, workers_max, max_iterations
+- Added GET /api/metrics/summary endpoint: aggregates cost_today, cost_this_week from observations, workers from status file, beads_closed_today from bead_metrics, session_outcomes from observations
+- Extended AppState with status_path, project_name, workers_max, max_iterations fields
+- Added 4 route coverage tests (status no-file, status with-file, project, metrics/summary)
+- Added tower dev-dependency for axum test utilities
 
 ### Files Changed
-- src/skills.rs (new): Bundled skills module with `BUNDLED_SKILLS` const and `install_bundled_skills()` function, plus 2 tests
-- src/main.rs (modified): Added `mod skills;` declaration and skill installation call in Init handler
+- src/serve.rs: Three new handler functions + routes + test module
+- Cargo.toml: Added tower dev-dependency
 
 ### Current State
-- All 1082 tests pass (+1 ignored), zero clippy warnings, formatting clean
-- 2 new tests: test_install_creates_skills, test_install_is_idempotent
+- All 1084+ tests pass (1 pre-existing flaky watchdog test: test_monitor_kills_stale_process)
+- Zero clippy warnings, formatting clean
+- Pre-existing fmt issue in blacksmith-ui/src/main.rs (not touched)
 
 ### Suggested Next Tasks
-- Init: auto-detect project type and populate PROMPT.md verification section (simple-agent-harness-10qw)
+- simple-agent-harness-947: Restore session list/detail endpoints
+- simple-agent-harness-948: Restore transcript endpoints for UI viewer
 
---- 2026-02-17 04:15:13 | simple-agent-harness-znvp ---
-## Session: Init guidance message for PROMPT.md (simple-agent-harness-znvp)
+--- 2026-02-17 04:20:00 | simple-agent-harness-947 ---
+## Session: Restore session list/detail endpoints (simple-agent-harness-947)
 
 ### Completed
-- Added `src/init.rs` module with project type auto-detection and PROMPT.md generation
-- `detect_project_type()` checks for Cargo.toml, package.json, pyproject.toml/setup.py/requirements.txt, go.mod
-- `default_commands()` returns appropriate verification commands (test/lint/format) per project type
-- `generate_prompt_md()` creates a PROMPT.md template with populated verification section
-- `write_prompt_md_if_missing()` writes PROMPT.md only if it doesn't exist (idempotent)
-- `guidance_message()` formats a user-facing message showing detected project type, auto-populated commands, and prompting customization
-- Updated `blacksmith init` handler in `src/main.rs` to detect project type, generate PROMPT.md, and print guidance
+- Added GET /api/sessions endpoint with ?last=N query param (defaults to 50)
+- Added GET /api/sessions/{id} endpoint with 404 JSON error for missing sessions
+- Session data sourced from observations table (session id, ts, duration, outcome, plus flattened data fields)
+- Added 5 tests: empty list, list with data, ?last=N filtering, detail, and 404 behavior
 
 ### Files Changed
-- src/init.rs (new): Project detection + PROMPT.md generation + guidance message, with 16 tests
-- src/main.rs (modified): Added `mod init;` and init handler integration
+- src/serve.rs: Two new handler functions (api_sessions, api_session_detail), SessionsQuery/SessionItem structs, routes, tests
 
 ### Current State
-- All 1098 tests pass (+16 new init tests), zero clippy warnings, formatting clean
-- The init handler now: (1) initializes data dir, (2) installs skills, (3) detects project type, (4) generates PROMPT.md with verification commands, (5) prints guidance message
+- All 1089 tests pass
+- Zero clippy warnings, formatting clean
+- Pre-existing flaky watchdog test (test_monitor_kills_stale_process) passed this run
 
 ### Suggested Next Tasks
-- Any remaining init-related beads (e.g., config file scaffolding)
+- simple-agent-harness-948: Restore transcript endpoints for UI viewer
+- simple-agent-harness-950: blacksmith init should create .blacksmith/config.yaml by default
+
+--- 2026-02-17 04:25:45 | simple-agent-harness-948 ---
+## Session: Restore transcript endpoints (simple-agent-harness-948)
+
+### Completed
+- Added GET /api/sessions/{id}/transcript endpoint returning `{"turns": [...]}` JSON
+- Added GET /api/sessions/{id}/stream SSE endpoint emitting `event: turn` events + final `event: done`
+- JSONL parsing handles system/init, assistant, user, and result event types
+- Supports both plain .jsonl and zstd-compressed .jsonl.zst session files
+- Missing session returns 404 JSON for both endpoints
+- Added `sessions_dir` to AppState, sourced from DataDir
+- Added `tokio-stream` dependency for SSE streaming
+- Added 5 new tests: transcript fetch, transcript 404, SSE replay, stream 404, compressed session
+
+### Files Changed
+- Cargo.toml: Added tokio-stream dependency, added to serve feature
+- src/serve.rs: read_session_lines(), parse_transcript_turns(), api_session_transcript, api_session_stream handlers, routes, tests
+
+### Current State
+- All 1094 tests pass
+- Zero clippy warnings, formatting clean
+
+### Suggested Next Tasks
+- simple-agent-harness-950: blacksmith init should create .blacksmith/config.yaml by default
+
+--- 2026-02-17 04:29:59 | simple-agent-harness-950 ---
+## Session: blacksmith init creates config.toml (simple-agent-harness-950)
+
+### Completed
+- Added `config()` accessor to `DataDir` returning `.blacksmith/config.toml` path
+- Updated `DataDir::init()` to write a default `config.toml` when it doesn't already exist
+- Default config includes commented sections for [agent], [session], and [storage]
+- Existing config is never overwritten (idempotent behavior preserved)
+- Added 3 new tests: config_path, init_creates_config, init_does_not_overwrite_existing_config
+
+### Files Changed
+- src/data_dir.rs: Added config() accessor, DEFAULT_CONFIG const, config write in init(), new tests
+
+### Current State
+- All 1096 tests pass
+- Zero clippy warnings, formatting clean
+
+### Suggested Next Tasks
+- simple-agent-harness-949: Add end-to-end smoke verification for blacksmith-ui against cantrip
+
+--- 2026-02-17 04:34:22 | simple-agent-harness-949 ---
+## Session: E2E smoke test for blacksmith-ui (simple-agent-harness-949)
+
+### Completed
+- Created `scripts/smoke-test-ui.sh` — automated smoke test that:
+  - Starts `blacksmith serve` on a test port (18420) against a real project
+  - Validates all serve API endpoints return HTTP 200
+  - Checks JSON payload fields (health.ok, project.name)
+  - Tests session/transcript/stream endpoints if sessions exist
+  - Starts `blacksmith-ui` with a temporary config pointing at the serve instance
+  - Validates all dashboard API endpoints including proxied transcript routes
+  - Reports PASS/FAIL summary with failure signatures
+  - Clean teardown of both processes on exit
+- Updated `docs/dashboard.md` with Smoke Testing section documenting:
+  - Quick start commands
+  - What each phase checks
+  - How to detect regressions
+  - Expected output format
+  - Failure signature table
+- Updated `docs/troubleshooting.md` with Dashboard Smoke Test Failures section
+
+### Files Changed
+- scripts/smoke-test-ui.sh (new)
+- docs/dashboard.md (added Smoke Testing section)
+- docs/troubleshooting.md (added Dashboard Smoke Test Failures section)
+
+### Current State
+- All 1096 tests pass
+- Zero clippy warnings, formatting clean
+
+### Suggested Next Tasks
+- Run the smoke test against cantrip to validate it works end-to-end
+- Consider adding the smoke test to CI once infrastructure supports it

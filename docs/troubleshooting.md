@@ -84,6 +84,23 @@
 - Check regex syntax (uses Rust regex, not PCRE)
 - Ensure prompt file exists at the configured path
 
+### Dashboard Smoke Test Failures
+
+**Symptoms:** `./scripts/smoke-test-ui.sh` reports FAIL on one or more endpoints.
+
+**Common causes and fixes:**
+
+| Failure | Likely cause | Fix |
+|---|---|---|
+| TIMEOUT waiting for serve | Binary not built with `--features serve`, or port 18420 in use | Rebuild with `cargo build --release --features serve`; kill conflicting process |
+| TIMEOUT waiting for UI | `blacksmith-ui` binary missing, or port 18080 in use | Rebuild with `cargo build --release -p blacksmith-ui`; kill conflicting process |
+| FAIL on a specific serve endpoint | Route removed or renamed in `src/serve.rs` | Check git diff for route changes, restore the route |
+| FAIL on a dashboard endpoint | Route removed or renamed in `blacksmith-ui/src/main.rs` | Check git diff for route changes, restore the route |
+| FAIL on proxied transcript | Serve session/transcript handler broken | Check `api_session_transcript` and `api_session_stream` in `src/serve.rs` |
+| FAIL on poll-data | Poller hasn't fetched yet or serve unreachable | Increase the sleep before dashboard checks, or check serve is healthy |
+
+See also: [Dashboard docs — Smoke Testing](dashboard.md#smoke-testing)
+
 ## Error Codes
 
 | Exit Code | Meaning |

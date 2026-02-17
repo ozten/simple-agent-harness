@@ -65,3 +65,5 @@
 # - linear.api-key
 # - github.org
 # - github.repo
+
+issue-prefix: "simple-agent-harness"

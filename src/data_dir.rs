@@ -50,19 +50,49 @@ impl DataDir {
         self.root.join("lock")
     }
 
+    /// Path to the config file (e.g. `.blacksmith/config.toml`).
+    pub fn config(&self) -> PathBuf {
+        self.root.join("config.toml")
+    }
+
     /// Path to a specific session file (e.g. `sessions/42.jsonl`).
     pub fn session_file(&self, iteration: u32) -> PathBuf {
         self.sessions_dir().join(format!("{iteration}.jsonl"))
     }
 
+    /// Default content written to `config.toml` when initializing a new data directory.
+    const DEFAULT_CONFIG: &str = "\
+# Blacksmith configuration
+# See documentation for all available options.
+
+[agent]
+command = \"claude\"
+args = [\"-p\", \"{prompt}\", \"--output-format\", \"stream-json\"]
+
+[session]
+max_iterations = 100
+
+[storage]
+compress_after = 5
+retention = \"last-50\"
+";
+
     /// Initialize the full directory structure.
     /// Creates root, sessions/, and worktrees/ directories.
+    /// Also writes a default config.toml if one doesn't already exist.
     /// Returns Ok(true) if directories were created, Ok(false) if they already existed.
     pub fn init(&self) -> std::io::Result<bool> {
         let created = !self.root.exists();
         std::fs::create_dir_all(&self.root)?;
         std::fs::create_dir_all(self.sessions_dir())?;
         std::fs::create_dir_all(self.worktrees_dir())?;
+
+        // Write default config.toml if it doesn't exist
+        let config_path = self.config();
+        if !config_path.exists() {
+            std::fs::write(&config_path, Self::DEFAULT_CONFIG)?;
+        }
+
         Ok(created)
     }
 
@@ -137,7 +167,13 @@ mod tests {
     }
 
     #[test]
-    fn test_init_creates_directories() {
+    fn test_config_path() {
+        let dd = DataDir::new(".blacksmith");
+        assert_eq!(dd.config(), PathBuf::from(".blacksmith/config.toml"));
+    }
+
+    #[test]
+    fn test_init_creates_directories_and_config() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().join(".blacksmith");
         let dd = DataDir::new(&root);
@@ -148,6 +184,13 @@ mod tests {
         assert!(root.exists());
         assert!(dd.sessions_dir().exists());
         assert!(dd.worktrees_dir().exists());
+        assert!(dd.config().exists());
+
+        // Verify config is valid TOML that parses
+        let contents = std::fs::read_to_string(dd.config()).unwrap();
+        assert!(contents.contains("[agent]"));
+        assert!(contents.contains("[session]"));
+        assert!(contents.contains("[storage]"));
     }
 
     #[test]
@@ -160,6 +203,25 @@ mod tests {
         assert!(created1);
         let created2 = dd.init().unwrap();
         assert!(!created2);
+    }
+
+    #[test]
+    fn test_init_does_not_overwrite_existing_config() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join(".blacksmith");
+        let dd = DataDir::new(&root);
+
+        // First init creates config
+        dd.init().unwrap();
+
+        // Overwrite with custom content
+        let custom = "[agent]\ncommand = \"my-agent\"\n";
+        std::fs::write(dd.config(), custom).unwrap();
+
+        // Second init should NOT clobber custom config
+        dd.init().unwrap();
+        let contents = std::fs::read_to_string(dd.config()).unwrap();
+        assert_eq!(contents, custom);
     }
 
     #[test]

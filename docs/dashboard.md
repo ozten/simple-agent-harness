@@ -158,6 +158,72 @@ Click "View Transcript" on any active session to open an overlay:
 | `GET /api/instances/:url/sessions/:id/stream` | Proxy SSE transcript |
 | `GET /api/instances/:url/sessions/:id/transcript` | Proxy full transcript |
 
+## Smoke Testing
+
+An automated smoke test script validates all serve and dashboard API endpoints against a real project. Run it after any changes to `blacksmith serve` or `blacksmith-ui` to catch endpoint regressions.
+
+### Quick start
+
+```bash
+# Build both binaries first
+cargo build --release --features serve
+cargo build --release -p blacksmith-ui
+
+# Run the smoke test against ../cantrip (default project)
+./scripts/smoke-test-ui.sh
+
+# Or specify a different project directory
+./scripts/smoke-test-ui.sh /path/to/my-project
+```
+
+### What it checks
+
+1. **Phase 1 — `blacksmith serve`**: Starts the serve API on a test port and validates all endpoints (`/api/health`, `/api/status`, `/api/project`, `/api/beads`, `/api/sessions`, `/api/metrics/summary`, `/api/improvements`, `/api/estimate`). If sessions exist, also validates `/api/sessions/{id}`, `/api/sessions/{id}/transcript`, and `/api/sessions/{id}/stream`.
+
+2. **Phase 2 — `blacksmith-ui`**: Starts the dashboard with a config pointing at the serve instance and validates all dashboard endpoints (`/api/health`, `/api/instances`, `/api/aggregate`, `/api/global-metrics`, `/api/instances/{url}/poll-data`, `/api/instances/{url}/estimate`). Also validates proxied transcript/stream endpoints.
+
+### Detecting regressions
+
+To verify the script catches regressions, temporarily comment out a route in `src/serve.rs` (e.g., remove the `/api/estimate` line), rebuild, and run the script — it should report a `FAIL` for that endpoint.
+
+### Expected output
+
+```
+Smoke Test: blacksmith serve + blacksmith-ui
+
+Phase 1: blacksmith serve
+  Waiting for blacksmith serve on port 18420... OK (2s)
+
+  Checking serve endpoints:
+  PASS  GET /api/health (HTTP 200)
+  PASS  GET /api/status (HTTP 200)
+  ...
+
+Phase 2: blacksmith-ui
+  Waiting for blacksmith-ui on port 18080... OK (1s)
+
+  Checking dashboard endpoints:
+  PASS  GET /api/health (HTTP 200)
+  ...
+
+════════════════════════════════════════
+  Passed: 18
+  Failed: 0
+════════════════════════════════════════
+
+ALL CHECKS PASSED
+```
+
+### Failure signatures
+
+| Symptom | Likely cause |
+|---|---|
+| `TIMEOUT` waiting for serve | Binary not built with `--features serve`, or port conflict on 18420 |
+| `TIMEOUT` waiting for UI | `blacksmith-ui` binary missing, or port conflict on 18080 |
+| `FAIL` on a specific endpoint | Route removed or renamed in `src/serve.rs` or `blacksmith-ui/src/main.rs` |
+| `FAIL` on proxied transcript | Serve session/transcript handler broken, or URL encoding issue |
+| `FAIL` on poll-data | Poller hasn't run yet (increase sleep) or serve instance unreachable |
+
 ## Troubleshooting
 
 **Instance not appearing in sidebar?**

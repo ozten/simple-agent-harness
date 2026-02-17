@@ -145,7 +145,7 @@ mod tests {
         let output_path = dir.path().join("watchdog-test.jsonl");
         std::fs::File::create(&output_path).unwrap();
 
-        let child = Command::new("sleep")
+        let mut child = Command::new("sleep")
             .arg("300") // sleep for a long time
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -166,8 +166,9 @@ mod tests {
         let outcome = monitor(&config, &output_path, pid).await;
         assert_eq!(outcome, WatchdogOutcome::Killed);
 
-        // Verify the process is actually dead (give it a moment)
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        // Reap the child to avoid zombie; the watchdog already sent signals
+        let _ = child.wait().await;
+
         let pgid = Pid::from_raw(pid as i32);
         assert!(killpg(pgid, None).is_err(), "process group should be dead");
     }
