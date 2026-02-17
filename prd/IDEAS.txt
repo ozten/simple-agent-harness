@@ -1,4 +1,16 @@
-blacksmith init should
-- copy claude skills into the project
-- Using LLM like claude code, investigate what type of project it is and to update the verification section with commands relevant to the current codebase such as a how to run unit tests, linters, etc.
-- Log a message to the user to please READ and CUSTOMIZE PROMPT.md and focus their attention on the verification section "I detected npm run test, but please add any more verification and quality guards
+I'm thinking we should not exit the blacksmith loop. That it should just poll bd ready and sleep.
+But this means... that when we create bd we need to be careful so that blacksmith doesn't grab
+them before we've finished drafting, refineing, and adding dependencies.
+
+What bd features can help us here? Should we open issues in a draft mode or in progress or something?
+Do we need a SKILL or refine our existing skills or another mechanism to control this?
+
+Another thought is that it is hard to know what to QA after doing a round of development.
+You almost want epochs or sprints and then to be able to see what was done in the last epoch.
+
+Maybe this is related to verification and manual steps. 
+But we also want to automate verification as much as possible.
+
+---
+
+We should implement code coverage metrics and encourage the system to work towards 80% or higher per module.

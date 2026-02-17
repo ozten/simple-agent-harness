@@ -74,7 +74,10 @@ async fn main() {
         .route("/api/instances", post(add_instance))
         .route("/api/aggregate", get(get_aggregate))
         .route("/api/global-metrics", get(get_global_metrics))
-        .route("/api/instances/{url}/poll-data", get(get_instance_poll_data))
+        .route(
+            "/api/instances/{url}/poll-data",
+            get(get_instance_poll_data),
+        )
         .route("/api/instances/{url}/stop", post(stop_instance))
         .route(
             "/api/instances/{url}/sessions/{session_id}/stream",
