@@ -3162,3 +3162,27 @@ Implemented three features for the self-improvement feedback loop:
 ### Suggested Next Tasks
 - simple-agent-harness-948: Restore transcript endpoints for UI viewer
 - simple-agent-harness-950: blacksmith init should create .blacksmith/config.yaml by default
+
+--- 2026-02-17 04:25:45 | simple-agent-harness-948 ---
+## Session: Restore transcript endpoints (simple-agent-harness-948)
+
+### Completed
+- Added GET /api/sessions/{id}/transcript endpoint returning `{"turns": [...]}` JSON
+- Added GET /api/sessions/{id}/stream SSE endpoint emitting `event: turn` events + final `event: done`
+- JSONL parsing handles system/init, assistant, user, and result event types
+- Supports both plain .jsonl and zstd-compressed .jsonl.zst session files
+- Missing session returns 404 JSON for both endpoints
+- Added `sessions_dir` to AppState, sourced from DataDir
+- Added `tokio-stream` dependency for SSE streaming
+- Added 5 new tests: transcript fetch, transcript 404, SSE replay, stream 404, compressed session
+
+### Files Changed
+- Cargo.toml: Added tokio-stream dependency, added to serve feature
+- src/serve.rs: read_session_lines(), parse_transcript_turns(), api_session_transcript, api_session_stream handlers, routes, tests
+
+### Current State
+- All 1094 tests pass
+- Zero clippy warnings, formatting clean
+
+### Suggested Next Tasks
+- simple-agent-harness-950: blacksmith init should create .blacksmith/config.yaml by default

@@ -6,6 +6,7 @@ use crate::data_dir::DataDir;
 struct AppState {
     db_path: std::path::PathBuf,
     beads_dir: std::path::PathBuf,
+    sessions_dir: std::path::PathBuf,
     stop_file: std::path::PathBuf,
     status_path: std::path::PathBuf,
     project_name: String,
@@ -30,6 +31,7 @@ pub async fn run(config: &HarnessConfig) -> Result<(), Box<dyn std::error::Error
     let state = AppState {
         db_path: dd.db(),
         beads_dir,
+        sessions_dir: dd.sessions_dir(),
         stop_file: config.shutdown.stop_file.clone(),
         status_path: dd.status(),
         project_name,
@@ -46,6 +48,8 @@ pub async fn run(config: &HarnessConfig) -> Result<(), Box<dyn std::error::Error
         .route("/api/beads", get(api_beads))
         .route("/api/sessions", get(api_sessions))
         .route("/api/sessions/{id}", get(api_session_detail))
+        .route("/api/sessions/{id}/transcript", get(api_session_transcript))
+        .route("/api/sessions/{id}/stream", get(api_session_stream))
         .route("/api/stop", post(api_stop))
         .route("/api/estimate", get(api_estimate))
         .with_state(state)
@@ -268,6 +272,154 @@ async fn api_session_detail(
             axum::Json(serde_json::json!({"error": "database error"})),
         )),
     }
+}
+
+/// Read a session JSONL file (plain or zstd-compressed) and return its lines.
+#[cfg(feature = "serve")]
+fn read_session_lines(
+    sessions_dir: &std::path::Path,
+    id: &str,
+) -> Result<Vec<String>, (axum::http::StatusCode, axum::Json<serde_json::Value>)> {
+    let plain = sessions_dir.join(format!("{id}.jsonl"));
+    let compressed = sessions_dir.join(format!("{id}.jsonl.zst"));
+
+    let content = if plain.exists() {
+        std::fs::read(&plain).map_err(|_| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                axum::Json(serde_json::json!({"error": "failed to read session file"})),
+            )
+        })?
+    } else if compressed.exists() {
+        let data = std::fs::read(&compressed).map_err(|_| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                axum::Json(serde_json::json!({"error": "failed to read compressed session file"})),
+            )
+        })?;
+        zstd::decode_all(std::io::Cursor::new(data)).map_err(|_| {
+            (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                axum::Json(serde_json::json!({"error": "failed to decompress session file"})),
+            )
+        })?
+    } else {
+        return Err((
+            axum::http::StatusCode::NOT_FOUND,
+            axum::Json(serde_json::json!({"error": "session not found", "id": id})),
+        ));
+    };
+
+    let text = String::from_utf8_lossy(&content);
+    Ok(text
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(String::from)
+        .collect())
+}
+
+/// Parse JSONL lines into transcript turns for the UI.
+///
+/// Each JSONL line has a `type` field (system, assistant, user, result).
+/// We extract meaningful turns with role, content, and timestamp.
+#[cfg(feature = "serve")]
+fn parse_transcript_turns(lines: &[String]) -> Vec<serde_json::Value> {
+    let mut turns = Vec::new();
+
+    for line in lines {
+        let v: serde_json::Value = match serde_json::from_str(line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+
+        let event_type = v["type"].as_str().unwrap_or("");
+
+        match event_type {
+            "assistant" => {
+                let role = v["message"]["role"].as_str().unwrap_or("assistant");
+                let content = &v["message"]["content"];
+                if content.is_null() {
+                    continue;
+                }
+                turns.push(serde_json::json!({
+                    "role": role,
+                    "content": content,
+                }));
+            }
+            "user" => {
+                let role = v["message"]["role"].as_str().unwrap_or("user");
+                let content = &v["message"]["content"];
+                if content.is_null() {
+                    continue;
+                }
+                turns.push(serde_json::json!({
+                    "role": role,
+                    "content": content,
+                }));
+            }
+            "system" => {
+                let subtype = v["subtype"].as_str().unwrap_or("");
+                if subtype == "init" {
+                    turns.push(serde_json::json!({
+                        "role": "system",
+                        "content": format!("Session initialized (model: {})", v["model"].as_str().unwrap_or("unknown")),
+                    }));
+                }
+            }
+            "result" => {
+                if let Some(result) = v.get("result") {
+                    turns.push(serde_json::json!({
+                        "role": "system",
+                        "content": format!("Session ended: {}", v["subtype"].as_str().unwrap_or("complete")),
+                        "result": result,
+                    }));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    turns
+}
+
+#[cfg(feature = "serve")]
+async fn api_session_transcript(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Result<axum::Json<serde_json::Value>, (axum::http::StatusCode, axum::Json<serde_json::Value>)>
+{
+    let lines = read_session_lines(&state.sessions_dir, &id)?;
+    let turns = parse_transcript_turns(&lines);
+    Ok(axum::Json(serde_json::json!({ "turns": turns })))
+}
+
+#[cfg(feature = "serve")]
+async fn api_session_stream(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Result<
+    axum::response::sse::Sse<
+        impl tokio_stream::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>,
+    >,
+    (axum::http::StatusCode, axum::Json<serde_json::Value>),
+> {
+    use axum::response::sse::{Event, KeepAlive};
+    use tokio_stream::StreamExt;
+
+    let lines = read_session_lines(&state.sessions_dir, &id)?;
+    let turns = parse_transcript_turns(&lines);
+
+    let stream = tokio_stream::iter(
+        turns
+            .into_iter()
+            .map(|turn| Ok(Event::default().event("turn").data(turn.to_string()))),
+    );
+
+    // Append a final "done" event so the client knows replay is complete
+    let done = tokio_stream::once(Ok(Event::default().event("done").data("{}")));
+    let full_stream = stream.chain(done);
+
+    Ok(axum::response::sse::Sse::new(full_stream).keep_alive(KeepAlive::default()))
 }
 
 #[cfg(feature = "serve")]
@@ -564,9 +716,13 @@ mod tests {
         )
         .unwrap();
 
+        let sessions_dir = dir.join("sessions");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+
         AppState {
             db_path,
             beads_dir,
+            sessions_dir,
             stop_file: dir.join("stop"),
             status_path: dir.join("status"),
             project_name: "test-project".to_string(),
@@ -582,6 +738,8 @@ mod tests {
             .route("/api/metrics/summary", get(api_metrics_summary))
             .route("/api/sessions", get(api_sessions))
             .route("/api/sessions/{id}", get(api_session_detail))
+            .route("/api/sessions/{id}/transcript", get(api_session_transcript))
+            .route("/api/sessions/{id}/stream", get(api_session_stream))
             .with_state(state)
     }
 
@@ -860,5 +1018,157 @@ mod tests {
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["error"], "session not found");
         assert_eq!(json["id"], 999);
+    }
+
+    fn write_test_session(sessions_dir: &std::path::Path, id: &str) {
+        let content = format!(
+            r#"{{"type":"system","subtype":"init","model":"test-model","session_id":"abc"}}
+{{"type":"assistant","message":{{"role":"assistant","content":[{{"type":"text","text":"Hello, I will help."}}]}}}}
+{{"type":"user","message":{{"role":"user","content":[{{"tool_use_id":"t1","type":"tool_result","content":"file contents"}}]}}}}
+{{"type":"assistant","message":{{"role":"assistant","content":[{{"type":"text","text":"Done."}}]}}}}
+{{"type":"result","subtype":"success","result":{{"cost":0.5}}}}"#
+        );
+        std::fs::write(sessions_dir.join(format!("{id}.jsonl")), content).unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_transcript_returns_turns() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        write_test_session(&state.sessions_dir, "0");
+
+        let app = test_app(state);
+        let resp = app
+            .oneshot(
+                Request::get("/api/sessions/0/transcript")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let turns = json["turns"].as_array().unwrap();
+        // system init + 2 assistant + 1 user + 1 result = 5 turns
+        assert_eq!(turns.len(), 5);
+        assert_eq!(turns[0]["role"], "system");
+        assert_eq!(turns[1]["role"], "assistant");
+        assert_eq!(turns[2]["role"], "user");
+        assert_eq!(turns[3]["role"], "assistant");
+        assert_eq!(turns[4]["role"], "system");
+    }
+
+    #[tokio::test]
+    async fn test_transcript_not_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        let app = test_app(state);
+
+        let resp = app
+            .oneshot(
+                Request::get("/api/sessions/999/transcript")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["error"], "session not found");
+    }
+
+    #[tokio::test]
+    async fn test_stream_completed_session_replays_turns() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        write_test_session(&state.sessions_dir, "0");
+
+        let app = test_app(state);
+        let resp = app
+            .oneshot(
+                Request::get("/api/sessions/0/stream")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers()
+                .get("content-type")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "text/event-stream"
+        );
+
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let text = String::from_utf8_lossy(&body);
+
+        // Should contain turn events
+        let turn_count = text.matches("event: turn").count();
+        assert_eq!(turn_count, 5);
+
+        // Should end with done event
+        assert!(text.contains("event: done"));
+    }
+
+    #[tokio::test]
+    async fn test_stream_not_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+        let app = test_app(state);
+
+        let resp = app
+            .oneshot(
+                Request::get("/api/sessions/999/stream")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_transcript_compressed_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state(dir.path());
+
+        // Write a compressed session file
+        let content = r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"compressed turn"}]}}"#;
+        let compressed = zstd::encode_all(std::io::Cursor::new(content), 3).unwrap();
+        std::fs::write(state.sessions_dir.join("5.jsonl.zst"), compressed).unwrap();
+
+        let app = test_app(state);
+        let resp = app
+            .oneshot(
+                Request::get("/api/sessions/5/transcript")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let turns = json["turns"].as_array().unwrap();
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0]["role"], "assistant");
     }
 }
