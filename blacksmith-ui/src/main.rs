@@ -10,7 +10,7 @@ use axum::{
     Json, Router,
 };
 use discovery::{Instance, InstanceRegistry, Registry};
-use poller::{Aggregate, PollDataStore, PollStore};
+use poller::{Aggregate, GlobalMetrics, PollDataStore, PollStore};
 use rust_embed::Embed;
 use serde::Deserialize;
 use std::sync::Arc;
@@ -72,6 +72,7 @@ async fn main() {
         .route("/api/instances", get(list_instances))
         .route("/api/instances", post(add_instance))
         .route("/api/aggregate", get(get_aggregate))
+        .route("/api/global-metrics", get(get_global_metrics))
         .route("/api/instances/:url/poll-data", get(get_instance_poll_data))
         .fallback(get(static_handler))
         .layer(CorsLayer::permissive())
@@ -97,6 +98,11 @@ async fn list_instances(State(state): State<AppState>) -> Json<Vec<Instance>> {
 async fn get_aggregate(State(state): State<AppState>) -> Json<Aggregate> {
     let store = state.poll_store.read().await;
     Json(store.aggregate.clone())
+}
+
+async fn get_global_metrics(State(state): State<AppState>) -> Json<GlobalMetrics> {
+    let store = state.poll_store.read().await;
+    Json(store.global_metrics.clone())
 }
 
 async fn get_instance_poll_data(

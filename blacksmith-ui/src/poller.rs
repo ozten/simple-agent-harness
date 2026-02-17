@@ -16,6 +16,27 @@ pub struct Aggregate {
     pub instances_total: u64,
 }
 
+/// Global metrics aggregation across all projects.
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct GlobalMetrics {
+    pub total_cost_today: f64,
+    pub total_cost_this_week: f64,
+    pub beads_velocity: f64,
+    pub worker_utilization: f64,
+    pub workers_active: u64,
+    pub workers_max: u64,
+    pub outcomes: SessionOutcomes,
+}
+
+/// Aggregated session outcomes across all projects.
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct SessionOutcomes {
+    pub success: u64,
+    pub failed: u64,
+    pub timed_out: u64,
+    pub total: u64,
+}
+
 /// Polled data per instance, keyed by normalized URL.
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct InstancePollData {
@@ -38,6 +59,8 @@ pub struct PollDataStore {
     pub data: HashMap<String, InstancePollData>,
     /// Cached aggregate
     pub aggregate: Aggregate,
+    /// Global metrics aggregation
+    pub global_metrics: GlobalMetrics,
 }
 
 impl PollDataStore {
@@ -45,6 +68,7 @@ impl PollDataStore {
         Self {
             data: HashMap::new(),
             aggregate: Aggregate::default(),
+            global_metrics: GlobalMetrics::default(),
         }
     }
 }
@@ -63,9 +87,25 @@ struct MetricsSummary {
     #[serde(default)]
     cost_today: f64,
     #[serde(default)]
+    cost_this_week: f64,
+    #[serde(default)]
     workers_active: u64,
     #[serde(default)]
     workers_max: u64,
+    #[serde(default)]
+    beads_closed_today: u64,
+    #[serde(default)]
+    session_outcomes: Option<SessionOutcomesRaw>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct SessionOutcomesRaw {
+    #[serde(default)]
+    success: u64,
+    #[serde(default)]
+    failed: u64,
+    #[serde(default)]
+    timed_out: u64,
 }
 
 /// Spawn the main polling loop.
@@ -151,8 +191,10 @@ pub fn spawn_poller(registry: Registry, poll_store: PollStore, poll_interval_sec
                     // If offline, preserve last known state (don't clear)
                 }
 
-                // Recompute aggregate
-                store.aggregate = compute_aggregate(&reg.list(), &store.data);
+                // Recompute aggregate and global metrics
+                let instances_list = reg.list();
+                store.aggregate = compute_aggregate(&instances_list, &store.data);
+                store.global_metrics = compute_global_metrics(&instances_list, &store.data);
             }
 
             tick_count += 1;
@@ -279,6 +321,58 @@ fn compute_aggregate(
     };
 
     agg
+}
+
+/// Compute global metrics from all instances' polled data.
+fn compute_global_metrics(
+    instances: &[Instance],
+    data: &HashMap<String, InstancePollData>,
+) -> GlobalMetrics {
+    let mut gm = GlobalMetrics::default();
+    let mut total_workers_active: u64 = 0;
+    let mut total_workers_max: u64 = 0;
+    let mut total_beads_closed_today: u64 = 0;
+
+    for inst in instances {
+        let key = normalize_url(&inst.url);
+        if let Some(poll_data) = data.get(&key) {
+            if let Some(metrics_val) = &poll_data.metrics_data {
+                if let Ok(summary) = serde_json::from_value::<MetricsSummary>(metrics_val.clone()) {
+                    gm.total_cost_today += summary.cost_today;
+                    gm.total_cost_this_week += summary.cost_this_week;
+                    total_workers_active += summary.workers_active;
+                    total_workers_max += summary.workers_max;
+                    total_beads_closed_today += summary.beads_closed_today;
+
+                    if let Some(outcomes) = summary.session_outcomes {
+                        gm.outcomes.success += outcomes.success;
+                        gm.outcomes.failed += outcomes.failed;
+                        gm.outcomes.timed_out += outcomes.timed_out;
+                    }
+                }
+            }
+        }
+
+        // Fallback to heartbeat worker counts
+        if let (Some(active), Some(max)) = (inst.workers_active, inst.workers_max) {
+            if total_workers_max == 0 {
+                total_workers_active += active;
+                total_workers_max += max;
+            }
+        }
+    }
+
+    gm.workers_active = total_workers_active;
+    gm.workers_max = total_workers_max;
+    gm.worker_utilization = if total_workers_max > 0 {
+        total_workers_active as f64 / total_workers_max as f64
+    } else {
+        0.0
+    };
+    gm.beads_velocity = total_beads_closed_today as f64;
+    gm.outcomes.total = gm.outcomes.success + gm.outcomes.failed + gm.outcomes.timed_out;
+
+    gm
 }
 
 fn normalize_url(url: &str) -> String {

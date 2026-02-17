@@ -2894,3 +2894,31 @@ Implemented three features for the self-improvement feedback loop:
 - simple-agent-harness-k760: Implement project detail view in frontend (P2, unblocked by this)
 - simple-agent-harness-9t4l: Implement cost and performance trend charts (P2, unblocked by this)
 - simple-agent-harness-vs6h: Implement worker timeline visualization (P2, unblocked by this)
+
+--- 2026-02-17 00:49:29 | simple-agent-harness-p4um ---
+## Session: Implement global metrics aggregation (simple-agent-harness-p4um)
+
+### Completed
+- Bead simple-agent-harness-p4um: Implement global metrics aggregation
+- Added GlobalMetrics and SessionOutcomes structs to blacksmith-ui/src/poller.rs
+- Extended MetricsSummary deserialization to include cost_this_week, beads_closed_today, session_outcomes
+- Added compute_global_metrics() function that aggregates across all polled instances
+- GlobalMetrics stored in PollDataStore alongside existing Aggregate, recomputed each poll cycle
+- Added /api/global-metrics endpoint in blacksmith-ui/src/main.rs
+- Added GlobalMetricsPanel component in blacksmith-ui/frontend/app.js:
+  - Displays cost today/this week, beads velocity (/day), worker utilization (% with progress bar)
+  - Stacked bar chart for session outcomes (success/failed/timed out) with legend
+- Added global metrics CSS styles in blacksmith-ui/frontend/style.css:
+  - Grid layout, progress bar, stacked bar chart, outcome legend with color dots
+- App component fetches /api/global-metrics alongside existing endpoints
+- All 1080 tests pass, zero clippy warnings, fmt clean
+
+### Current State
+- Codebase is clean: tests pass, clippy clean, fmt clean
+- /api/global-metrics endpoint returns JSON with total_cost_today, total_cost_this_week, beads_velocity, worker_utilization, workers_active, workers_max, outcomes
+- Frontend renders the GlobalMetricsPanel in the main content area between AggregateCards and project detail
+
+### Suggested Next Tasks
+- simple-agent-harness-fsnv: Implement serve port auto-allocation (P2, unblocked)
+- simple-agent-harness-k760: Implement project detail view in frontend (P2, unblocked)
+- simple-agent-harness-z38u: Implement dependency DAG visualization (P2, unblocked)

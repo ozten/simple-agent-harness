@@ -167,16 +167,86 @@ function AggregateCards({ aggregate }) {
   `;
 }
 
+function GlobalMetricsPanel({ metrics }) {
+  if (!metrics) return null;
+
+  const utilPct = (metrics.worker_utilization * 100).toFixed(0);
+  const outcomeTotal = metrics.outcomes?.total || 0;
+  const successPct =
+    outcomeTotal > 0
+      ? ((metrics.outcomes.success / outcomeTotal) * 100).toFixed(0)
+      : 0;
+  const failedPct =
+    outcomeTotal > 0
+      ? ((metrics.outcomes.failed / outcomeTotal) * 100).toFixed(0)
+      : 0;
+  const timedOutPct =
+    outcomeTotal > 0
+      ? ((metrics.outcomes.timed_out / outcomeTotal) * 100).toFixed(0)
+      : 0;
+
+  return html`
+    <div class="global-metrics">
+      <h3>Global Metrics</h3>
+      <div class="global-metrics-grid">
+        <div class="card">
+          <div class="label">Cost Today</div>
+          <div class="value">$${metrics.total_cost_today.toFixed(2)}</div>
+        </div>
+        <div class="card">
+          <div class="label">Cost This Week</div>
+          <div class="value">$${metrics.total_cost_this_week.toFixed(2)}</div>
+        </div>
+        <div class="card">
+          <div class="label">Beads Velocity</div>
+          <div class="value">${metrics.beads_velocity.toFixed(1)}<span class="unit">/day</span></div>
+        </div>
+        <div class="card">
+          <div class="label">Worker Utilization</div>
+          <div class="value">${utilPct}<span class="unit">%</span></div>
+          <div class="progress-bar">
+            <div class="progress-fill" style="width: ${utilPct}%" />
+          </div>
+          <div class="sub-label">${metrics.workers_active}/${metrics.workers_max} active</div>
+        </div>
+      </div>
+      ${outcomeTotal > 0 && html`
+        <div class="outcomes-section">
+          <div class="label">Session Outcomes</div>
+          <div class="stacked-bar">
+            ${metrics.outcomes.success > 0 && html`
+              <div class="bar-segment success" style="width: ${successPct}%" title="Success: ${metrics.outcomes.success}" />
+            `}
+            ${metrics.outcomes.failed > 0 && html`
+              <div class="bar-segment failed" style="width: ${failedPct}%" title="Failed: ${metrics.outcomes.failed}" />
+            `}
+            ${metrics.outcomes.timed_out > 0 && html`
+              <div class="bar-segment timed-out" style="width: ${timedOutPct}%" title="Timed out: ${metrics.outcomes.timed_out}" />
+            `}
+          </div>
+          <div class="outcomes-legend">
+            <span class="legend-item"><span class="legend-dot success"></span> Success ${metrics.outcomes.success}</span>
+            <span class="legend-item"><span class="legend-dot failed"></span> Failed ${metrics.outcomes.failed}</span>
+            <span class="legend-item"><span class="legend-dot timed-out"></span> Timed out ${metrics.outcomes.timed_out}</span>
+          </div>
+        </div>
+      `}
+    </div>
+  `;
+}
+
 function App() {
   const [instances, setInstances] = useState([]);
   const [aggregate, setAggregate] = useState(null);
+  const [globalMetrics, setGlobalMetrics] = useState(null);
   const [selected, setSelected] = useState(null);
 
   const fetchData = useCallback(async () => {
     try {
-      const [instResp, aggResp] = await Promise.all([
+      const [instResp, aggResp, gmResp] = await Promise.all([
         fetch("/api/instances"),
         fetch("/api/aggregate"),
+        fetch("/api/global-metrics"),
       ]);
       if (instResp.ok) {
         const data = await instResp.json();
@@ -185,6 +255,10 @@ function App() {
       if (aggResp.ok) {
         const data = await aggResp.json();
         setAggregate(data);
+      }
+      if (gmResp.ok) {
+        const data = await gmResp.json();
+        setGlobalMetrics(data);
       }
     } catch (_) {
       // Silently handle fetch errors
@@ -207,6 +281,7 @@ function App() {
     <div class="main-content">
       <h2>Overview</h2>
       <${AggregateCards} aggregate=${aggregate} />
+      <${GlobalMetricsPanel} metrics=${globalMetrics} />
       ${selected
         ? html`<div class="card" style="margin-top: 16px;">
             <div class="label">Selected Project</div>
