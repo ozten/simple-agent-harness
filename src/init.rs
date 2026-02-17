@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::process::{Command, Stdio};
 
 /// Detected project type based on marker files.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -98,8 +99,23 @@ pub fn default_commands(project_type: &ProjectType) -> Vec<DetectedCommand> {
     }
 }
 
-/// Generate a PROMPT.md template with verification commands populated.
+const PROMPT_TEMPLATE: &str = include_str!("../templates/PROMPT.md.tmpl");
+
+/// Look up a command by label from the detected commands, returning a fallback if not found.
+fn find_command<'a>(commands: &'a [DetectedCommand], label: &str, fallback: &'a str) -> &'a str {
+    commands
+        .iter()
+        .find(|c| c.label == label)
+        .map(|c| c.command.as_str())
+        .unwrap_or(fallback)
+}
+
+/// Generate a PROMPT.md from the full template with verification commands populated.
 pub fn generate_prompt_md(commands: &[DetectedCommand]) -> String {
+    let test_cmd = find_command(commands, "test", "# TODO: add test command");
+    let lint_cmd = find_command(commands, "lint", "# TODO: add lint command");
+    let format_cmd = find_command(commands, "format", "# TODO: add format command");
+
     let mut verification_lines = String::new();
     if commands.is_empty() {
         verification_lines.push_str("# TODO: Add your verification commands here, for example:\n");
@@ -111,21 +127,11 @@ pub fn generate_prompt_md(commands: &[DetectedCommand]) -> String {
         }
     }
 
-    format!(
-        "# Agent Instructions\n\
-         \n\
-         ## Verification\n\
-         \n\
-         Before closing a task, run these commands and ensure they pass:\n\
-         \n\
-         {verification_lines}\
-         \n\
-         ## Guidelines\n\
-         \n\
-         - Make small, focused changes\n\
-         - Run verification commands before committing\n\
-         - Follow existing code patterns and conventions\n"
-    )
+    PROMPT_TEMPLATE
+        .replace("{{test_command}}", test_cmd)
+        .replace("{{lint_command}}", lint_cmd)
+        .replace("{{format_command}}", format_cmd)
+        .replace("{{verification_commands}}", verification_lines.trim_end())
 }
 
 /// Write PROMPT.md to `project_root` if it doesn't already exist.
@@ -139,11 +145,80 @@ pub fn write_prompt_md_if_missing(project_root: &Path, content: &str) -> std::io
     Ok(true)
 }
 
+const LLM_CUSTOMIZATION_PROMPT: &str = r#"You are customizing a PROMPT.md file for an AI coding agent managed by blacksmith.
+
+The PROMPT.md at ./PROMPT.md contains a template with generic verification commands.
+Your job is to analyze THIS specific project and update ONLY the verification/commands
+sections to match the actual project setup.
+
+Steps:
+1. Read ./PROMPT.md (the current template)
+2. Detect the project type and tooling:
+   - For Node.js: Read package.json. Check for npm/yarn/pnpm/bun lock files.
+     Find actual "test", "lint", "build", "format" scripts. Detect framework (Next.js, etc.)
+   - For Python: Read pyproject.toml/setup.cfg. Check for poetry/pip/uv.
+     Find test runner (pytest/unittest), linter (ruff/flake8/pylint), formatter (black/ruff)
+   - For Rust: Read Cargo.toml. Standard cargo commands are usually correct.
+   - For Go: Read go.mod. Standard go commands are usually correct.
+3. Update the Verification section (step 4b in the Execution Protocol) with the
+   actual commands for this project
+4. Update any inline command examples that reference test/lint/format commands
+5. Do NOT change the structure, workflow logic, turn budgets, or bead protocol sections
+
+Output the complete updated PROMPT.md file content, nothing else."#;
+
+/// Run `claude -p` to customize PROMPT.md for the specific project.
+/// Returns `Ok(true)` if customization succeeded, `Ok(false)` if claude was not available.
+pub fn customize_prompt_with_llm(project_root: &Path) -> Result<bool, std::io::Error> {
+    // Check if `claude` is in PATH
+    let which_result = Command::new("which").arg("claude").output();
+    match which_result {
+        Ok(output) if output.status.success() => {}
+        _ => {
+            return Ok(false);
+        }
+    }
+
+    eprintln!("Customizing PROMPT.md with Claude (this may take a moment)...");
+
+    let child = Command::new("claude")
+        .arg("-p")
+        .arg(LLM_CUSTOMIZATION_PROMPT)
+        .arg("--verbose")
+        .arg("--output-format")
+        .arg("text")
+        .current_dir(project_root)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit()) // let user see progress
+        .spawn()?;
+
+    let output = child.wait_with_output()?;
+
+    if !output.status.success() {
+        return Err(std::io::Error::other(
+            "claude -p exited with non-zero status",
+        ));
+    }
+
+    let customized = String::from_utf8_lossy(&output.stdout);
+    let trimmed = customized.trim();
+    if trimmed.is_empty() {
+        return Err(std::io::Error::other("claude -p returned empty output"));
+    }
+
+    // Overwrite PROMPT.md with the customized content
+    let prompt_path = project_root.join("PROMPT.md");
+    std::fs::write(&prompt_path, trimmed)?;
+
+    Ok(true)
+}
+
 /// Format a guidance message for the user after init.
 pub fn guidance_message(
     project_type: &ProjectType,
     commands: &[DetectedCommand],
     prompt_created: bool,
+    llm_customized: bool,
 ) -> String {
     let mut msg = String::new();
 
@@ -167,10 +242,17 @@ pub fn guidance_message(
             msg.push('\n');
         }
 
-        msg.push_str(
-            "Please READ and CUSTOMIZE PROMPT.md — review the verification section \
-             and add any additional quality guards relevant to your project.\n",
-        );
+        if llm_customized {
+            msg.push_str(
+                "PROMPT.md was auto-customized for your project using Claude.\n\
+                 Review it to ensure the detected commands are correct.\n",
+            );
+        } else {
+            msg.push_str(
+                "PROMPT.md created with defaults — customize it for your project.\n\
+                 Tip: install Claude CLI (`claude`) to auto-customize PROMPT.md on init.\n",
+            );
+        }
     } else {
         msg.push_str("\nPROMPT.md already exists — skipping generation.\n");
     }
@@ -252,13 +334,32 @@ mod tests {
         let content = generate_prompt_md(&cmds);
         assert!(content.contains("cargo test --release"));
         assert!(content.contains("cargo clippy"));
+        assert!(content.contains("cargo fmt --check"));
         assert!(content.contains("## Verification"));
+        // Full template sections should be present
+        assert!(content.contains("# Task Execution Instructions"));
+        assert!(content.contains("## Execution Protocol"));
+        assert!(content.contains("## Turn Budget"));
+        assert!(content.contains("## Improvement Recording"));
+        assert!(content.contains("blacksmith finish"));
     }
 
     #[test]
     fn generate_prompt_md_without_commands() {
         let content = generate_prompt_md(&[]);
         assert!(content.contains("TODO: Add your verification commands"));
+        assert!(content.contains("TODO: add test command"));
+        assert!(content.contains("TODO: add lint command"));
+    }
+
+    #[test]
+    fn generate_prompt_md_node_commands() {
+        let cmds = default_commands(&ProjectType::Node);
+        let content = generate_prompt_md(&cmds);
+        assert!(content.contains("npm test"));
+        assert!(content.contains("npm run lint"));
+        // Node has "build" not "format", so format should fall back to TODO
+        assert!(content.contains("TODO: add format command"));
     }
 
     #[test]
@@ -281,25 +382,35 @@ mod tests {
     }
 
     #[test]
-    fn guidance_message_with_detected_commands() {
+    fn guidance_message_with_detected_commands_no_llm() {
         let cmds = default_commands(&ProjectType::Rust);
-        let msg = guidance_message(&ProjectType::Rust, &cmds, true);
+        let msg = guidance_message(&ProjectType::Rust, &cmds, true, false);
         assert!(msg.contains("Detected project type: Rust (Cargo)"));
         assert!(msg.contains("cargo test --release"));
-        assert!(msg.contains("READ and CUSTOMIZE PROMPT.md"));
+        assert!(msg.contains("created with defaults"));
+        assert!(msg.contains("install Claude CLI"));
+    }
+
+    #[test]
+    fn guidance_message_with_llm_customized() {
+        let cmds = default_commands(&ProjectType::Rust);
+        let msg = guidance_message(&ProjectType::Rust, &cmds, true, true);
+        assert!(msg.contains("Detected project type: Rust (Cargo)"));
+        assert!(msg.contains("auto-customized"));
+        assert!(!msg.contains("created with defaults"));
     }
 
     #[test]
     fn guidance_message_unknown_project() {
-        let msg = guidance_message(&ProjectType::Unknown, &[], true);
+        let msg = guidance_message(&ProjectType::Unknown, &[], true, false);
         assert!(!msg.contains("Detected project type"));
-        assert!(msg.contains("READ and CUSTOMIZE PROMPT.md"));
+        assert!(msg.contains("created with defaults"));
     }
 
     #[test]
     fn guidance_message_existing_prompt() {
-        let msg = guidance_message(&ProjectType::Rust, &[], false);
+        let msg = guidance_message(&ProjectType::Rust, &[], false, false);
         assert!(msg.contains("already exists"));
-        assert!(!msg.contains("READ and CUSTOMIZE"));
+        assert!(!msg.contains("created with defaults"));
     }
 }

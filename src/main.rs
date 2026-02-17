@@ -1028,9 +1028,28 @@ async fn main() {
                 false
             }
         };
+        let llm_customized = if prompt_created {
+            match init::customize_prompt_with_llm(&project_root) {
+                Ok(true) => {
+                    println!("PROMPT.md customized for your project using Claude.");
+                    true
+                }
+                Ok(false) => {
+                    // claude not in PATH — silent fallback
+                    false
+                }
+                Err(e) => {
+                    eprintln!("Warning: LLM customization failed: {e}");
+                    eprintln!("You can manually customize PROMPT.md for your project.");
+                    false
+                }
+            }
+        } else {
+            false
+        };
         print!(
             "{}",
-            init::guidance_message(&project_type, &commands, prompt_created)
+            init::guidance_message(&project_type, &commands, prompt_created, llm_customized)
         );
         return;
     }
