@@ -3596,3 +3596,20 @@ Implemented three features for the self-improvement feedback loop:
 
 ### Suggested Next Task
 - Validate behavior in a live coordinator run (manual cantrip scenario) to confirm progress lines increment per integration and dependent beads unblock as expected.
+
+--- 2026-02-18 17:33:55 | simple-agent-harness-dd3w ---
+## Session: Pre-spawn worktree bd sync import-only (simple-agent-harness-dd3w)
+
+### Completed
+- Added a best-effort `bd sync --import-only` call in `spawn_worker` after worktree selection/creation and before agent process spawn.
+- Implemented failure-tolerant behavior: worker spawn now continues if the command exits non-zero or if `bd` cannot be executed, with warning logs in both cases.
+- Verified with required gates: `cargo test`, `cargo test --release`, `cargo clippy --fix --allow-dirty`, and `cargo fmt --check`.
+
+### Current State
+- Worker startup now attempts to refresh the worktree-local beads SQLite view before each session.
+- Existing pool tests continue to pass in environments without initialized `.beads` in test worktrees, confirming spawn remains non-fatal when sync fails.
+- Working tree changes are limited to `src/pool.rs`.
+
+### Suggested Next Tasks
+- Validate end-to-end in a cantrip run that first-turn agent sessions no longer hit "Database out of sync with JSONL".
+- If desired, add a focused unit seam around `run_bd_sync_import_only` for explicit assertion of warning-path behavior.

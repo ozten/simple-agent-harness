@@ -272,6 +272,8 @@ impl WorkerPool {
         self.next_session_id += 1;
         let output_file = output_dir.join(format!("{}.jsonl", session_id));
 
+        run_bd_sync_import_only(&wt_path);
+
         // Spawn the agent process in the working directory
         let handle = spawn_agent_in_worktree(
             worker_id,
@@ -502,6 +504,32 @@ impl WorkerPool {
             worker.assignment_id = assignment_id;
             worker.bead_id = bead_id;
             worker.worktree_path = worktree_path;
+        }
+    }
+}
+
+/// Best-effort `bd sync --import-only` so each worker session starts with a
+/// current local SQLite view of beads metadata in its worktree.
+fn run_bd_sync_import_only(worktree_path: &Path) {
+    match std::process::Command::new("bd")
+        .args(["sync", "--import-only"])
+        .current_dir(worktree_path)
+        .status()
+    {
+        Ok(status) if status.success() => {}
+        Ok(status) => {
+            tracing::warn!(
+                path = %worktree_path.display(),
+                code = ?status.code(),
+                "bd sync --import-only failed; continuing worker spawn"
+            );
+        }
+        Err(error) => {
+            tracing::warn!(
+                path = %worktree_path.display(),
+                error = %error,
+                "bd sync --import-only unavailable; continuing worker spawn"
+            );
         }
     }
 }

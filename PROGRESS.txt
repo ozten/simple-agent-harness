@@ -1,18 +1,15 @@
-## Session: Debounce dependency-filter INFO logs (simple-agent-harness-1on9)
+## Session: Pre-spawn worktree bd sync import-only (simple-agent-harness-dd3w)
 
 ### Completed
-- Added coordinator-loop state tracking for previous dependency-filter counts: `(blocked_count, ready_count)`.
-- Moved `filtered out N beads with unresolved dependencies` emission to the loop:
-  - INFO when counts change (including first occurrence)
-  - DEBUG when counts are unchanged
-- Extended `BeadQuery` with `blocked_count` so logging decisions are made at the scheduling call site.
-- Added/updated unit tests in `src/coordinator.rs` for `blocked_count` behavior and INFO/debounce decision helper.
-- Verification run: `cargo test`, `cargo test --release`, `cargo clippy --fix --allow-dirty`, `cargo fmt --check`, `cargo check`.
+- Added a best-effort `bd sync --import-only` call in `spawn_worker` after worktree selection/creation and before agent process spawn.
+- Implemented failure-tolerant behavior: worker spawn now continues if the command exits non-zero or if `bd` cannot be executed, with warning logs in both cases.
+- Verified with required gates: `cargo test`, `cargo test --release`, `cargo clippy --fix --allow-dirty`, and `cargo fmt --check`.
 
 ### Current State
-- Repeated identical dependency-filter polls no longer spam INFO logs.
-- Transitions in blocked/ready counts surface at INFO, with repeated steady-state messages downgraded to DEBUG.
-- Working tree changes are limited to `src/coordinator.rs`.
+- Worker startup now attempts to refresh the worktree-local beads SQLite view before each session.
+- Existing pool tests continue to pass in environments without initialized `.beads` in test worktrees, confirming spawn remains non-fatal when sync fails.
+- Working tree changes are limited to `src/pool.rs`.
 
 ### Suggested Next Tasks
-- Pick the next ready P1 bead from `bd ready`.
+- Validate end-to-end in a cantrip run that first-turn agent sessions no longer hit "Database out of sync with JSONL".
+- If desired, add a focused unit seam around `run_bd_sync_import_only` for explicit assertion of warning-path behavior.
