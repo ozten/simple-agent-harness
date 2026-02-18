@@ -3343,3 +3343,34 @@ Implemented three features for the self-improvement feedback loop:
 ### Suggested Next Tasks
 - simple-agent-harness-6in9 (preflight check module)
 - simple-agent-harness-7vta (wire preflight into CLI, init, and harness startup) — unblocked after 6in9
+
+--- 2026-02-18 01:09:36 | simple-agent-harness-6in9 ---
+## Session: Add preflight check module (simple-agent-harness-6in9)
+
+### Completed
+- Created `src/preflight.rs` with full preflight check module:
+  - `Severity` enum (Fatal, Warn)
+  - `CheckResult` struct with name, severity, message
+  - `PreflightReport` struct with helpers: `has_fatal()`, `is_clean()`, `warnings()`, `fatals()`
+  - `run_preflight(project_root, config)` function with 6 checks:
+    - `git_repo` (Fatal): .git/ exists in project_root
+    - `git_remote` (Warn): git remote -v returns non-empty output
+    - `agent_binary` (Fatal): resolved coding command found in PATH
+    - `bd_cli` (Warn): bd CLI found in PATH
+    - `claude_verbose_flag` (Warn): --verbose present when using stream-json
+    - `prompt_file` (Warn): session.prompt_file exists
+  - `print_report()` function printing [ERROR]/[WARN ] prefixes to stderr
+  - 8 tests covering all checks and report helpers
+- Registered `mod preflight;` in main.rs
+
+### Files Changed
+- src/preflight.rs (new — full module with types, checks, display, tests)
+- src/main.rs (modified — added `mod preflight;`)
+
+### Current State
+- All 1131 tests pass
+- Clippy clean (dead_code warnings expected — module not wired into callers yet)
+- Fmt clean
+
+### Suggested Next Tasks
+- simple-agent-harness-7vta (wire preflight into CLI, init, and harness startup) — now unblocked

@@ -1,23 +1,29 @@
-## Session: Agent detection and project-aware config generation (simple-agent-harness-dpmv)
+## Session: Add preflight check module (simple-agent-harness-6in9)
 
 ### Completed
-- Added `AgentProfile` struct and `agent_profiles()` returning 4 profiles (claude, codex, opencode, aider) with canonical args from docs/adapters.md
-- Added `detect_agent()` using `command_in_path` to find first available agent on PATH
-- Added `generate_config_toml()` producing complete config.toml with [agent], [session], [storage], [workers], and [quality_gates] sections, project-type-aware
-- Updated init handler in main.rs: detects agent, generates project-aware config, uses `init_with_config()` instead of `ensure_initialized()`
-- Made `DataDir::update_gitignore()` public so init handler can call it separately
-- Updated `guidance_message()` to accept and display agent info
-- Added 5 new tests: unique profile names, Rust+Claude config, Node+Claude config, unknown project config, aider config
+- Created `src/preflight.rs` with full preflight check module:
+  - `Severity` enum (Fatal, Warn)
+  - `CheckResult` struct with name, severity, message
+  - `PreflightReport` struct with helpers: `has_fatal()`, `is_clean()`, `warnings()`, `fatals()`
+  - `run_preflight(project_root, config)` function with 6 checks:
+    - `git_repo` (Fatal): .git/ exists in project_root
+    - `git_remote` (Warn): git remote -v returns non-empty output
+    - `agent_binary` (Fatal): resolved coding command found in PATH
+    - `bd_cli` (Warn): bd CLI found in PATH
+    - `claude_verbose_flag` (Warn): --verbose present when using stream-json
+    - `prompt_file` (Warn): session.prompt_file exists
+  - `print_report()` function printing [ERROR]/[WARN ] prefixes to stderr
+  - 8 tests covering all checks and report helpers
+- Registered `mod preflight;` in main.rs
 
 ### Files Changed
-- src/init.rs (modified — AgentProfile, detect_agent, generate_config_toml, updated guidance_message + tests)
-- src/main.rs (modified — init handler rewritten to use new flow)
-- src/data_dir.rs (modified — made update_gitignore public)
+- src/preflight.rs (new — full module with types, checks, display, tests)
+- src/main.rs (modified — added `mod preflight;`)
 
 ### Current State
-- All 1123 tests pass
-- Clippy clean, fmt clean
+- All 1131 tests pass
+- Clippy clean (dead_code warnings expected — module not wired into callers yet)
+- Fmt clean
 
 ### Suggested Next Tasks
-- simple-agent-harness-6in9 (preflight check module)
-- simple-agent-harness-7vta (wire preflight into CLI, init, and harness startup) — unblocked after 6in9
+- simple-agent-harness-7vta (wire preflight into CLI, init, and harness startup) — now unblocked
