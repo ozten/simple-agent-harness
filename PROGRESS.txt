@@ -1,16 +1,15 @@
-## Session: Stale worker status cleanup (simple-agent-harness-yz95)
+## Session: shared .blacksmith path resolution in worktrees (simple-agent-harness-c34r)
 
 ### Completed
-- Updated `blacksmith workers status` to self-heal stale active assignments.
-- Added filtering against current open bead IDs from `bd list --status=open --json`.
-- Added reap behavior: active DB rows for non-open beads are marked `integrated` and excluded from status output.
-- Added unit tests for bead-id JSON parsing and stale assignment reaping behavior.
-- Added `## Verify` notes to the bead with exact validation commands.
+- Added worktree-aware path resolution in `src/main.rs` so default CLI config (`.blacksmith/config.toml`) resolves to the shared repository root via `git rev-parse --git-common-dir`.
+- Updated command config loading to use a single resolved config path and to rewrite relative `storage.data_dir` to the shared repo root only when using the default config path.
+- Preserved explicit config override behavior by leaving relative `storage.data_dir` unchanged when `--config` is non-default.
+- Added unit tests validating main checkout vs worktree path equivalence and explicit override behavior.
 
 ### Current State
-- `workers status` now shows only assignments tied to open beads when `bd` is available.
-- Historical assignment rows are preserved (status transitioned to `integrated` rather than deleted).
-- All required quality gates passed: release tests, clippy fix, and fmt check.
+- `cargo test --release` passes with new path-resolution tests.
+- `cargo clippy --fix --allow-dirty` completed successfully.
+- Formatting updates were applied with `cargo fmt` after `cargo fmt --check` reported diffs.
 
 ### Suggested Next Task
-- Validate in a real multi-worker run that stale entries are automatically reaped from older DB state when `workers status` is invoked.
+- Validate the same shared-path behavior through a real CLI smoke run for progress/improve commands from both main checkout and a worker worktree.
