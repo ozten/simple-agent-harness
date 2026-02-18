@@ -1,21 +1,16 @@
-## Session: Auto-close epics when all children are closed (simple-agent-harness-nvzo)
+## Session: Rapid-failure circuit breaker in coordinator (simple-agent-harness-coqa)
 
 ### Completed
-- Extended post-integration bead-closing flow in `src/integrator.rs` to auto-close parent epics when all of their `parent-child` dependencies are no longer open.
-- Added upward chaining: when an epic auto-closes, the logic re-checks whether that closure now makes its parent epic eligible.
-- Kept failure behavior non-fatal: failures in `bd list`, `bd close`, or `bd sync` during auto-close emit warnings and integration continues.
-- Added unit tests for parsing open-issue dependency data and determining parent-epic close eligibility.
-
-### Verification Run
-- `cargo test` (pass)
-- `cargo test --release` (pass)
-- `cargo clippy --fix --allow-dirty` (pass)
-- `cargo fmt --check` initially failed; applied `cargo fmt`
-- `cargo check` (pass)
+- Added generic rapid-session failure detection in `src/coordinator.rs` based on zero turns or instant-failure fallback (short duration + low output bytes).
+- Added exponential spawn backoff after 5+ consecutive rapid failures using existing `backoff` config settings.
+- Added hard pause/alert behavior after 10+ consecutive rapid failures, returning a dedicated `CoordinatorExitReason::RapidFailures`.
+- Preserved existing quota-specific detection and shutdown path.
+- Added unit tests for rapid-failure detection and backoff threshold behavior.
+- Added `## Verify` notes to bead with the commands run.
 
 ### Current State
-- Integrated beads are closed in bd as before.
-- After a successful close, parent epics are now evaluated and auto-closed when their children are complete, with recursive upward chaining.
+- Coordinator now slows down and eventually pauses during repeated instant failures across any root cause.
+- Full release test suite passed in this worktree.
 
 ### Suggested Next Task
-- Add an integration-style test with a mocked/fake `bd` command path to validate end-to-end command sequencing (`close child -> sync -> close parent -> sync`) across multiple hierarchy levels.
+- Add an integration-style coordinator test that simulates consecutive failed outcomes and asserts backoff/pause behavior across loop iterations.

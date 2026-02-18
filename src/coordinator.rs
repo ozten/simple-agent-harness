@@ -51,9 +51,15 @@ pub enum CoordinatorExitReason {
     Signal,
     /// Agent quota exhausted (not a transient rate limit).
     QuotaExhausted(String),
+    /// Too many rapid consecutive session failures (operator intervention needed).
+    RapidFailures(String),
     /// Fatal error (e.g., database failure).
     Error(String),
 }
+
+const RAPID_FAILURE_BACKOFF_START: u32 = 5;
+const RAPID_FAILURE_PAUSE_THRESHOLD: u32 = 10;
+const RAPID_FAILURE_MAX_DURATION_SECS: u64 = 10;
 
 /// Run the multi-agent coordinator loop.
 ///
@@ -122,6 +128,7 @@ pub async fn run(
     let mut failed_beads = 0u32;
     let mut consecutive_no_work = 0u32;
     let mut consecutive_quota_failures = 0u32;
+    let mut consecutive_rapid_failures = 0u32;
     let mut previous_dependency_filter_counts: Option<(usize, usize)> = None;
     const MAX_CONSECUTIVE_NO_WORK: u32 = 3;
     const MAX_CONSECUTIVE_QUOTA_FAILURES: u32 = 2;
@@ -218,6 +225,7 @@ pub async fn run(
 
             let succeeded = outcome.exit_code == Some(0);
             if succeeded {
+                consecutive_rapid_failures = 0;
                 tracing::info!(
                     worker_id = outcome.worker_id,
                     "bead coding completed, queued for integration"
@@ -225,6 +233,23 @@ pub async fn run(
                 // Worker state is now Completed — will be picked up for integration below
             } else {
                 failed_beads += 1;
+                let rapid_failure = is_rapid_session_failure(
+                    outcome,
+                    ingest_result.as_ref(),
+                    config.watchdog.min_output_bytes,
+                );
+                if rapid_failure {
+                    consecutive_rapid_failures += 1;
+                    tracing::warn!(
+                        worker_id = outcome.worker_id,
+                        consecutive = consecutive_rapid_failures,
+                        duration_secs = outcome.duration.as_secs(),
+                        output_bytes = outcome.output_bytes,
+                        "rapid session failure detected"
+                    );
+                } else {
+                    consecutive_rapid_failures = 0;
+                }
                 // Print failure progress line
                 print_coordinator_progress(
                     outcome,
@@ -265,7 +290,10 @@ pub async fn run(
             let agent_cmd = &config.agent.command;
             eprintln!();
             eprintln!("ERROR: Agent quota exhausted — all recent workers failed with a usage limit error.");
-            eprintln!("       The {} agent has hit its plan/credit limit.", agent_cmd);
+            eprintln!(
+                "       The {} agent has hit its plan/credit limit.",
+                agent_cmd
+            );
             eprintln!();
             eprintln!("  To resume, either:");
             eprintln!("    1. Wait for your quota to reset");
@@ -280,6 +308,26 @@ pub async fn run(
                 completed_beads,
                 failed_beads,
                 exit_reason: CoordinatorExitReason::QuotaExhausted(agent_cmd.clone()),
+            };
+        }
+
+        // Pause coordinator after repeated instant failures, regardless of root cause.
+        if consecutive_rapid_failures >= RAPID_FAILURE_PAUSE_THRESHOLD {
+            let message =
+                format!("{consecutive_rapid_failures} consecutive rapid session failures detected");
+            eprintln!();
+            eprintln!("ALERT: Rapid consecutive session failures detected.");
+            eprintln!("       {message}.");
+            eprintln!("       Coordinator is pausing to prevent session ID churn.");
+            eprintln!();
+            eprintln!("  Check agent credentials/quota, network, and config before resuming.");
+            eprintln!();
+            status.update(HarnessState::ShuttingDown);
+            status.remove();
+            return CoordinatorSummary {
+                completed_beads,
+                failed_beads,
+                exit_reason: CoordinatorExitReason::RapidFailures(message),
             };
         }
 
@@ -449,6 +497,21 @@ pub async fn run(
 
             // Schedule assignments for idle workers
             let assignable = scheduler::next_assignable_tasks(&ready_beads, &in_progress);
+
+            if !assignable.is_empty() {
+                if let Some(delay_secs) = rapid_failure_backoff_delay_secs(
+                    consecutive_rapid_failures,
+                    config.backoff.initial_delay_secs,
+                    config.backoff.max_delay_secs,
+                ) {
+                    tracing::warn!(
+                        delay_secs,
+                        consecutive_failures = consecutive_rapid_failures,
+                        "applying rapid-failure backoff before spawning workers"
+                    );
+                    tokio::time::sleep(Duration::from_secs(delay_secs)).await;
+                }
+            }
 
             // Assemble the base prompt once (brief + improvements + PROMPT.md).
             // Each worker gets this base prompt with a bead-specific suffix.
@@ -1186,7 +1249,7 @@ fn query_ready_beads() -> BeadQuery {
 /// Parse JSON bead data, detect cycles, filter out cycled beads, and return schedulable beads.
 fn parse_and_filter_beads(json_str: &str) -> BeadQuery {
     let (ready_beads, bead_nodes) = parse_ready_beads_json(json_str);
-    let open_ids_all: HashSet<String> = ready_beads.iter().map(|b| b.id.clone()).collect();
+    let _open_ids_all: HashSet<String> = ready_beads.iter().map(|b| b.id.clone()).collect();
 
     // Run cycle detection on the dependency graph
     let cycles = cycle_detect::detect_cycles(&bead_nodes);
@@ -1293,6 +1356,33 @@ fn should_log_dependency_filter_info(
     current_counts: (usize, usize),
 ) -> bool {
     previous_counts != Some(current_counts)
+}
+
+fn rapid_failure_backoff_delay_secs(
+    consecutive_rapid_failures: u32,
+    initial_delay_secs: u64,
+    max_delay_secs: u64,
+) -> Option<u64> {
+    if consecutive_rapid_failures < RAPID_FAILURE_BACKOFF_START {
+        return None;
+    }
+    let backoff_count = consecutive_rapid_failures - RAPID_FAILURE_BACKOFF_START;
+    Some(ratelimit::backoff_delay(
+        initial_delay_secs,
+        backoff_count,
+        max_delay_secs,
+    ))
+}
+
+fn is_rapid_session_failure(
+    outcome: &SessionOutcome,
+    ingest_result: Option<&ingest::IngestResult>,
+    min_output_bytes: u64,
+) -> bool {
+    let zero_turns = ingest_result.map(|m| m.turns_total == 0).unwrap_or(false);
+    zero_turns
+        || (outcome.duration.as_secs() <= RAPID_FAILURE_MAX_DURATION_SECS
+            && outcome.output_bytes <= min_output_bytes)
 }
 
 /// Format a cycle as a readable path: "A -> B -> C -> A"
@@ -1853,6 +1943,60 @@ mod tests {
         assert!(should_log_dependency_filter_info(None, (2, 3)));
         assert!(should_log_dependency_filter_info(Some((1, 3)), (2, 3)));
         assert!(!should_log_dependency_filter_info(Some((2, 3)), (2, 3)));
+    }
+
+    #[test]
+    fn test_rapid_failure_backoff_delay_starts_at_threshold() {
+        assert_eq!(rapid_failure_backoff_delay_secs(4, 2, 60), None);
+        assert_eq!(rapid_failure_backoff_delay_secs(5, 2, 60), Some(2));
+        assert_eq!(rapid_failure_backoff_delay_secs(6, 2, 60), Some(4));
+    }
+
+    #[test]
+    fn test_is_rapid_session_failure_detects_zero_turns() {
+        let outcome = SessionOutcome {
+            worker_id: 0,
+            exit_code: Some(1),
+            duration: std::time::Duration::from_secs(30),
+            output_bytes: 10_000,
+            output_file: std::path::PathBuf::from("out.jsonl"),
+            session_id: 1,
+        };
+        let ingest = ingest::IngestResult {
+            turns_total: 0,
+            ..Default::default()
+        };
+        assert!(is_rapid_session_failure(&outcome, Some(&ingest), 100));
+    }
+
+    #[test]
+    fn test_is_rapid_session_failure_falls_back_to_short_small_output() {
+        let outcome = SessionOutcome {
+            worker_id: 0,
+            exit_code: Some(1),
+            duration: std::time::Duration::from_secs(2),
+            output_bytes: 50,
+            output_file: std::path::PathBuf::from("out.jsonl"),
+            session_id: 1,
+        };
+        assert!(is_rapid_session_failure(&outcome, None, 100));
+    }
+
+    #[test]
+    fn test_is_rapid_session_failure_ignores_non_instant_failures() {
+        let outcome = SessionOutcome {
+            worker_id: 0,
+            exit_code: Some(1),
+            duration: std::time::Duration::from_secs(60),
+            output_bytes: 10_000,
+            output_file: std::path::PathBuf::from("out.jsonl"),
+            session_id: 1,
+        };
+        let ingest = ingest::IngestResult {
+            turns_total: 3,
+            ..Default::default()
+        };
+        assert!(!is_rapid_session_failure(&outcome, Some(&ingest), 100));
     }
 
     #[test]

@@ -146,10 +146,10 @@ fn detect_rate_limit_in_result_event(jsonl_content: &str) -> bool {
 /// Looks for "type":"error" and "type":"turn.failed" events.
 fn detect_rate_limit_in_error_events(jsonl_content: &str) -> bool {
     for line in jsonl_content.lines().rev() {
-        if line.contains("\"type\":\"error\"") || line.contains("\"type\":\"turn.failed\"") {
-            if detect_rate_limit_in_text(line) {
-                return true;
-            }
+        if (line.contains("\"type\":\"error\"") || line.contains("\"type\":\"turn.failed\""))
+            && detect_rate_limit_in_text(line)
+        {
+            return true;
         }
     }
     false
@@ -409,7 +409,11 @@ mod tests {
 
     #[test]
     fn test_claude_quota_exhaustion_detected() {
-        let jsonl = result_event(true, "error", "You've hit your usage limit for this billing period.");
+        let jsonl = result_event(
+            true,
+            "error",
+            "You've hit your usage limit for this billing period.",
+        );
         assert!(detect_quota_in_content(&jsonl).is_some());
     }
 
