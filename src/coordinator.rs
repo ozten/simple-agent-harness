@@ -13,7 +13,7 @@ use crate::db;
 use crate::estimation::{self, BeadNode};
 use crate::improve;
 use crate::ingest;
-use crate::integrator::{CircuitBreaker, IntegrationQueue, TrippedFailure};
+use crate::integrator::{close_bead_in_bd, CircuitBreaker, IntegrationQueue, TrippedFailure};
 use crate::pool::{PoolError, SessionOutcome, WorkerPool};
 use crate::prompt;
 use crate::scheduler::{self, InProgressAssignment, ReadyBead};
@@ -785,36 +785,7 @@ fn check_and_process_expand_files(pool: &WorkerPool, db_conn: &Connection) {
 ///
 /// Runs `bd close` and `bd sync` since the agent already committed to the main branch.
 fn close_bead_direct(bead_id: &str) {
-    // bd close
-    match std::process::Command::new("bd")
-        .args(["close", bead_id, "--reason=single-agent direct commit"])
-        .output()
-    {
-        Ok(out) if out.status.success() => {
-            tracing::info!(bead_id, "bd close succeeded");
-        }
-        Ok(out) => {
-            let stderr = String::from_utf8_lossy(&out.stderr);
-            tracing::warn!(bead_id, stderr = %stderr.trim(), "bd close failed");
-        }
-        Err(e) => {
-            tracing::warn!(bead_id, error = %e, "failed to run bd close");
-        }
-    }
-
-    // bd sync
-    match std::process::Command::new("bd").args(["sync"]).output() {
-        Ok(out) if out.status.success() => {
-            tracing::info!("bd sync succeeded");
-        }
-        Ok(out) => {
-            let stderr = String::from_utf8_lossy(&out.stderr);
-            tracing::warn!(stderr = %stderr.trim(), "bd sync failed");
-        }
-        Err(e) => {
-            tracing::warn!(error = %e, "failed to run bd sync");
-        }
-    }
+    close_bead_in_bd(bead_id, "single-agent direct commit");
 }
 
 /// Recover orphaned in_progress beads on coordinator startup.

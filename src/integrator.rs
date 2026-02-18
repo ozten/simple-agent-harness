@@ -259,6 +259,44 @@ pub struct IntegrationResult {
     pub failure_reason: Option<String>,
 }
 
+/// Close a bead in bd and sync metadata. Failures are logged as warnings and
+/// do not propagate to callers.
+pub(crate) fn close_bead_in_bd(bead_id: &str, reason: &str) {
+    match Command::new("bd")
+        .args(["close", bead_id, &format!("--reason={reason}")])
+        .output()
+    {
+        Ok(out) if out.status.success() => {
+            tracing::info!(bead_id, reason, "bd close succeeded");
+        }
+        Ok(out) => {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            tracing::warn!(
+                bead_id,
+                reason,
+                stderr = %stderr.trim(),
+                "bd close failed"
+            );
+        }
+        Err(e) => {
+            tracing::warn!(bead_id, reason, error = %e, "failed to run bd close");
+        }
+    }
+
+    match Command::new("bd").args(["sync"]).output() {
+        Ok(out) if out.status.success() => {
+            tracing::info!("bd sync succeeded");
+        }
+        Ok(out) => {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            tracing::warn!(stderr = %stderr.trim(), "bd sync failed");
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to run bd sync");
+        }
+    }
+}
+
 /// Result of a rollback operation.
 #[derive(Debug)]
 pub struct RollbackResult {
@@ -548,6 +586,16 @@ impl IntegrationQueue {
             }
         }
 
+        // Mark the bead as closed in bd so progress metrics and dependency
+        // unblocking reflect successful integration.
+        let close_reason = match self.get_head_commit_subject(worktree_path) {
+            Ok(subject) if !subject.trim().is_empty() => {
+                format!("integration: {subject} ({bead_id})")
+            }
+            _ => format!("integration: merged {bead_id} at {worktree_head}"),
+        };
+        close_bead_in_bd(bead_id, &close_reason);
+
         // Sync working tree to match the updated ref
         if let Err(e) = self.sync_working_tree() {
             tracing::warn!(error = %e, "working tree sync failed (non-fatal)");
@@ -674,6 +722,25 @@ impl IntegrationQueue {
             let stderr = String::from_utf8_lossy(&output.stderr);
             return Err(IntegrationError::Git(format!(
                 "git rev-parse HEAD failed: {}",
+                stderr.trim()
+            )));
+        }
+
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    }
+
+    /// Get the HEAD commit subject from a worktree.
+    fn get_head_commit_subject(&self, worktree_path: &Path) -> Result<String, IntegrationError> {
+        let output = Command::new("git")
+            .args(["log", "-1", "--pretty=%s", "HEAD"])
+            .current_dir(worktree_path)
+            .output()
+            .map_err(|e| IntegrationError::Git(format!("failed to run git log: {e}")))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(IntegrationError::Git(format!(
+                "git log -1 failed: {}",
                 stderr.trim()
             )));
         }
