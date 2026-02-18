@@ -3,7 +3,7 @@ members = [".", "blacksmith-ui"]
 
 [package]
 name = "blacksmith"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "A Rust CLI tool that runs an AI coding agent in a supervised loop"
 
