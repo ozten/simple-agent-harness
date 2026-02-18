@@ -10,13 +10,12 @@ use crate::config::HarnessConfig;
 use crate::cycle_detect;
 use crate::data_dir::DataDir;
 use crate::db;
-use crate::estimation::BeadNode;
+use crate::estimation::{self, BeadNode};
 use crate::improve;
 use crate::ingest;
 use crate::integrator::{CircuitBreaker, IntegrationQueue, TrippedFailure};
 use crate::pool::{PoolError, SessionOutcome, WorkerPool};
 use crate::prompt;
-use crate::runner;
 use crate::scheduler::{self, InProgressAssignment, ReadyBead};
 use crate::signals::SignalHandler;
 use crate::status::{HarnessState, StatusTracker};
@@ -29,7 +28,7 @@ use tokio::time::Duration;
 /// Well-known filename that agents write to request affected set expansion.
 const EXPAND_FILE_NAME: &str = ".blacksmith-expand";
 
-/// Summary of a coordinator run, analogous to runner::RunSummary.
+/// Summary of a coordinator run.
 #[derive(Debug)]
 pub struct CoordinatorSummary {
     /// Number of beads that were assigned and completed successfully.
@@ -1162,7 +1161,7 @@ fn print_coordinator_progress(
     db_conn: &Connection,
     workers: u32,
 ) {
-    let duration_str = runner::format_duration_secs(outcome.duration.as_secs());
+    let duration_str = format_duration_secs(outcome.duration.as_secs());
 
     let turns_str = ingest_result
         .map(|m| format!("{} turns", m.turns_total))
@@ -1182,7 +1181,7 @@ fn print_coordinator_progress(
     };
 
     // Build the progress + ETA part from bead metrics
-    let progress_part = runner::build_progress_string(db_conn, workers).unwrap_or_default();
+    let progress_part = build_progress_string(db_conn, workers).unwrap_or_default();
 
     if progress_part.is_empty() {
         println!("{}", session_part);
@@ -1208,13 +1207,86 @@ fn print_coordinator_integration_progress(
     );
 
     // Build the progress + ETA part from bead metrics
-    let progress_part = runner::build_progress_string(db_conn, workers).unwrap_or_default();
+    let progress_part = build_progress_string(db_conn, workers).unwrap_or_default();
 
     if progress_part.is_empty() {
         println!("{}", session_part);
     } else {
         println!("{} | {}", session_part, progress_part);
     }
+}
+
+/// Format seconds as a compact human-readable duration (e.g., "45s", "5m", "1h 30m").
+fn format_duration_secs(secs: u64) -> String {
+    if secs < 60 {
+        format!("{}s", secs)
+    } else if secs < 3600 {
+        format!("{}m", secs / 60)
+    } else {
+        let hours = secs / 3600;
+        let mins = (secs % 3600) / 60;
+        if mins > 0 {
+            format!("{}h {}m", hours, mins)
+        } else {
+            format!("{}h", hours)
+        }
+    }
+}
+
+/// Build the "Progress: A/B beads | avg Xm/bead | ETA: ~Zm" string from DB metrics.
+fn build_progress_string(conn: &rusqlite::Connection, workers: u32) -> Option<String> {
+    let all_metrics = db::all_bead_metrics(conn).ok()?;
+    let completed = all_metrics
+        .iter()
+        .filter(|m| m.completed_at.is_some())
+        .count();
+    let total = all_metrics.len();
+
+    if total == 0 {
+        return None;
+    }
+
+    let open_beads = estimation::query_open_beads();
+    let est = estimation::estimate(conn, &open_beads, workers);
+
+    let mut parts = Vec::new();
+    let schedulable_total = completed + est.open_count;
+    if !est.cycled_beads.is_empty() {
+        parts.push(format!(
+            "Progress: {}/{} schedulable beads",
+            completed, schedulable_total
+        ));
+    } else {
+        parts.push(format!(
+            "Progress: {}/{} beads",
+            completed, schedulable_total
+        ));
+    }
+
+    if let Some(avg) = est.avg_time_per_bead {
+        parts.push(format!("avg {}/bead", format_duration_secs(avg as u64)));
+    }
+
+    if workers > 1 {
+        if let Some(parallel) = est.parallel_secs {
+            parts.push(format!(
+                "ETA: ~{} @ {} workers",
+                format_duration_secs(parallel as u64),
+                workers
+            ));
+        }
+    } else if let Some(serial) = est.serial_secs {
+        parts.push(format!("ETA: ~{}", format_duration_secs(serial as u64)));
+    }
+
+    if !est.cycled_beads.is_empty() {
+        parts.push(format!(
+            "\u{26a0} {} beads in dependency cycle \u{2014} run `bd dep cycles` to fix",
+            est.cycled_beads.len()
+        ));
+    }
+
+    Some(parts.join(" | "))
 }
 
 #[cfg(test)]
@@ -2237,5 +2309,65 @@ mod tests {
         assert!(prompt.contains("OPEN IMPROVEMENTS"));
         assert!(prompt.contains("Batch file reads"));
         assert!(prompt.contains("Main prompt"));
+    }
+
+    // ── format_duration_secs tests ──
+
+    #[test]
+    fn test_format_duration_secs_seconds() {
+        assert_eq!(format_duration_secs(0), "0s");
+        assert_eq!(format_duration_secs(45), "45s");
+        assert_eq!(format_duration_secs(59), "59s");
+    }
+
+    #[test]
+    fn test_format_duration_secs_minutes() {
+        assert_eq!(format_duration_secs(60), "1m");
+        assert_eq!(format_duration_secs(300), "5m");
+        assert_eq!(format_duration_secs(3599), "59m");
+    }
+
+    #[test]
+    fn test_format_duration_secs_hours() {
+        assert_eq!(format_duration_secs(3600), "1h");
+        assert_eq!(format_duration_secs(5400), "1h 30m");
+        assert_eq!(format_duration_secs(7200), "2h");
+    }
+
+    // ── build_progress_string tests ──
+
+    #[test]
+    fn test_build_progress_string_empty_db() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let conn = crate::db::open_or_create(&db_path).unwrap();
+        let result = build_progress_string(&conn, 1);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_build_progress_string_with_completed() {
+        let dir = tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let conn = crate::db::open_or_create(&db_path).unwrap();
+
+        for i in 0..3 {
+            crate::db::upsert_bead_metrics(
+                &conn,
+                &format!("bead-{}", i),
+                1,
+                300.0,
+                50,
+                None,
+                None,
+                Some("2026-01-01T00:00:00Z"),
+            )
+            .unwrap();
+        }
+
+        let result = build_progress_string(&conn, 1);
+        assert!(result.is_some());
+        let s = result.unwrap();
+        assert!(s.contains("Progress:"));
     }
 }

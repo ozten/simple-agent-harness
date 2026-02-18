@@ -3440,3 +3440,29 @@ Implemented three features for the self-improvement feedback loop:
 - simple-agent-harness-teuq: Delete runner.rs (now unblocked by this bead)
 - simple-agent-harness-ukxz: Harden customize_prompt_with_llm result handling
 - simple-agent-harness-6ugm: Strengthen LLM customization prompt to forbid editing
+
+--- 2026-02-18 01:58:41 | simple-agent-harness-teuq ---
+## Session: Delete runner.rs (simple-agent-harness-teuq)
+
+### Completed
+- Deleted src/runner.rs entirely (dead code after coordinator handles all modes)
+- Removed `mod runner;` from src/main.rs
+- Removed `use crate::runner;` from src/coordinator.rs
+- Moved `format_duration_secs` and `build_progress_string` utility functions into coordinator.rs (they were referenced by coordinator progress printing)
+- Moved corresponding tests for those functions into coordinator's test module
+- Updated coordinator doc comment to remove runner::RunSummary reference
+
+### Files Changed
+- src/runner.rs (deleted)
+- src/main.rs (removed mod runner declaration)
+- src/coordinator.rs (removed runner import, added estimation import, moved 2 utility functions + tests)
+
+### Current State
+- All 1103 tests pass (1 ignored)
+- Clippy clean (only pre-existing watchdog.rs warnings)
+- Fmt clean
+- No remaining references to runner:: in the codebase
+
+### Suggested Next Tasks
+- simple-agent-harness-ukxz: Harden customize_prompt_with_llm result handling
+- simple-agent-harness-6ugm: Strengthen LLM customization prompt to forbid editing

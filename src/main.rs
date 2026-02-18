@@ -32,7 +32,6 @@ mod public_api;
 mod ratelimit;
 mod retention;
 mod retry;
-mod runner;
 mod scheduler;
 #[cfg(feature = "serve")]
 mod serve;
