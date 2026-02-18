@@ -1,16 +1,16 @@
-## Session: Rapid-failure circuit breaker in coordinator (simple-agent-harness-coqa)
+## Session: Stale worker status cleanup (simple-agent-harness-yz95)
 
 ### Completed
-- Added generic rapid-session failure detection in `src/coordinator.rs` based on zero turns or instant-failure fallback (short duration + low output bytes).
-- Added exponential spawn backoff after 5+ consecutive rapid failures using existing `backoff` config settings.
-- Added hard pause/alert behavior after 10+ consecutive rapid failures, returning a dedicated `CoordinatorExitReason::RapidFailures`.
-- Preserved existing quota-specific detection and shutdown path.
-- Added unit tests for rapid-failure detection and backoff threshold behavior.
-- Added `## Verify` notes to bead with the commands run.
+- Updated `blacksmith workers status` to self-heal stale active assignments.
+- Added filtering against current open bead IDs from `bd list --status=open --json`.
+- Added reap behavior: active DB rows for non-open beads are marked `integrated` and excluded from status output.
+- Added unit tests for bead-id JSON parsing and stale assignment reaping behavior.
+- Added `## Verify` notes to the bead with exact validation commands.
 
 ### Current State
-- Coordinator now slows down and eventually pauses during repeated instant failures across any root cause.
-- Full release test suite passed in this worktree.
+- `workers status` now shows only assignments tied to open beads when `bd` is available.
+- Historical assignment rows are preserved (status transitioned to `integrated` rather than deleted).
+- All required quality gates passed: release tests, clippy fix, and fmt check.
 
 ### Suggested Next Task
-- Add an integration-style coordinator test that simulates consecutive failed outcomes and asserts backoff/pause behavior across loop iterations.
+- Validate in a real multi-worker run that stale entries are automatically reaped from older DB state when `workers status` is invoked.

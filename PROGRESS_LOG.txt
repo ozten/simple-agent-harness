@@ -3654,3 +3654,21 @@ Implemented three features for the self-improvement feedback loop:
 
 ### Suggested Next Task
 - Add an integration-style coordinator test that simulates consecutive failed outcomes and asserts backoff/pause behavior across loop iterations.
+
+--- 2026-02-18 22:34:26 | simple-agent-harness-yz95 ---
+## Session: Stale worker status cleanup (simple-agent-harness-yz95)
+
+### Completed
+- Updated `blacksmith workers status` to self-heal stale active assignments.
+- Added filtering against current open bead IDs from `bd list --status=open --json`.
+- Added reap behavior: active DB rows for non-open beads are marked `integrated` and excluded from status output.
+- Added unit tests for bead-id JSON parsing and stale assignment reaping behavior.
+- Added `## Verify` notes to the bead with exact validation commands.
+
+### Current State
+- `workers status` now shows only assignments tied to open beads when `bd` is available.
+- Historical assignment rows are preserved (status transitioned to `integrated` rather than deleted).
+- All required quality gates passed: release tests, clippy fix, and fmt check.
+
+### Suggested Next Task
+- Validate in a real multi-worker run that stale entries are automatically reaped from older DB state when `workers status` is invoked.

@@ -48,6 +48,7 @@ mod worktree;
 
 use clap::{Parser, Subcommand};
 use config::{CliOverrides, HarnessConfig};
+use std::collections::HashSet;
 use std::path::PathBuf;
 use tracing_subscriber::EnvFilter;
 
@@ -568,7 +569,13 @@ fn handle_integration_rollback(
 /// Handle `blacksmith workers status` — show current worker pool state.
 fn handle_workers_status(db_path: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
     let conn = db::open_or_create(db_path)?;
-    let assignments = db::active_worker_assignments(&conn)?;
+    let mut assignments = db::active_worker_assignments(&conn)?;
+
+    // Self-heal stale active rows: if the bead is no longer open in bd,
+    // mark the assignment integrated and hide it from active status output.
+    if let Some(open_bead_ids) = fetch_open_bead_ids_from_bd() {
+        reap_stale_active_assignments(&conn, &mut assignments, &open_bead_ids);
+    }
 
     if assignments.is_empty() {
         println!("No active workers.");
@@ -607,6 +614,61 @@ fn handle_workers_status(db_path: &std::path::Path) -> Result<(), Box<dyn std::e
 
     println!("\n{} active worker(s).", assignments.len());
     Ok(())
+}
+
+/// Get currently open bead IDs from `bd list --status=open --json`.
+///
+/// Returns `None` when `bd` is unavailable or JSON parsing fails, so callers can
+/// gracefully skip filtering and continue with DB-only status output.
+fn fetch_open_bead_ids_from_bd() -> Option<HashSet<String>> {
+    let output = std::process::Command::new("bd")
+        .args(["list", "--status=open", "--json"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    parse_bead_ids_from_bd_json(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// Parse bead IDs from `bd list --json` output.
+fn parse_bead_ids_from_bd_json(json: &str) -> Option<HashSet<String>> {
+    let value: serde_json::Value = serde_json::from_str(json).ok()?;
+    let arr = value.as_array()?;
+    let ids = arr
+        .iter()
+        .filter_map(|item| item.get("id").and_then(|v| v.as_str()))
+        .map(ToString::to_string)
+        .collect();
+    Some(ids)
+}
+
+/// Mark stale active assignment rows as integrated and remove them from display.
+///
+/// A stale row is any active assignment whose bead is no longer open in bd.
+fn reap_stale_active_assignments(
+    conn: &rusqlite::Connection,
+    assignments: &mut Vec<db::WorkerAssignment>,
+    open_bead_ids: &HashSet<String>,
+) {
+    let stale_ids: Vec<i64> = assignments
+        .iter()
+        .filter(|wa| !open_bead_ids.contains(&wa.bead_id))
+        .map(|wa| wa.id)
+        .collect();
+
+    for assignment_id in stale_ids {
+        if let Err(e) = db::update_worker_assignment_status(conn, assignment_id, "integrated", None)
+        {
+            tracing::warn!(
+                assignment_id,
+                error = %e,
+                "failed to mark stale active assignment as integrated"
+            );
+        }
+    }
+
+    assignments.retain(|wa| open_bead_ids.contains(&wa.bead_id));
 }
 
 /// Handle `blacksmith workers kill <worker-id>` — kill a specific worker process.
@@ -1704,6 +1766,45 @@ mod tests {
 
         let result = handle_workers_status(&db_path);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_parse_bead_ids_from_bd_json() {
+        let json = r#"
+            [
+                {"id":"beads-a","title":"A"},
+                {"id":"beads-b","status":"open"}
+            ]
+        "#;
+        let ids = parse_bead_ids_from_bd_json(json).unwrap();
+        assert!(ids.contains("beads-a"));
+        assert!(ids.contains("beads-b"));
+        assert_eq!(ids.len(), 2);
+    }
+
+    #[test]
+    fn test_reap_stale_active_assignments_marks_integrated() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test.db");
+        let conn = db::open_or_create(&db_path).unwrap();
+
+        let active_id =
+            db::insert_worker_assignment(&conn, 0, "beads-open", "/tmp/wt-0", "coding", None)
+                .unwrap();
+        let stale_id =
+            db::insert_worker_assignment(&conn, 1, "beads-closed", "/tmp/wt-1", "coding", None)
+                .unwrap();
+
+        let mut assignments = db::active_worker_assignments(&conn).unwrap();
+        let open_bead_ids = HashSet::from(["beads-open".to_string()]);
+        reap_stale_active_assignments(&conn, &mut assignments, &open_bead_ids);
+
+        assert_eq!(assignments.len(), 1);
+        assert_eq!(assignments[0].id, active_id);
+        assert_eq!(assignments[0].bead_id, "beads-open");
+
+        let stale = db::get_worker_assignment(&conn, stale_id).unwrap().unwrap();
+        assert_eq!(stale.status, "integrated");
     }
 
     #[test]
