@@ -240,6 +240,9 @@ pub fn default_commands(project_type: &ProjectType) -> Vec<DetectedCommand> {
 
 const PROMPT_TEMPLATE: &str = include_str!("../templates/PROMPT.md.tmpl");
 
+/// Marker header present in every valid PROMPT.md, used to validate LLM output.
+const PROMPT_MD_MARKER: &str = "# Task Execution Instructions";
+
 /// Look up a command by label from the detected commands, returning a fallback if not found.
 fn find_command<'a>(commands: &'a [DetectedCommand], label: &str, fallback: &'a str) -> &'a str {
     commands
@@ -317,6 +320,10 @@ pub fn customize_prompt_with_llm(project_root: &Path) -> Result<bool, std::io::E
             return Ok(false);
         }
     }
+
+    // Save original content so we can restore it if the agent produces invalid output
+    let prompt_path = project_root.join("PROMPT.md");
+    let original_content = std::fs::read_to_string(&prompt_path)?;
 
     eprintln!("Customizing PROMPT.md with Claude (this may take a moment)...");
 
@@ -407,16 +414,40 @@ pub fn customize_prompt_with_llm(project_root: &Path) -> Result<bool, std::io::E
         ));
     }
 
-    let trimmed = result_text.as_deref().map(|s| s.trim()).unwrap_or("");
-    if trimmed.is_empty() {
-        return Err(std::io::Error::other("claude -p returned empty output"));
-    }
-
-    // Overwrite PROMPT.md with the customized content
-    let prompt_path = project_root.join("PROMPT.md");
-    std::fs::write(&prompt_path, trimmed)?;
+    apply_llm_prompt_result(&prompt_path, &original_content, result_text.as_deref())?;
 
     Ok(true)
+}
+
+/// Validate and apply the LLM result to PROMPT.md.
+///
+/// If `result_text` contains the PROMPT.md marker, it's used as the new content.
+/// If not, the on-disk file is checked (agent may have edited in-place).
+/// If neither is valid, the original content is restored and an error is returned.
+fn apply_llm_prompt_result(
+    prompt_path: &Path,
+    original_content: &str,
+    result_text: Option<&str>,
+) -> Result<(), std::io::Error> {
+    let trimmed = result_text.map(|s| s.trim()).unwrap_or("");
+
+    if trimmed.contains(PROMPT_MD_MARKER) {
+        // Agent output complete PROMPT.md content — use it
+        std::fs::write(prompt_path, trimmed)?;
+    } else {
+        // Agent likely edited in-place; verify the on-disk file is valid
+        let on_disk = std::fs::read_to_string(prompt_path).unwrap_or_default();
+        if !on_disk.contains(PROMPT_MD_MARKER) {
+            // Neither result nor file is valid — restore original and report failure
+            std::fs::write(prompt_path, original_content)?;
+            return Err(std::io::Error::other(
+                "claude -p did not produce valid PROMPT.md content",
+            ));
+        }
+        // on-disk file is valid — agent edited in-place, nothing more to do
+    }
+
+    Ok(())
 }
 
 /// Format a guidance message for the user after init.
@@ -705,5 +736,88 @@ mod tests {
         assert!(toml.contains("prompt_via = \"file\""));
         assert!(toml.contains("\"--message-file\""));
         assert!(toml.contains("\"--yes-always\""));
+    }
+
+    #[test]
+    fn test_apply_llm_prompt_result_valid_output() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("PROMPT.md");
+        let original = "original content";
+        std::fs::write(&path, original).unwrap();
+
+        let valid_output = "# Task Execution Instructions\n\nCustomized content here";
+        apply_llm_prompt_result(&path, original, Some(valid_output)).unwrap();
+
+        let result = std::fs::read_to_string(&path).unwrap();
+        assert!(result.contains("# Task Execution Instructions"));
+        assert!(result.contains("Customized content here"));
+    }
+
+    #[test]
+    fn test_apply_llm_prompt_result_agent_edited_in_place() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("PROMPT.md");
+        let original = "original content";
+        // Simulate agent editing the file in-place with valid content
+        let on_disk = "# Task Execution Instructions\n\nEdited in place";
+        std::fs::write(&path, on_disk).unwrap();
+
+        // Agent output is just a summary, not valid PROMPT.md
+        let summary = "I updated the verification commands in PROMPT.md.";
+        apply_llm_prompt_result(&path, original, Some(summary)).unwrap();
+
+        // File should remain as the agent edited it
+        let result = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(result, on_disk);
+    }
+
+    #[test]
+    fn test_apply_llm_prompt_result_neither_valid_restores_original() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("PROMPT.md");
+        let original = "original valid content";
+        // On-disk was corrupted by the agent
+        std::fs::write(&path, "garbage content").unwrap();
+
+        // Agent output is also not valid
+        let summary = "Done!";
+        let err = apply_llm_prompt_result(&path, original, Some(summary)).unwrap_err();
+        assert!(err.to_string().contains("did not produce valid PROMPT.md"));
+
+        // Original content should be restored
+        let result = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(result, original);
+    }
+
+    #[test]
+    fn test_apply_llm_prompt_result_none_with_valid_disk() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("PROMPT.md");
+        let original = "original content";
+        let on_disk = "# Task Execution Instructions\n\nValid on disk";
+        std::fs::write(&path, on_disk).unwrap();
+
+        // No result text at all
+        apply_llm_prompt_result(&path, original, None).unwrap();
+
+        // File should remain valid
+        let result = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(result, on_disk);
+    }
+
+    #[test]
+    fn test_apply_llm_prompt_result_empty_with_invalid_disk() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("PROMPT.md");
+        let original = "original content";
+        std::fs::write(&path, "broken").unwrap();
+
+        // Empty result text
+        let err = apply_llm_prompt_result(&path, original, Some("")).unwrap_err();
+        assert!(err.to_string().contains("did not produce valid PROMPT.md"));
+
+        // Original content should be restored
+        let result = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(result, original);
     }
 }

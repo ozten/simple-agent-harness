@@ -3487,3 +3487,24 @@ Implemented three features for the self-improvement feedback loop:
 ### Suggested Next Tasks
 - simple-agent-harness-ukxz: Harden customize_prompt_with_llm result handling
 - simple-agent-harness-6ugm: Strengthen LLM customization prompt to forbid editing
+
+--- 2026-02-18 02:06:17 | simple-agent-harness-ukxz ---
+## Session: Harden customize_prompt_with_llm result handling (simple-agent-harness-ukxz)
+
+### Completed
+- Extracted `apply_llm_prompt_result()` helper from `customize_prompt_with_llm()` in src/init.rs
+- Added `PROMPT_MD_MARKER` constant ("# Task Execution Instructions") for validation
+- Saves original PROMPT.md content before spawning the LLM agent
+- Validates result_text contains the marker before overwriting:
+  - If result contains marker → use it (agent output full content)
+  - If result doesn't contain marker but on-disk file does → keep it (agent edited in-place)
+  - If neither is valid → restore original and return error
+- Added 5 unit tests covering all validation paths
+- All 1108 tests pass, clippy clean, fmt clean
+
+### Current State
+- customize_prompt_with_llm no longer blindly overwrites PROMPT.md with agent summary text
+- Validation logic is extracted into a testable `apply_llm_prompt_result()` function
+
+### Suggested Next Tasks
+- simple-agent-harness-6ugm: Strengthen LLM customization prompt to forbid editing

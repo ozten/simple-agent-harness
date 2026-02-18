@@ -1,19 +1,19 @@
-## Session: Always use coordinator for single-agent mode (simple-agent-harness-0o9g)
+## Session: Harden customize_prompt_with_llm result handling (simple-agent-harness-ukxz)
 
 ### Completed
-- Verified all implementation for single-agent coordinator mode is already in place:
-  - main.rs: Always calls coordinator::run() (no runner branch)
-  - pool.rs: is_single_agent(), skip worktree creation in spawn_worker(), skip worktree cleanup in reset_worker()
-  - coordinator.rs: close_bead_direct() path for single-agent mode (skip integration merge)
-  - runner.rs: Already deleted in previous session (simple-agent-harness-teuq)
-  - Tests: test_spawn_worker_single_agent_no_worktree, test_is_single_agent, test_coordinator_single_agent_direct_commit, test_coordinator_exits_with_no_work
-- All 1103 tests pass, clippy clean, fmt clean
+- Extracted `apply_llm_prompt_result()` helper from `customize_prompt_with_llm()` in src/init.rs
+- Added `PROMPT_MD_MARKER` constant ("# Task Execution Instructions") for validation
+- Saves original PROMPT.md content before spawning the LLM agent
+- Validates result_text contains the marker before overwriting:
+  - If result contains marker → use it (agent output full content)
+  - If result doesn't contain marker but on-disk file does → keep it (agent edited in-place)
+  - If neither is valid → restore original and return error
+- Added 5 unit tests covering all validation paths
+- All 1108 tests pass, clippy clean, fmt clean
 
 ### Current State
-- Coordinator handles all modes (single and multi-agent)
-- Single-agent mode (max=1) runs in repo dir directly, no worktree overhead
-- No remaining runner references
+- customize_prompt_with_llm no longer blindly overwrites PROMPT.md with agent summary text
+- Validation logic is extracted into a testable `apply_llm_prompt_result()` function
 
 ### Suggested Next Tasks
-- simple-agent-harness-ukxz: Harden customize_prompt_with_llm result handling
 - simple-agent-harness-6ugm: Strengthen LLM customization prompt to forbid editing
