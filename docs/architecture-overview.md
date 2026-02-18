@@ -154,18 +154,18 @@ Blacksmith doesn't care what agent runs. It spawns a subprocess, captures output
 # Claude (default)
 [agent]
 command = "claude"
-args = ["--print", "--output-format", "stream-json", "{prompt}"]
+args = ["-p", "{prompt}", "--dangerously-skip-permissions", "--output-format", "stream-json"]
 
 # Codex
 [agent]
 command = "codex"
-args = ["--quiet", "{prompt}"]
+args = ["exec", "--json", "--yolo", "{prompt}"]
 adapter = "codex"
 
 # Aider
 [agent]
 command = "aider"
-args = ["--yes", "--message", "{prompt}"]
+args = ["--message", "{prompt}", "--yes-always"]
 adapter = "aider"
 
 # Any CLI tool
@@ -234,7 +234,7 @@ Nothing in blacksmith's Rust code is Claude-specific. However, the default confi
 | Default | Claude-specific? | Swappable? |
 |---|---|---|
 | `command = "claude"` | Yes — assumes `claude` CLI | Config: `[agent] command` |
-| `args = ["--print", "--output-format", "stream-json", "{prompt}"]` | Yes — Claude CLI flags | Config: `[agent] args` |
+| `args = ["-p", "{prompt}", "--dangerously-skip-permissions", "--output-format", "stream-json"]` | Yes — Claude CLI flags | Config: `[agent] args` |
 | `ClaudeAdapter` parses stream-json | Yes — Claude's output format | Config: `[agent] adapter` |
 | Prompt format (markdown with sections) | Agent-agnostic | Any agent reads markdown |
 | `bd` (beads) task tracking | Agent-agnostic | Shell CLI, not Claude-specific |

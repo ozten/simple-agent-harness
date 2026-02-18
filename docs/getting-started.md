@@ -100,7 +100,7 @@ Blacksmith works with any AI coding agent. Configure the command and adapter:
 # Codex (OpenAI)
 [agent]
 command = "codex"
-args = ["exec", "--json", "--full-auto", "{prompt}"]
+args = ["exec", "--json", "--yolo", "{prompt}"]
 
 # Aider
 [agent]

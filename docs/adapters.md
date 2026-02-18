@@ -39,14 +39,15 @@ The default adapter. Parses Claude Code's `stream-json` JSONL format.
 ```toml
 [agent]
 command = "claude"
-args = ["-p", "{prompt}", "--verbose", "--output-format", "stream-json"]
+args = ["-p", "{prompt}", "--dangerously-skip-permissions", "--verbose", "--output-format", "stream-json"]
 ```
 
 Key flags:
 - `-p {prompt}` — Non-interactive ("print") mode; reads the prompt as an argument and exits when done.
 - `--output-format stream-json` — Emits JSONL events to stdout (required for metric extraction).
 - `--verbose` — Includes tool-use detail in the JSONL stream.
-- `--allowedTools "Bash Read Write Edit Glob Grep"` — Optional whitelist of tools the agent may use (replaces `--dangerously-skip-permissions`).
+- `--dangerously-skip-permissions` — Skip all permission prompts (required for headless / unattended use).
+- `--allowedTools "Bash Read Write Edit Glob Grep"` — Optional whitelist of tools the agent may use (alternative to `--dangerously-skip-permissions`; use one or the other).
 - `--model <model-id>` — Override the default model (e.g. `claude-sonnet-4-5-20250929`).
 - `--max-turns <N>` — Cap the number of agentic turns.
 
@@ -72,17 +73,17 @@ Parses OpenAI Codex CLI `--json` JSONL output.
 ```toml
 [agent]
 command = "codex"
-args = ["exec", "--json", "--full-auto", "{prompt}"]
+args = ["exec", "--json", "--yolo", "{prompt}"]
 ```
 
 Key flags:
 - `exec` — Non-interactive subcommand (alias: `e`). Required for headless / CI use.
 - `--json` — Emits JSONL events to stdout (required for metric extraction). Event types: `thread.started`, `turn.started`, `turn.completed`, `item.started`, `item.completed`, `error`.
-- `--full-auto` — Allows the agent to make edits automatically (sets `--ask-for-approval on-request` and workspace-write sandbox).
+- `--dangerously-bypass-approvals-and-sandbox` / `--yolo` — Skip all approval prompts and sandbox restrictions (required for headless / unattended use). Without this, `--full-auto` sets `--ask-for-approval on-request` which can still prompt interactively, hanging a headless process.
+- `--full-auto` — Lighter alternative: allows edits but sets `--ask-for-approval on-request` and workspace-write sandbox. **Not recommended** for headless use since the agent may still prompt.
 - `--ephemeral` — Skip persisting Codex session files to disk.
 - `-m <model>` / `--model <model>` — Override the configured model.
 - `-s <policy>` / `--sandbox <policy>` — Sandbox policy: `read-only` (default), `workspace-write`, or `danger-full-access`.
-- `--dangerously-bypass-approvals-and-sandbox` / `--yolo` — Skip all safeguards (use only in isolated environments).
 - `--skip-git-repo-check` — Allow execution outside a Git repository.
 - `-o <path>` / `--output-last-message <path>` — Write the final agent message to a file.
 
@@ -98,12 +99,12 @@ Prompt delivery uses `prompt_via = "arg"` by default — the `{prompt}` placehol
 
 **Not available:** Cost metrics, `turns.narration_only`, `turns.parallel`
 
-**Example — full-auto with custom model:**
+**Example — headless with custom model:**
 
 ```toml
 [agent]
 command = "codex"
-args = ["exec", "--json", "--full-auto", "-m", "o3", "{prompt}"]
+args = ["exec", "--json", "--yolo", "-m", "o3", "{prompt}"]
 adapter = "codex"
 ```
 

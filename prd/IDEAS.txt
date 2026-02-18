@@ -1,3 +1,13 @@
+Generated a new `blacksmith init`
+
+$ grep blacksmith PROMPT.md
+There's no `blacksmith` command in this project — the PROMPT.md template references `blacksmith finish` but the actual project uses `bd-finish.sh`. Now I have everything I need to produce the updated PROMPT.md.
+Record institutional lessons using `blacksmith improve add` when you encounter reusable insights during your session. This builds the project's knowledge base so future sessions avoid repeated mistakes and adopt proven patterns.
+blacksmith improve add "Short descriptive title" \
+blacksmith improve add "Always run lint:fix before analyze to avoid double-fixing" \
+
+___
+
 I'm thinking we should not exit the blacksmith loop. That it should just poll bd ready and sleep.
 But this means... that when we create bd we need to be careful so that blacksmith doesn't grab
 them before we've finished drafting, refineing, and adding dependencies.

@@ -35,7 +35,7 @@ pub fn agent_profiles() -> Vec<AgentProfile> {
             args: vec![
                 "exec".into(),
                 "--json".into(),
-                "--full-auto".into(),
+                "--yolo".into(),
                 "{prompt}".into(),
             ],
             prompt_via: "arg",
