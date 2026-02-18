@@ -85,7 +85,9 @@ pub struct SessionOutcome {
     pub output_bytes: u64,
     /// Path to the output file for this session.
     pub output_file: PathBuf,
-    /// Numeric session ID (for metric ingestion).
+    /// Session identifier attached to the output file.
+    /// This is an attempt ID at spawn time and may be replaced with a real
+    /// global session ID before ingestion.
     pub session_id: u64,
 }
 
@@ -96,9 +98,10 @@ pub struct WorkerPool {
     worktrees_dir: PathBuf,
     base_branch: String,
     /// Next numeric session ID to use for output file naming.
-    /// Ensures worker output files follow the `{N}.jsonl` convention
-    /// expected by compress, retention/gc, and metrics subsystems.
+    /// Consumed only when a session is promoted as useful.
     next_session_id: u64,
+    /// Monotonic attempt counter used for temporary failed-attempt output files.
+    next_attempt_id: u64,
 }
 
 /// Errors from worker pool operations.
@@ -173,6 +176,7 @@ impl WorkerPool {
             worktrees_dir: worktrees_base,
             base_branch: config.base_branch.clone(),
             next_session_id: initial_session_id,
+            next_attempt_id: 0,
         }
     }
 
@@ -185,6 +189,13 @@ impl WorkerPool {
     /// Current value of the session counter (for persisting back to the counter file).
     pub fn next_session_id(&self) -> u64 {
         self.next_session_id
+    }
+
+    /// Allocate and advance the next real session ID.
+    pub fn allocate_session_id(&mut self) -> u64 {
+        let session_id = self.next_session_id;
+        self.next_session_id += 1;
+        session_id
     }
 
     /// Number of idle workers.
@@ -266,11 +277,13 @@ impl WorkerPool {
             affected_globs,
         )?;
 
-        // Build the output file path using numeric naming convention ({N}.jsonl)
-        // so that compress, retention/gc, and metrics subsystems can find it.
-        let session_id = self.next_session_id;
-        self.next_session_id += 1;
-        let output_file = output_dir.join(format!("{}.jsonl", session_id));
+        // Write to a failed-attempt staging file first. Useful sessions are
+        // promoted to numeric `{N}.jsonl` names by the coordinator after completion.
+        let attempt_id = self.next_attempt_id;
+        self.next_attempt_id += 1;
+        let failed_dir = output_dir.join("failed");
+        std::fs::create_dir_all(&failed_dir).map_err(PoolError::Spawn)?;
+        let output_file = failed_dir.join(format!("attempt-{worker_id}-{attempt_id}.jsonl"));
 
         run_bd_sync_import_only(&wt_path);
 
@@ -281,7 +294,7 @@ impl WorkerPool {
             &wt_path,
             &output_file,
             prompt,
-            session_id,
+            attempt_id,
         )?;
 
         // Update worker state
@@ -291,7 +304,7 @@ impl WorkerPool {
         worker.bead_id = Some(bead_id.to_string());
         worker.worktree_path = Some(wt_path);
         worker.output_file = Some(output_file.clone());
-        worker.session_id = Some(session_id);
+        worker.session_id = Some(attempt_id);
         worker.child_handle = Some(handle);
 
         tracing::info!(worker_id, bead_id, assignment_id, "worker spawned");
@@ -975,7 +988,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_session_files_use_numeric_naming() {
+    async fn test_spawn_worker_stages_output_under_failed_dir() {
         let dir = init_test_repo();
         let wt_dir = dir.path().join("worktrees");
         std::fs::create_dir_all(&wt_dir).unwrap();
@@ -997,24 +1010,31 @@ mod tests {
             .await
             .unwrap();
 
-        // Counter should have advanced
-        assert_eq!(pool.next_session_id(), 44);
+        // Real session counter should not advance at spawn time.
+        assert_eq!(pool.next_session_id(), 42);
 
-        // Output files should be named 42.jsonl and 43.jsonl
-        assert!(output_dir.join("42.jsonl").exists());
-        assert!(output_dir.join("43.jsonl").exists());
-        // No worker-prefixed files should exist
-        let entries: Vec<_> = std::fs::read_dir(&output_dir)
+        let failed_dir = output_dir.join("failed");
+        assert!(failed_dir.exists());
+        let entries: Vec<_> = std::fs::read_dir(&failed_dir)
             .unwrap()
             .flatten()
             .map(|e| e.file_name().to_string_lossy().to_string())
             .collect();
-        for name in &entries {
-            assert!(
-                !name.starts_with("worker-"),
-                "found worker-prefixed file: {name}"
-            );
-        }
+        assert_eq!(entries.len(), 2);
+        assert!(entries.iter().any(|name| name.starts_with("attempt-0-")));
+        assert!(entries.iter().any(|name| name.starts_with("attempt-1-")));
+    }
+
+    #[test]
+    fn test_allocate_session_id_advances_counter() {
+        let dir = init_test_repo();
+        let wt_dir = dir.path().join("worktrees");
+        let workers_config = test_workers_config(1);
+        let mut pool = WorkerPool::new(&workers_config, dir.path().to_path_buf(), wt_dir, 42);
+
+        assert_eq!(pool.allocate_session_id(), 42);
+        assert_eq!(pool.allocate_session_id(), 43);
+        assert_eq!(pool.next_session_id(), 44);
     }
 
     #[tokio::test]

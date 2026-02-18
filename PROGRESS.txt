@@ -1,16 +1,19 @@
-## Session: Rapid-failure circuit breaker in coordinator (simple-agent-harness-coqa)
+## Session: Prevent zero-turn session ID burn (simple-agent-harness-fpj4)
 
 ### Completed
-- Added generic rapid-session failure detection in `src/coordinator.rs` based on zero turns or instant-failure fallback (short duration + low output bytes).
-- Added exponential spawn backoff after 5+ consecutive rapid failures using existing `backoff` config settings.
-- Added hard pause/alert behavior after 10+ consecutive rapid failures, returning a dedicated `CoordinatorExitReason::RapidFailures`.
-- Preserved existing quota-specific detection and shutdown path.
-- Added unit tests for rapid-failure detection and backoff threshold behavior.
-- Added `## Verify` notes to bead with the commands run.
+- Changed worker output staging to write attempts under `sessions/failed/attempt-<worker>-<id>.jsonl` instead of consuming numbered session IDs at spawn.
+- Added `WorkerPool::allocate_session_id()` and moved real session ID consumption to coordinator completion handling.
+- Updated coordinator completion flow to:
+  - detect useful sessions via adapter `turns.total` extraction,
+  - promote useful outputs to `sessions/<id>.jsonl`, persist counter, and ingest metrics,
+  - keep zero-turn attempts in failed-attempt logs without consuming session IDs.
+- Added/updated tests in `src/pool.rs` for staged output behavior and explicit session ID allocation.
+- Added `## Verify` notes to bead `simple-agent-harness-fpj4`.
 
 ### Current State
-- Coordinator now slows down and eventually pauses during repeated instant failures across any root cause.
-- Full release test suite passed in this worktree.
+- Zero-turn attempts no longer consume global session IDs.
+- Failed attempts are still logged for debugging in a separate failed-attempt namespace.
+- Metrics ingestion now occurs only for promoted sessions with useful turns.
 
 ### Suggested Next Task
-- Add an integration-style coordinator test that simulates consecutive failed outcomes and asserts backoff/pause behavior across loop iterations.
+- Add a coordinator unit/integration test that exercises promotion/non-promotion paths end-to-end and asserts counter persistence behavior.

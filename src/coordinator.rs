@@ -213,15 +213,23 @@ pub async fn run(
         }
 
         // Poll for completed workers
-        let outcomes = pool.poll_completed().await;
-        for outcome in &outcomes {
+        let mut outcomes = pool.poll_completed().await;
+        for outcome in &mut outcomes {
             if let Err(e) = pool.record_outcome(outcome, &db_conn) {
                 tracing::warn!(error = %e, worker_id = outcome.worker_id, "failed to record outcome");
             }
 
-            // Ingest JSONL metrics from the worker's output file
-            let ingest_result =
-                ingest_worker_metrics(outcome, &db_conn, &extraction_rules, adapter.as_ref());
+            let ingest_result = if session_has_useful_turns(outcome, adapter.as_ref()) {
+                promote_session_output(outcome, &mut pool, &output_dir, &counter_path, &mut status);
+                ingest_worker_metrics(outcome, &db_conn, &extraction_rules, adapter.as_ref())
+            } else {
+                tracing::info!(
+                    worker_id = outcome.worker_id,
+                    output = %outcome.output_file.display(),
+                    "session produced no turns; keeping failed-attempt log without consuming session id"
+                );
+                None
+            };
 
             let succeeded = outcome.exit_code == Some(0);
             if succeeded {
@@ -542,11 +550,7 @@ pub async fn run(
                     .await
                 {
                     Ok((worker_id, assignment_id)) => {
-                        // Persist session counter so other subsystems see
-                        // the updated value if the coordinator crashes/restarts.
-                        save_counter(&counter_path, pool.next_session_id());
                         status.set_iteration(completed_beads);
-                        status.set_global_iteration(pool.next_session_id());
                         status.update(HarnessState::SessionRunning);
                         tracing::info!(
                             worker_id,
@@ -1545,9 +1549,61 @@ fn save_counter(path: &std::path::Path, value: u64) {
     }
 }
 
+/// Return true when the output contains at least one assistant turn.
+fn session_has_useful_turns(
+    outcome: &SessionOutcome,
+    adapter: &dyn crate::adapters::AgentAdapter,
+) -> bool {
+    match adapter.extract_builtin_metrics(&outcome.output_file) {
+        Ok(metrics) => {
+            metrics
+                .iter()
+                .find(|(kind, _)| kind == "turns.total")
+                .and_then(|(_, value)| value.as_u64())
+                .unwrap_or(0)
+                > 0
+        }
+        Err(error) => {
+            tracing::warn!(
+                worker_id = outcome.worker_id,
+                output = %outcome.output_file.display(),
+                error = %error,
+                "failed to extract turns for session usefulness check"
+            );
+            false
+        }
+    }
+}
+
+/// Promote an attempt output file into the numbered sessions namespace.
+fn promote_session_output(
+    outcome: &mut SessionOutcome,
+    pool: &mut WorkerPool,
+    output_dir: &std::path::Path,
+    counter_path: &std::path::Path,
+    status: &mut StatusTracker,
+) {
+    let session_id = pool.allocate_session_id();
+    let promoted_path = output_dir.join(format!("{session_id}.jsonl"));
+    if let Err(error) = std::fs::rename(&outcome.output_file, &promoted_path) {
+        tracing::warn!(
+            worker_id = outcome.worker_id,
+            from = %outcome.output_file.display(),
+            to = %promoted_path.display(),
+            error = %error,
+            "failed to promote session output file; using staged path"
+        );
+    } else {
+        outcome.output_file = promoted_path;
+    }
+    outcome.session_id = session_id;
+    save_counter(counter_path, pool.next_session_id());
+    status.set_global_iteration(pool.next_session_id());
+}
+
 /// Ingest JSONL metrics from a worker's output file into the metrics DB.
 ///
-/// Called after each worker completion (success or failure), same as the serial runner does.
+/// Called for promoted sessions after worker completion.
 /// Returns the IngestResult for use in the progress line.
 fn ingest_worker_metrics(
     outcome: &SessionOutcome,

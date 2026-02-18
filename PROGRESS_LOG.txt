@@ -3654,3 +3654,24 @@ Implemented three features for the self-improvement feedback loop:
 
 ### Suggested Next Task
 - Add an integration-style coordinator test that simulates consecutive failed outcomes and asserts backoff/pause behavior across loop iterations.
+
+--- 2026-02-18 22:35:44 | simple-agent-harness-fpj4 ---
+## Session: Prevent zero-turn session ID burn (simple-agent-harness-fpj4)
+
+### Completed
+- Changed worker output staging to write attempts under `sessions/failed/attempt-<worker>-<id>.jsonl` instead of consuming numbered session IDs at spawn.
+- Added `WorkerPool::allocate_session_id()` and moved real session ID consumption to coordinator completion handling.
+- Updated coordinator completion flow to:
+  - detect useful sessions via adapter `turns.total` extraction,
+  - promote useful outputs to `sessions/<id>.jsonl`, persist counter, and ingest metrics,
+  - keep zero-turn attempts in failed-attempt logs without consuming session IDs.
+- Added/updated tests in `src/pool.rs` for staged output behavior and explicit session ID allocation.
+- Added `## Verify` notes to bead `simple-agent-harness-fpj4`.
+
+### Current State
+- Zero-turn attempts no longer consume global session IDs.
+- Failed attempts are still logged for debugging in a separate failed-attempt namespace.
+- Metrics ingestion now occurs only for promoted sessions with useful turns.
+
+### Suggested Next Task
+- Add a coordinator unit/integration test that exercises promotion/non-promotion paths end-to-end and asserts counter persistence behavior.
