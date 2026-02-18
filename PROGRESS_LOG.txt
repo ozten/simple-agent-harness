@@ -3298,3 +3298,23 @@ Implemented three features for the self-improvement feedback loop:
 
 ### Suggested Next Tasks
 - Pick up ready beads: simple-agent-harness-dwng (fix DEFAULT_CONFIG), simple-agent-harness-6in9 (preflight check module)
+
+--- 2026-02-18 01:00:11 | simple-agent-harness-dwng ---
+## Session: Fix DEFAULT_CONFIG and add init_with_config (simple-agent-harness-dwng)
+
+### Completed
+- Added `--verbose` to `DEFAULT_CONFIG` args in `src/data_dir.rs` (was missing, causing session failures when Claude CLI requires --verbose with --output-format stream-json)
+- Added `init_with_config(&self, config_content: &str)` method that creates directories and writes custom config content (only if config doesn't already exist)
+- Added `test_init_with_config_writes_custom_content` test verifying custom config is written and not overwritten on second call
+
+### Files Changed
+- src/data_dir.rs (modified)
+
+### Current State
+- All 1118 tests pass
+- 1 expected dead_code warning for init_with_config (used by downstream bead simple-agent-harness-dpmv)
+- Formatting clean
+
+### Suggested Next Tasks
+- simple-agent-harness-dpmv (agent detection and project-aware config generation for init) — now unblocked
+- simple-agent-harness-6in9 (preflight check module)

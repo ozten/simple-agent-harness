@@ -67,7 +67,7 @@ impl DataDir {
 
 [agent]
 command = \"claude\"
-args = [\"-p\", \"{prompt}\", \"--output-format\", \"stream-json\"]
+args = [\"-p\", \"{prompt}\", \"--verbose\", \"--output-format\", \"stream-json\"]
 
 [session]
 max_iterations = 100
@@ -91,6 +91,24 @@ retention = \"last-50\"
         let config_path = self.config();
         if !config_path.exists() {
             std::fs::write(&config_path, Self::DEFAULT_CONFIG)?;
+        }
+
+        Ok(created)
+    }
+
+    /// Initialize the directory structure with custom config content.
+    /// Creates root, sessions/, and worktrees/ directories.
+    /// Writes `config_content` to config.toml only if one doesn't already exist.
+    /// Returns Ok(true) if directories were created, Ok(false) if they already existed.
+    pub fn init_with_config(&self, config_content: &str) -> std::io::Result<bool> {
+        let created = !self.root.exists();
+        std::fs::create_dir_all(&self.root)?;
+        std::fs::create_dir_all(self.sessions_dir())?;
+        std::fs::create_dir_all(self.worktrees_dir())?;
+
+        let config_path = self.config();
+        if !config_path.exists() {
+            std::fs::write(&config_path, config_content)?;
         }
 
         Ok(created)
@@ -267,6 +285,31 @@ mod tests {
         dd.ensure_initialized().unwrap();
 
         assert!(!gitignore.exists());
+    }
+
+    #[test]
+    fn test_init_with_config_writes_custom_content() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join(".blacksmith");
+        let dd = DataDir::new(&root);
+
+        let custom_config = "[agent]\ncommand = \"custom-agent\"\nargs = [\"-p\", \"{prompt}\"]\n";
+
+        // First call writes the custom config
+        let created = dd.init_with_config(custom_config).unwrap();
+        assert!(created);
+        assert!(dd.config().exists());
+        assert!(dd.sessions_dir().exists());
+        assert!(dd.worktrees_dir().exists());
+
+        let contents = std::fs::read_to_string(dd.config()).unwrap();
+        assert_eq!(contents, custom_config);
+
+        // Second call should NOT overwrite existing config
+        let created2 = dd.init_with_config("overwritten").unwrap();
+        assert!(!created2);
+        let contents2 = std::fs::read_to_string(dd.config()).unwrap();
+        assert_eq!(contents2, custom_config);
     }
 
     #[test]
