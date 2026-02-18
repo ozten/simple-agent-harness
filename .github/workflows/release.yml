@@ -1,0 +1,103 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            platform: linux_amd64
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            platform: linux_arm64
+            use_cross: true
+          - target: x86_64-apple-darwin
+            os: macos-13
+            platform: darwin_amd64
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            platform: darwin_arm64
+
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross (Linux ARM64)
+        if: matrix.use_cross
+        run: cargo install cross --git https://github.com/cross-rs/cross
+
+      - name: Build (cross)
+        if: matrix.use_cross
+        run: cross build --release --target ${{ matrix.target }}
+
+      - name: Build (native)
+        if: "!matrix.use_cross"
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Package
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          ARCHIVE="blacksmith_${VERSION}_${{ matrix.platform }}.tar.gz"
+          STAGING="blacksmith_${VERSION}_${{ matrix.platform }}"
+          mkdir "$STAGING"
+          cp "target/${{ matrix.target }}/release/blacksmith" "$STAGING/"
+          cp "target/${{ matrix.target }}/release/blacksmith-ui" "$STAGING/" 2>/dev/null || true
+          tar czf "$ARCHIVE" -C "$STAGING" .
+          echo "ARCHIVE=$ARCHIVE" >> "$GITHUB_ENV"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.platform }}
+          path: ${{ env.ARCHIVE }}
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Collect archives
+        run: |
+          mkdir release-assets
+          find artifacts -name '*.tar.gz' -exec mv {} release-assets/ \;
+          ls -lh release-assets/
+
+      - name: Generate checksums
+        working-directory: release-assets
+        run: sha256sum *.tar.gz > checksums.txt
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            release-assets/*.tar.gz
+            release-assets/checksums.txt
+
+      - name: Update latest tag
+        run: |
+          git tag -f latest
+          git push origin latest --force
