@@ -22,6 +22,7 @@ pub fn agent_profiles() -> Vec<AgentProfile> {
             args: vec![
                 "-p".into(),
                 "{prompt}".into(),
+                "--dangerously-skip-permissions".into(),
                 "--verbose".into(),
                 "--output-format".into(),
                 "stream-json".into(),
@@ -322,6 +323,7 @@ pub fn customize_prompt_with_llm(project_root: &Path) -> Result<bool, std::io::E
     let mut child = Command::new("claude")
         .arg("-p")
         .arg(LLM_CUSTOMIZATION_PROMPT)
+        .arg("--dangerously-skip-permissions")
         .arg("--allowedTools")
         .arg("Read Glob Grep")
         .arg("--verbose")
@@ -653,6 +655,7 @@ mod tests {
         let cmds = default_commands(&ProjectType::Rust);
         let toml = generate_config_toml(&ProjectType::Rust, &agent, &cmds);
         assert!(toml.contains("command = \"claude\""));
+        assert!(toml.contains("\"--dangerously-skip-permissions\""));
         assert!(toml.contains("\"--verbose\""));
         assert!(toml.contains("prompt_via = \"arg\""));
         assert!(toml.contains("check = \"cargo check --release\""));
