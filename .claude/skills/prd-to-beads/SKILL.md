@@ -83,12 +83,12 @@ Map which beads block others:
 - Infrastructure beads (new CPT, taxonomy, config) block feature beads that use them
 - Shared components block features that depend on them
 
-### 4. Create all beads
+### 4. Create all beads (deferred)
 
-Run `bd create` for each bead:
+Run `bd create` for each bead with `--defer=+2h` so the coordinator cannot pick them up while you're still wiring descriptions and dependencies:
 
 ```bash
-bd create --title="<title>" --type=<type> --priority=<N>
+bd create --title="<title>" --type=<type> --priority=<N> --defer=+2h
 ```
 
 Capture the returned bead ID from each create command.
@@ -109,7 +109,23 @@ bd dep add <blocked-issue> <blocker-issue>
 
 The first argument is the issue that is BLOCKED, the second is the issue it DEPENDS ON.
 
-### 6. Output summary
+### 6. Validate and undefer
+
+After all descriptions and dependencies are wired, validate the graph:
+
+```bash
+bd lint
+```
+
+If `bd lint` reports errors, fix them before proceeding. Only after lint passes, undefer all created beads in a single command:
+
+```bash
+bd undefer <id1> <id2> <id3> ...
+```
+
+Pass all captured bead IDs from step 4. This atomically makes the beads visible to the coordinator and `bd ready`, ensuring no bead is picked up before its description and dependencies are complete.
+
+### 7. Output summary
 
 Print a table showing all created beads:
 

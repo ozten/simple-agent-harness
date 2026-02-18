@@ -3279,3 +3279,22 @@ Implemented three features for the self-improvement feedback loop:
 
 ### Suggested Next Tasks
 - Pick up unblocked tasks: simple-agent-harness-6in9 (preflight check module), simple-agent-harness-dpmv (agent detection/init)
+
+--- 2026-02-18 00:56:56 | simple-agent-harness-ar6v ---
+## Session: Update prd-to-beads skill to use defer/undefer pattern (simple-agent-harness-ar6v)
+
+### Completed
+- Updated step 4 to pass `--defer=+2h` to every `bd create` call so coordinator can't grab beads during drafting
+- Added new step 6 "Validate and undefer" that runs `bd lint` then `bd undefer` on all created bead IDs
+- Renumbered "Output summary" from step 6 to step 7
+- All existing guidelines and template sections preserved
+
+### Files Changed
+- .claude/skills/prd-to-beads/SKILL.md (modified)
+
+### Current State
+- All 1117 tests pass
+- Zero clippy warnings, formatting clean
+
+### Suggested Next Tasks
+- Pick up ready beads: simple-agent-harness-dwng (fix DEFAULT_CONFIG), simple-agent-harness-6in9 (preflight check module)
