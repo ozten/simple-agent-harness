@@ -3240,3 +3240,24 @@ Implemented three features for the self-improvement feedback loop:
 ### Suggested Next Tasks
 - Run the smoke test against cantrip to validate it works end-to-end
 - Consider adding the smoke test to CI once infrastructure supports it
+
+--- 2026-02-18 00:40:26 | simple-agent-harness-9hip ---
+## Session: Add persistent coordinator loop config option (simple-agent-harness-9hip)
+
+### Completed
+- Added `persistent: bool` field to `WorkersConfig` in config.rs (default: `false`)
+- Updated coordinator.rs: when `persistent = true`, coordinator skips the NoWork exit and logs "sleeping before re-poll" instead
+- When `persistent = false` (default), existing behavior is unchanged — exits after 3 no-work cycles
+- Updated all test WorkersConfig struct literals (8 occurrences across coordinator.rs and pool.rs)
+
+### Files Changed
+- src/config.rs (added `persistent` field to WorkersConfig struct and Default impl)
+- src/coordinator.rs (conditional exit logic + test struct updates)
+- src/pool.rs (test struct update)
+
+### Current State
+- All 1116 tests pass
+- Zero clippy warnings, formatting clean
+
+### Suggested Next Tasks
+- Pick up next P1 tasks: simple-agent-harness-ar6v, simple-agent-harness-dwng, simple-agent-harness-8l0p

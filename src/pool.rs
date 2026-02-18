@@ -626,6 +626,7 @@ mod tests {
             max,
             base_branch: "main".to_string(),
             worktrees_dir: "worktrees".to_string(),
+            persistent: false,
         }
     }
 

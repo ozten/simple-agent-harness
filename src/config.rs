@@ -531,6 +531,8 @@ pub struct WorkersConfig {
     pub base_branch: String,
     /// Directory under storage.data_dir for worktrees.
     pub worktrees_dir: String,
+    /// When true, the coordinator polls indefinitely instead of exiting after no-work cycles.
+    pub persistent: bool,
 }
 
 impl Default for WorkersConfig {
@@ -539,6 +541,7 @@ impl Default for WorkersConfig {
             max: 1,
             base_branch: "main".to_string(),
             worktrees_dir: "worktrees".to_string(),
+            persistent: false,
         }
     }
 }

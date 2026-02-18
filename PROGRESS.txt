@@ -1,32 +1,19 @@
-## Session: E2E smoke test for blacksmith-ui (simple-agent-harness-949)
+## Session: Add persistent coordinator loop config option (simple-agent-harness-9hip)
 
 ### Completed
-- Created `scripts/smoke-test-ui.sh` — automated smoke test that:
-  - Starts `blacksmith serve` on a test port (18420) against a real project
-  - Validates all serve API endpoints return HTTP 200
-  - Checks JSON payload fields (health.ok, project.name)
-  - Tests session/transcript/stream endpoints if sessions exist
-  - Starts `blacksmith-ui` with a temporary config pointing at the serve instance
-  - Validates all dashboard API endpoints including proxied transcript routes
-  - Reports PASS/FAIL summary with failure signatures
-  - Clean teardown of both processes on exit
-- Updated `docs/dashboard.md` with Smoke Testing section documenting:
-  - Quick start commands
-  - What each phase checks
-  - How to detect regressions
-  - Expected output format
-  - Failure signature table
-- Updated `docs/troubleshooting.md` with Dashboard Smoke Test Failures section
+- Added `persistent: bool` field to `WorkersConfig` in config.rs (default: `false`)
+- Updated coordinator.rs: when `persistent = true`, coordinator skips the NoWork exit and logs "sleeping before re-poll" instead
+- When `persistent = false` (default), existing behavior is unchanged — exits after 3 no-work cycles
+- Updated all test WorkersConfig struct literals (8 occurrences across coordinator.rs and pool.rs)
 
 ### Files Changed
-- scripts/smoke-test-ui.sh (new)
-- docs/dashboard.md (added Smoke Testing section)
-- docs/troubleshooting.md (added Dashboard Smoke Test Failures section)
+- src/config.rs (added `persistent` field to WorkersConfig struct and Default impl)
+- src/coordinator.rs (conditional exit logic + test struct updates)
+- src/pool.rs (test struct update)
 
 ### Current State
-- All 1096 tests pass
+- All 1116 tests pass
 - Zero clippy warnings, formatting clean
 
 ### Suggested Next Tasks
-- Run the smoke test against cantrip to validate it works end-to-end
-- Consider adding the smoke test to CI once infrastructure supports it
+- Pick up next P1 tasks: simple-agent-harness-ar6v, simple-agent-harness-dwng, simple-agent-harness-8l0p

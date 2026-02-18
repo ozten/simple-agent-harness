@@ -332,7 +332,7 @@ pub async fn run(
 
             if ready_beads.is_empty() && pool.active_count() == 0 {
                 consecutive_no_work += 1;
-                if consecutive_no_work >= MAX_CONSECUTIVE_NO_WORK {
+                if !config.workers.persistent && consecutive_no_work >= MAX_CONSECUTIVE_NO_WORK {
                     tracing::info!("no work available and no active workers, exiting");
                     status.update(HarnessState::ShuttingDown);
                     status.remove();
@@ -341,6 +341,9 @@ pub async fn run(
                         failed_beads,
                         exit_reason: CoordinatorExitReason::NoWork,
                     };
+                }
+                if config.workers.persistent {
+                    tracing::info!("no work available, persistent mode — sleeping before re-poll");
                 }
             } else {
                 consecutive_no_work = 0;
@@ -1195,6 +1198,7 @@ mod tests {
                 max: 3,
                 base_branch: "main".to_string(),
                 worktrees_dir: "worktrees".to_string(),
+                persistent: false,
             },
             reconciliation: ReconciliationConfig::default(),
             architecture: ArchitectureConfig::default(),
@@ -1367,6 +1371,7 @@ mod tests {
             max: 2,
             base_branch: "main".to_string(),
             worktrees_dir: "worktrees".to_string(),
+            persistent: false,
         };
         let pool = WorkerPool::new(&config, dir.path().to_path_buf(), wt_dir, 0);
         let db_path = dir.path().join("test.db");
@@ -1556,6 +1561,7 @@ mod tests {
             max: 1,
             base_branch: "main".to_string(),
             worktrees_dir: "worktrees".to_string(),
+            persistent: false,
         };
         let mut pool = WorkerPool::new(&workers_config, repo.to_path_buf(), wt_dir, 0);
 
@@ -1614,6 +1620,7 @@ mod tests {
             max: 1,
             base_branch: "main".to_string(),
             worktrees_dir: "worktrees".to_string(),
+            persistent: false,
         };
         let mut pool = WorkerPool::new(
             &workers_config,
@@ -1673,6 +1680,7 @@ mod tests {
             max: 1,
             base_branch: "main".to_string(),
             worktrees_dir: "worktrees".to_string(),
+            persistent: false,
         };
         let mut pool = WorkerPool::new(
             &workers_config,
@@ -1726,6 +1734,7 @@ mod tests {
             max: 1,
             base_branch: "main".to_string(),
             worktrees_dir: "worktrees".to_string(),
+            persistent: false,
         };
         let mut pool = WorkerPool::new(
             &workers_config,
@@ -1780,6 +1789,7 @@ mod tests {
             max: 1,
             base_branch: "main".to_string(),
             worktrees_dir: "worktrees".to_string(),
+            persistent: false,
         };
         let mut pool = WorkerPool::new(
             &workers_config,
