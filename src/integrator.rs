@@ -530,6 +530,8 @@ impl IntegrationQueue {
                     commit = %worktree_head,
                     "fast-forwarded main"
                 );
+
+                self.close_bead_in_bd(bead_id, &worktree_head);
             }
             Err(e) => {
                 let reason = format!("fast-forward failed: {e}");
@@ -722,6 +724,68 @@ impl IntegrationQueue {
         }
 
         Ok(())
+    }
+
+    /// Close the bead in bd after successful integration.
+    ///
+    /// This keeps bd's dependency graph and closed-bead counts aligned with
+    /// multi-agent integration results.
+    fn close_bead_in_bd(&self, bead_id: &str, merge_commit: &str) {
+        let reason = format!("integrated {bead_id} at {merge_commit}");
+
+        match Command::new("bd")
+            .args(["close", bead_id, "--reason", &reason])
+            .current_dir(&self.repo_dir)
+            .output()
+        {
+            Ok(out) if out.status.success() => {
+                tracing::info!(
+                    bead_id,
+                    merge_commit,
+                    "bd close succeeded after integration"
+                );
+            }
+            Ok(out) => {
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                tracing::warn!(
+                    bead_id,
+                    merge_commit,
+                    stderr = %stderr.trim(),
+                    "bd close failed after integration"
+                );
+                return;
+            }
+            Err(e) => {
+                tracing::warn!(
+                    bead_id,
+                    merge_commit,
+                    error = %e,
+                    "failed to run bd close after integration"
+                );
+                return;
+            }
+        }
+
+        match Command::new("bd")
+            .args(["sync"])
+            .current_dir(&self.repo_dir)
+            .output()
+        {
+            Ok(out) if out.status.success() => {
+                tracing::info!(bead_id, "bd sync succeeded after integration");
+            }
+            Ok(out) => {
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                tracing::warn!(
+                    bead_id,
+                    stderr = %stderr.trim(),
+                    "bd sync failed after integration"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(bead_id, error = %e, "failed to run bd sync after integration");
+            }
+        }
     }
 
     /// Run a compiler check in the worktree.

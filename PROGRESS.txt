@@ -1,25 +1,22 @@
-## Session: Filter epics with open children from scheduling pool (simple-agent-harness-qfi5)
+## Session: Close beads after successful multi-agent integration (simple-agent-harness-x761)
 
 ### Completed
-- Added `issue_type` and `parent_child_ids` to `ReadyBead` so scheduler/coordinator can reason about epic hierarchy.
-- Updated `parse_ready_beads_json()` to parse `issue_type` and extract child IDs from `dependencies` entries where `type == "parent-child"`.
-- Updated `parse_and_filter_beads()` to exclude epics that still have any open child in the open bead set.
-- Kept behavior unchanged for leaf tasks and epics with no open children.
-- Added tests covering:
-  - parsing `issue_type` and parent-child dependency IDs
-  - filtering epic with open child
-  - keeping epic whose children are closed/not-open
+- Updated `IntegrationQueue::integrate()` to close the bead in bd immediately after a successful fast-forward merge to main.
+- Added `close_bead_in_bd()` in `src/integrator.rs`:
+  - Runs `bd close <bead-id> --reason "integrated <bead-id> at <merge-commit>"` for traceability
+  - Runs `bd sync` after a successful close
+  - Logs warnings on failures without failing integration
+- Kept integration behavior non-fatal if bead-closing commands fail.
 
-### Verification
-- `cargo test -- test_parse_ready_beads_json` passed.
-- `cargo test --release` passed (1110 passed, 0 failed, 1 ignored).
-- `cargo clippy --fix --allow-dirty` passed.
-- `cargo fmt --check` passed.
+### Verification Run
+- `cargo test` (pass)
+- `cargo test --release` (pass)
+- `cargo check` (pass)
+- `cargo clippy --fix --allow-dirty` (pass)
+- `cargo fmt --check` initially reported formatting diff; code was corrected to rustfmt style.
 
 ### Current State
-- Ready-pool parsing now captures issue type metadata.
-- Scheduling pool excludes epics that still have open child tasks, avoiding wasted worker assignments.
-- Existing dependency filtering and cycle filtering continue to run after epic filtering.
+- Multi-agent integrations now attempt to close beads in bd after successful merge, enabling closed-count progress visibility and dependency unblocking in bd.
 
-### Suggested Next Tasks
-- Pick next highest-priority ready bead.
+### Suggested Next Task
+- Validate behavior in a live coordinator run (manual cantrip scenario) to confirm progress lines increment per integration and dependent beads unblock as expected.

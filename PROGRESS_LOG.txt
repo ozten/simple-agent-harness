@@ -3552,3 +3552,27 @@ Implemented three features for the self-improvement feedback loop:
 
 ### Suggested Next Tasks
 - Pick next highest-priority ready bead.
+
+--- 2026-02-18 17:24:31 | simple-agent-harness-x761 ---
+## Session: Close beads after successful multi-agent integration (simple-agent-harness-x761)
+
+### Completed
+- Updated `IntegrationQueue::integrate()` to close the bead in bd immediately after a successful fast-forward merge to main.
+- Added `close_bead_in_bd()` in `src/integrator.rs`:
+  - Runs `bd close <bead-id> --reason "integrated <bead-id> at <merge-commit>"` for traceability
+  - Runs `bd sync` after a successful close
+  - Logs warnings on failures without failing integration
+- Kept integration behavior non-fatal if bead-closing commands fail.
+
+### Verification Run
+- `cargo test` (pass)
+- `cargo test --release` (pass)
+- `cargo check` (pass)
+- `cargo clippy --fix --allow-dirty` (pass)
+- `cargo fmt --check` initially reported formatting diff; code was corrected to rustfmt style.
+
+### Current State
+- Multi-agent integrations now attempt to close beads in bd after successful merge, enabling closed-count progress visibility and dependency unblocking in bd.
+
+### Suggested Next Task
+- Validate behavior in a live coordinator run (manual cantrip scenario) to confirm progress lines increment per integration and dependent beads unblock as expected.
