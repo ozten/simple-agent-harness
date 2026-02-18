@@ -1,12 +1,14 @@
 /// Integration queue: processes completed worktrees one at a time.
 ///
 /// After a coding agent finishes successfully in a worktree, the integrator:
-/// 1. Merges main into the branch (pull main into branch, NOT push branch to main)
-/// 2. Applies manifest entries from task_manifest.toml
-/// 3. Runs compiler checks (cargo check / tsc --noEmit)
-/// 4. If errors, spawns integration agent to fix them (up to 3 retries)
-/// 5. On success, fast-forwards main to the branch tip
-/// 6. Records the integration in the database
+/// 1. Commits any uncommitted worker changes (safety net)
+/// 2. Merges main into the branch (pull main into branch, NOT push branch to main)
+/// 3. Applies manifest entries from task_manifest.toml
+/// 4. Runs compiler checks (cargo check / tsc --noEmit)
+/// 5. If errors, spawns integration agent to fix them (up to 3 retries)
+/// 6. On success, fast-forwards main to the branch tip
+/// 7. Closes/syncs bead metadata and pushes main
+/// 8. Records the integration in the database
 ///
 /// Only one integration runs at a time to keep main's history linear.
 /// Workers continue coding while one task integrates.
@@ -267,6 +269,7 @@ pub(crate) fn close_bead_in_bd(bead_id: &str, reason: &str) {
         auto_close_parent_epics(bead_id);
     }
     sync_bd_metadata();
+    commit_bead_metadata_changes();
 }
 
 /// Try to close a single issue via `bd close`. Returns true on success.
@@ -309,6 +312,39 @@ fn sync_bd_metadata() {
         Err(e) => {
             tracing::warn!(error = %e, "failed to run bd sync");
         }
+    }
+}
+
+/// Commit `.beads/` metadata changes from bd close/sync (if any).
+fn commit_bead_metadata_changes() {
+    let dirty = Command::new("git")
+        .args(["diff", "--quiet", ".beads/"])
+        .status()
+        .map(|s| !s.success())
+        .unwrap_or(false);
+    let staged_dirty = Command::new("git")
+        .args(["diff", "--cached", "--quiet", ".beads/"])
+        .status()
+        .map(|s| !s.success())
+        .unwrap_or(false);
+
+    if !dirty && !staged_dirty {
+        return;
+    }
+
+    let _ = Command::new("git").args(["add", ".beads/"]).output();
+    let ts = chrono_now_utc();
+    let msg = format!("bd sync: {ts}");
+    match Command::new("git")
+        .args(["commit", "-m", &msg, "--no-verify"])
+        .output()
+    {
+        Ok(out) if out.status.success() => tracing::info!("committed .beads/ metadata updates"),
+        Ok(out) => {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            tracing::warn!(stderr = %stderr.trim(), "failed to commit .beads/ metadata updates");
+        }
+        Err(e) => tracing::warn!(error = %e, "failed to run git commit for .beads/ metadata"),
     }
 }
 
@@ -513,13 +549,15 @@ impl IntegrationQueue {
     /// Integrate a single completed worktree into main.
     ///
     /// Steps:
+    /// 0. Commit uncommitted worker changes (safety net)
     /// 1. Merge main into the worktree's branch
     /// 2. Apply manifest entries from task_manifest.toml
     /// 3. Run compiler check (cargo check / tsc --noEmit)
     /// 4. If errors, spawn integration agent to fix; retry up to MAX_INTEGRATION_ATTEMPTS
     /// 5. Fast-forward main to the worktree's HEAD
-    /// 6. Record integration in the database
-    /// 7. Clean up the worktree
+    /// 6. Close/sync bead metadata and push main
+    /// 7. Record integration in the database
+    /// 8. Clean up the worktree
     #[allow(clippy::too_many_arguments)]
     pub fn integrate(
         &self,
@@ -538,6 +576,21 @@ impl IntegrationQueue {
             worktree = %worktree_path.display(),
             "starting integration"
         );
+
+        // Step 0: Safety net — commit any uncommitted worker changes before merge/integration.
+        if let Err(e) = self.commit_uncommitted_changes(worktree_path, bead_id) {
+            let reason = format!("failed to commit uncommitted changes: {e}");
+            tracing::warn!(worker_id, bead_id, error = %e, "failed to capture worktree changes");
+            self.record_failure(assignment_id, db_conn, &reason);
+            return IntegrationResult {
+                worker_id,
+                assignment_id,
+                bead_id: bead_id.to_string(),
+                success: false,
+                merge_commit: None,
+                failure_reason: Some(reason),
+            };
+        }
 
         // Step 1: Merge main into the worktree's branch
         match self.merge_main_into_branch(worktree_path) {
@@ -716,8 +769,6 @@ impl IntegrationQueue {
                     commit = %worktree_head,
                     "fast-forwarded main"
                 );
-
-                self.close_bead_in_bd(bead_id, &worktree_head);
             }
             Err(e) => {
                 let reason = format!("fast-forward failed: {e}");
@@ -743,6 +794,15 @@ impl IntegrationQueue {
             _ => format!("integration: merged {bead_id} at {worktree_head}"),
         };
         close_bead_in_bd(bead_id, &close_reason);
+
+        if let Err(e) = self.push_base_branch() {
+            tracing::warn!(
+                worker_id,
+                bead_id,
+                error = %e,
+                "failed to push integrated main branch"
+            );
+        }
 
         // Sync working tree to match the updated ref
         if let Err(e) = self.sync_working_tree() {
@@ -837,6 +897,47 @@ impl IntegrationQueue {
         }
 
         Ok(())
+    }
+
+    /// Commit uncommitted changes in the worktree before merge.
+    ///
+    /// This prevents agent-authored changes from being lost when the worker exits
+    /// without an explicit commit.
+    fn commit_uncommitted_changes(
+        &self,
+        worktree_path: &Path,
+        bead_id: &str,
+    ) -> Result<(), IntegrationError> {
+        if !self.worktree_has_uncommitted_changes(worktree_path)? {
+            return Ok(());
+        }
+
+        self.git_add_and_commit(
+            worktree_path,
+            &format!("integration: capture uncommitted work for {bead_id}"),
+        )
+    }
+
+    /// Return true when a worktree has staged, unstaged, or untracked changes.
+    fn worktree_has_uncommitted_changes(
+        &self,
+        worktree_path: &Path,
+    ) -> Result<bool, IntegrationError> {
+        let output = Command::new("git")
+            .args(["status", "--porcelain"])
+            .current_dir(worktree_path)
+            .output()
+            .map_err(|e| IntegrationError::Git(format!("failed to check worktree status: {e}")))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(IntegrationError::Git(format!(
+                "git status --porcelain failed: {}",
+                stderr.trim()
+            )));
+        }
+
+        Ok(!String::from_utf8_lossy(&output.stdout).trim().is_empty())
     }
 
     /// Abort a merge that's in a conflicted state.
@@ -941,66 +1042,24 @@ impl IntegrationQueue {
         Ok(())
     }
 
-    /// Close the bead in bd after successful integration.
-    ///
-    /// This keeps bd's dependency graph and closed-bead counts aligned with
-    /// multi-agent integration results.
-    fn close_bead_in_bd(&self, bead_id: &str, merge_commit: &str) {
-        let reason = format!("integrated {bead_id} at {merge_commit}");
-
-        match Command::new("bd")
-            .args(["close", bead_id, "--reason", &reason])
+    /// Push the updated base branch to origin (best-effort).
+    fn push_base_branch(&self) -> Result<(), IntegrationError> {
+        let output = Command::new("git")
+            .args(["push", "origin", &self.base_branch])
             .current_dir(&self.repo_dir)
             .output()
-        {
-            Ok(out) if out.status.success() => {
-                tracing::info!(
-                    bead_id,
-                    merge_commit,
-                    "bd close succeeded after integration"
-                );
-            }
-            Ok(out) => {
-                let stderr = String::from_utf8_lossy(&out.stderr);
-                tracing::warn!(
-                    bead_id,
-                    merge_commit,
-                    stderr = %stderr.trim(),
-                    "bd close failed after integration"
-                );
-                return;
-            }
-            Err(e) => {
-                tracing::warn!(
-                    bead_id,
-                    merge_commit,
-                    error = %e,
-                    "failed to run bd close after integration"
-                );
-                return;
-            }
+            .map_err(|e| IntegrationError::Git(format!("failed to run git push: {e}")))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(IntegrationError::Git(format!(
+                "git push origin {} failed: {}",
+                self.base_branch,
+                stderr.trim()
+            )));
         }
 
-        match Command::new("bd")
-            .args(["sync"])
-            .current_dir(&self.repo_dir)
-            .output()
-        {
-            Ok(out) if out.status.success() => {
-                tracing::info!(bead_id, "bd sync succeeded after integration");
-            }
-            Ok(out) => {
-                let stderr = String::from_utf8_lossy(&out.stderr);
-                tracing::warn!(
-                    bead_id,
-                    stderr = %stderr.trim(),
-                    "bd sync failed after integration"
-                );
-            }
-            Err(e) => {
-                tracing::warn!(bead_id, error = %e, "failed to run bd sync after integration");
-            }
-        }
+        Ok(())
     }
 
     /// Run a compiler check in the worktree.
@@ -1606,6 +1665,64 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(wa.status, "integrated");
+    }
+
+    #[test]
+    fn test_integration_commits_uncommitted_worker_changes() {
+        let dir = init_test_repo();
+        let repo_dir = dir.path();
+        let wt_dir = repo_dir.join("worktrees");
+        std::fs::create_dir_all(&wt_dir).unwrap();
+
+        let db_path = repo_dir.join("test.db");
+        let conn = db::open_or_create(&db_path).unwrap();
+        let assignment_id = db::insert_worker_assignment(
+            &conn,
+            0,
+            "beads-uncommitted",
+            "/tmp/wt-uncommitted",
+            "completed",
+            None,
+        )
+        .unwrap();
+
+        let wt_path = worktree::create(repo_dir, &wt_dir, 0, "beads-uncommitted", "main").unwrap();
+
+        // Leave a tracked modification uncommitted in the worker worktree.
+        std::fs::write(
+            wt_path.join("README.md"),
+            "captured by integration safety net",
+        )
+        .unwrap();
+
+        let queue = IntegrationQueue::new(repo_dir.to_path_buf(), "main".to_string());
+        let mut cb = CircuitBreaker::new();
+        let result = queue.integrate(
+            0,
+            assignment_id,
+            "beads-uncommitted",
+            &wt_path,
+            &conn,
+            None,
+            &mut cb,
+        );
+
+        assert!(
+            result.success,
+            "integration should succeed for uncommitted worker changes: {:?}",
+            result.failure_reason
+        );
+
+        let subject = StdCommand::new("git")
+            .args(["log", "-1", "--pretty=%s", "main"])
+            .current_dir(repo_dir)
+            .output()
+            .unwrap();
+        let subject = String::from_utf8_lossy(&subject.stdout);
+        assert!(
+            subject.contains("capture uncommitted work for beads-uncommitted"),
+            "expected safety-net commit on main, got subject: {subject}"
+        );
     }
 
     #[test]

@@ -171,14 +171,14 @@ enum Commands {
     },
     /// Run preflight environment checks
     Preflight,
-    /// Close a bead with quality gates (replaces bd-finish.sh)
+    /// Run quality gates and deliverable verification before integration
     Finish {
-        /// Bead ID to close (e.g. simple-agent-harness-abc)
+        /// Bead ID to verify (e.g. simple-agent-harness-abc)
         bead_id: String,
-        /// Commit message describing the work done
+        /// Session summary message (retained for CLI compatibility)
         #[arg(name = "MESSAGE")]
         message: String,
-        /// Specific files to stage (default: git add -u)
+        /// Additional args retained for CLI compatibility
         #[arg(trailing_var_arg = true)]
         files: Vec<String>,
     },

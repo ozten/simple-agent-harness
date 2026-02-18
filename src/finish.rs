@@ -1,8 +1,7 @@
-//! `blacksmith finish` — quality-gated bead closure.
+//! `blacksmith finish` — quality gate and deliverable verification.
 //!
 //! Replaces `bd-finish.sh` with a compiled subcommand that runs configurable
-//! quality gates before allowing a bead to be closed. This prevents agents
-//! from closing beads without actually completing the work.
+//! quality gates and bead verification before integration is allowed.
 
 use crate::config::QualityGatesConfig;
 use std::path::Path;
@@ -239,17 +238,13 @@ fn strip_verify_prose(cmd: &str) -> &str {
         .trim()
 }
 
-/// Run the full finish protocol:
-/// 1. Quality gates (check, test, lint, format)
+/// Run finish verification:
+/// 1. Quality gates (check, test)
 /// 2. Deliverable verification
-/// 3. Stage files + git commit
-/// 4. bd close + bd sync
-/// 5. Auto-commit .beads/ changes
-/// 6. git push
 pub fn handle_finish(
     bead_id: &str,
-    commit_msg: &str,
-    files: &[String],
+    _commit_msg: &str,
+    _files: &[String],
     gates_config: &QualityGatesConfig,
 ) -> FinishResult {
     let working_dir = match std::env::current_dir() {
@@ -301,192 +296,11 @@ pub fn handle_finish(
     }
     eprintln!("[0c] Deliverable verification passed\n");
 
-    // --- Step 1: Append PROGRESS.txt to PROGRESS_LOG.txt ---
-    let progress_path = working_dir.join("PROGRESS.txt");
-    let log_path = working_dir.join("PROGRESS_LOG.txt");
-    if progress_path.exists() {
-        if let Ok(progress_content) = std::fs::read_to_string(&progress_path) {
-            let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
-            let entry = format!("\n--- {timestamp} | {bead_id} ---\n{progress_content}");
-            let _ = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&log_path)
-                .and_then(|mut f| std::io::Write::write_all(&mut f, entry.as_bytes()));
-            eprintln!("[1] Appended PROGRESS.txt to PROGRESS_LOG.txt");
-        }
-    } else {
-        eprintln!("[1] No PROGRESS.txt found, skipping log append");
-    }
-
-    // --- Step 2: Stage files ---
-    let stage_result = if files.is_empty() {
-        // Stage all tracked modified files
-        Command::new("git")
-            .args(["add", "-u"])
-            .current_dir(&working_dir)
-            .output()
-    } else {
-        let mut args = vec!["add".to_string()];
-        args.extend(files.iter().cloned());
-        Command::new("git")
-            .args(&args)
-            .current_dir(&working_dir)
-            .output()
-    };
-
-    match stage_result {
-        Ok(out) if out.status.success() => {
-            if files.is_empty() {
-                eprintln!("[2] Staged all tracked modified files (git add -u)");
-            } else {
-                eprintln!("[2] Staged {} specified files", files.len());
-            }
-        }
-        Ok(out) => {
-            let stderr = String::from_utf8_lossy(&out.stderr);
-            return FinishResult {
-                success: false,
-                message: format!("git add failed: {stderr}"),
-            };
-        }
-        Err(e) => {
-            return FinishResult {
-                success: false,
-                message: format!("git add failed: {e}"),
-            };
-        }
-    }
-
-    // Always include progress files if they exist
-    let _ = Command::new("git")
-        .args(["add", "-f", "PROGRESS.txt", "PROGRESS_LOG.txt"])
-        .current_dir(&working_dir)
-        .output();
-
-    // --- Step 3: Git commit ---
-    let full_msg = format!("{bead_id}: {commit_msg}");
-    let commit_result = Command::new("git")
-        .args(["commit", "-m", &full_msg, "--no-verify"])
-        .current_dir(&working_dir)
-        .output();
-
-    match commit_result {
-        Ok(out) if out.status.success() => {
-            eprintln!("[3] Committed: {full_msg}");
-        }
-        Ok(out) => {
-            let stderr = String::from_utf8_lossy(&out.stderr);
-            // "nothing to commit" is OK — may happen if files were already committed
-            if stderr.contains("nothing to commit") {
-                eprintln!("[3] Nothing to commit (changes already committed)");
-            } else {
-                return FinishResult {
-                    success: false,
-                    message: format!("git commit failed: {stderr}"),
-                };
-            }
-        }
-        Err(e) => {
-            return FinishResult {
-                success: false,
-                message: format!("git commit failed: {e}"),
-            };
-        }
-    }
-
-    // --- Step 4: bd close ---
-    let close_result = Command::new("bd")
-        .args(["close", bead_id, &format!("--reason={commit_msg}")])
-        .current_dir(&working_dir)
-        .output();
-
-    match close_result {
-        Ok(out) if out.status.success() => {
-            eprintln!("[4] Closed bead {bead_id}");
-        }
-        Ok(out) => {
-            let stderr = String::from_utf8_lossy(&out.stderr);
-            return FinishResult {
-                success: false,
-                message: format!("bd close failed: {stderr}"),
-            };
-        }
-        Err(e) => {
-            return FinishResult {
-                success: false,
-                message: format!("bd close failed: {e}"),
-            };
-        }
-    }
-
-    // --- Step 5: bd sync ---
-    let _ = Command::new("bd")
-        .args(["sync"])
-        .current_dir(&working_dir)
-        .output();
-    eprintln!("[5] Synced beads");
-
-    // --- Step 6: Auto-commit .beads/ if dirty ---
-    let beads_dirty = Command::new("git")
-        .args(["diff", "--quiet", ".beads/"])
-        .current_dir(&working_dir)
-        .status()
-        .map(|s| !s.success())
-        .unwrap_or(false);
-
-    let beads_staged_dirty = Command::new("git")
-        .args(["diff", "--cached", "--quiet", ".beads/"])
-        .current_dir(&working_dir)
-        .status()
-        .map(|s| !s.success())
-        .unwrap_or(false);
-
-    if beads_dirty || beads_staged_dirty {
-        let _ = Command::new("git")
-            .args(["add", ".beads/"])
-            .current_dir(&working_dir)
-            .output();
-        let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
-        let _ = Command::new("git")
-            .args([
-                "commit",
-                "-m",
-                &format!("bd sync: {timestamp}"),
-                "--no-verify",
-            ])
-            .current_dir(&working_dir)
-            .output();
-        eprintln!("[6] Committed .beads/ changes");
-    } else {
-        eprintln!("[6] .beads/ already clean");
-    }
-
-    // --- Step 7: Git push ---
-    let push_result = Command::new("git")
-        .args(["push"])
-        .current_dir(&working_dir)
-        .output();
-
-    match push_result {
-        Ok(out) if out.status.success() => {
-            eprintln!("[7] Pushed to remote");
-        }
-        Ok(out) => {
-            let stderr = String::from_utf8_lossy(&out.stderr);
-            eprintln!("[7] Warning: git push failed: {stderr}");
-            // Don't fail the whole operation for a push failure
-        }
-        Err(e) => {
-            eprintln!("[7] Warning: git push failed: {e}");
-        }
-    }
-
-    eprintln!("\n=== Done. {bead_id} closed and pushed. ===");
+    eprintln!("\n=== Done. {bead_id} passed quality gates and verification. ===");
 
     FinishResult {
         success: true,
-        message: format!("Bead {bead_id} closed successfully"),
+        message: format!("Bead {bead_id} passed finish verification"),
     }
 }
 

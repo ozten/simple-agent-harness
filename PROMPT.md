@@ -104,9 +104,9 @@ For the selected task (e.g., bd-X):
      ```bash
      blacksmith finish bd-X "<brief description>" src/file1.rs src/file2.rs
      ```
-     This runs quality gates (check + test), verifies bead deliverables, then handles: staging, committing, bd close, bd sync, auto-committing .beads/, appending to PROGRESS_LOG.txt, and git push — all in one command.
-     **If quality gates fail, the bead is NOT closed.** Fix the issues and re-run.
-   - If no specific files to stage, omit the file list and it will stage all tracked modified files.
+     This runs quality gates (check + test) and deliverable verification only.
+     **If quality gates fail, the bead is NOT eligible for integration.** Fix the issues and re-run.
+   - Commit/merge, `bd close`, `bd sync`, and `git push` are handled by the coordinator integrator after session success.
    - **After `blacksmith finish` completes, STOP. Do not triage more work. Do not run bd ready. Session is done.**
 
 ## Turn Budget (R1)
@@ -173,6 +173,6 @@ Record improvements as you work — don't batch them to the end of the session.
 - Prefer small, atomic changes over large refactors
 - Always run `cargo test --release` before committing
 - Always run `cargo clippy --fix --allow-dirty` then `cargo fmt` before committing — exactly ONCE each
-- Always use `blacksmith finish` to close out — do NOT manually run git add/commit/push/bd close/bd sync
-- **NEVER call `bd close` directly** — always go through `blacksmith finish` which enforces quality gates
+- Always use `blacksmith finish` to close out quality gates — do NOT manually run git add/commit/push/bd close/bd sync
+- **NEVER call `bd close` directly** — coordinator integration performs closure after successful finish verification
 - **EFFICIENCY**: Re-read Rules A, B, C above. Every text-only turn and every sequential-when-parallel tool call wastes your limited turn budget. Aim for 5+ parallel turns per session and 0 narration-only turns.

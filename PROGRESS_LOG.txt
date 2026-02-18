@@ -3654,3 +3654,24 @@ Implemented three features for the self-improvement feedback loop:
 
 ### Suggested Next Task
 - Add an integration-style coordinator test that simulates consecutive failed outcomes and asserts backoff/pause behavior across loop iterations.
+
+--- 2026-02-18 22:39:34 | simple-agent-harness-hyfd ---
+## Session: finish/integrator lifecycle split (simple-agent-harness-hyfd)
+
+### Completed
+- Reduced `blacksmith finish` to quality-gate + deliverable verification only in `src/finish.rs`.
+- Removed coordinator single-agent direct-close bypass; all completions now use integration path in `src/coordinator.rs`.
+- Updated worker pool to always use worktrees even with `workers.max = 1` in `src/pool.rs`.
+- Added integrator safety-net commit for uncommitted worker changes, integrated bead metadata commit (`.beads/`), and main-branch push handling in `src/integrator.rs`.
+- Added regression test `test_integration_commits_uncommitted_worker_changes`.
+- Updated `PROMPT.md` and `templates/PROMPT.md.tmpl` to reflect finish-only verification behavior.
+- Updated finish command help text in `src/main.rs`.
+
+### Current State
+- Full release test suite passed (`cargo test --release`).
+- `cargo clippy --fix --allow-dirty` completed successfully.
+- `cargo fmt --check` identified one formatting diff in the new integrator test and that formatting was applied.
+- Bead verify notes were added to `simple-agent-harness-hyfd`.
+
+### Suggested Next Task
+- Add/adjust integration tests that assert push/metadata-commit behavior when a configured remote exists, so lifecycle ownership coverage includes push semantics explicitly.

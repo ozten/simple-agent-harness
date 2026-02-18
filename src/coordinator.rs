@@ -2,9 +2,8 @@
 ///
 /// The coordinator is the main execution path for all configurations (single or
 /// multi-agent). It reads ready beads, uses the scheduler to find non-conflicting
-/// assignments, spawns workers in git worktrees (skipped for max=1), and polls
-/// for completions. Completed workers are queued for sequential integration into
-/// main (also skipped for max=1).
+/// assignments, spawns workers in git worktrees, and polls for completions.
+/// Completed workers are queued for sequential integration into main.
 use crate::adapters;
 use crate::config::HarnessConfig;
 use crate::cycle_detect;
@@ -13,7 +12,7 @@ use crate::db;
 use crate::estimation::{self, BeadNode};
 use crate::improve;
 use crate::ingest;
-use crate::integrator::{close_bead_in_bd, CircuitBreaker, IntegrationQueue, TrippedFailure};
+use crate::integrator::{CircuitBreaker, IntegrationQueue, TrippedFailure};
 use crate::pool::{PoolError, SessionOutcome, WorkerPool};
 use crate::prompt;
 use crate::ratelimit;
@@ -61,9 +60,9 @@ const RAPID_FAILURE_BACKOFF_START: u32 = 5;
 const RAPID_FAILURE_PAUSE_THRESHOLD: u32 = 10;
 const RAPID_FAILURE_MAX_DURATION_SECS: u64 = 10;
 
-/// Run the multi-agent coordinator loop.
+/// Run the coordinator loop.
 ///
-/// This is the entry point when `workers.max > 1`. It:
+/// This is the entry point for worker execution. It:
 /// 1. Opens the metrics database
 /// 2. Creates the worker pool
 /// 3. Loops: schedule ready beads → spawn workers → poll completions → repeat
@@ -336,21 +335,26 @@ pub async fn run(
         if !pool.has_integrating() {
             if let Some((worker_id, assignment_id, worktree_path, bead_id)) = pool.next_completed()
             {
-                // In single-agent mode, the agent committed directly to the main branch.
-                // Skip the integration merge — just close the bead and reset the worker.
-                if pool.is_single_agent() {
-                    pool.set_integrating(worker_id);
+                // Mark the worker as integrating
+                pool.set_integrating(worker_id);
 
-                    tracing::info!(
-                        worker_id,
-                        bead_id = %bead_id,
-                        "single-agent mode: closing bead directly (no merge)"
-                    );
+                tracing::info!(worker_id, bead_id = %bead_id, "starting integration");
 
-                    close_bead_direct(&bead_id);
-                    auto_close_parent_epics(&bead_id);
+                let resolved_integration = config.agent.resolved_integration();
+                let result = integration_queue.integrate(
+                    worker_id,
+                    assignment_id,
+                    &bead_id,
+                    &worktree_path,
+                    &db_conn,
+                    Some(&resolved_integration),
+                    &mut circuit_breaker,
+                );
 
+                if result.success {
                     completed_beads += 1;
+
+                    // Print progress using DB state (metrics already ingested during poll phase)
                     print_coordinator_integration_progress(
                         worker_id,
                         &bead_id,
@@ -360,82 +364,45 @@ pub async fn run(
                         config.workers.max,
                     );
 
-                    run_auto_promotion(config, &db_conn, &data_dir.db(), completed_beads);
-
-                    if let Err(e) = pool.reset_worker(worker_id) {
-                        tracing::warn!(error = %e, worker_id, "failed to reset worker after direct close");
-                    }
-                } else {
-                    // Mark the worker as integrating
-                    pool.set_integrating(worker_id);
-
-                    tracing::info!(worker_id, bead_id = %bead_id, "starting integration");
-
-                    let resolved_integration = config.agent.resolved_integration();
-                    let result = integration_queue.integrate(
+                    tracing::info!(
                         worker_id,
-                        assignment_id,
-                        &bead_id,
-                        &worktree_path,
-                        &db_conn,
-                        Some(&resolved_integration),
-                        &mut circuit_breaker,
+                        bead_id = %bead_id,
+                        commit = ?result.merge_commit,
+                        "integration succeeded"
                     );
 
-                    if result.success {
-                        completed_beads += 1;
+                    auto_close_parent_epics(&bead_id);
 
-                        // Print progress using DB state (metrics already ingested during poll phase)
-                        print_coordinator_integration_progress(
-                            worker_id,
-                            &bead_id,
-                            completed_beads,
-                            failed_beads,
-                            &db_conn,
-                            config.workers.max,
-                        );
+                    // Run auto-promotion cycle after successful integration
+                    run_auto_promotion(config, &db_conn, &data_dir.db(), completed_beads);
 
-                        tracing::info!(
+                    // Reset the worker back to idle after successful integration
+                    if let Err(e) = pool.reset_worker(worker_id) {
+                        tracing::warn!(error = %e, worker_id, "failed to reset worker after integration");
+                    }
+                } else {
+                    let error_summary = result.failure_reason.as_deref().unwrap_or("unknown error");
+
+                    // Check if the circuit breaker has tripped (integrate() already recorded attempts)
+                    if let Some(tripped) =
+                        circuit_breaker.check_tripped(&bead_id, error_summary, &worktree_path)
+                    {
+                        // Circuit breaker tripped — escalate to human review
+                        failed_beads += 1;
+                        handle_tripped_failure(&tripped);
+                        // Do NOT reset the worker — worktree is preserved for inspection
+                        // Do NOT clean up the worktree
+                    } else {
+                        tracing::warn!(
                             worker_id,
                             bead_id = %bead_id,
-                            commit = ?result.merge_commit,
-                            "integration succeeded"
+                            reason = ?result.failure_reason,
+                            state = %circuit_breaker.state(&bead_id),
+                            "integration failed, retries remain"
                         );
-
-                        auto_close_parent_epics(&bead_id);
-
-                        // Run auto-promotion cycle after successful integration
-                        run_auto_promotion(config, &db_conn, &data_dir.db(), completed_beads);
-
-                        // Reset the worker back to idle after successful integration
+                        // Reset the worker back to idle so it can retry
                         if let Err(e) = pool.reset_worker(worker_id) {
-                            tracing::warn!(error = %e, worker_id, "failed to reset worker after integration");
-                        }
-                    } else {
-                        let error_summary =
-                            result.failure_reason.as_deref().unwrap_or("unknown error");
-
-                        // Check if the circuit breaker has tripped (integrate() already recorded attempts)
-                        if let Some(tripped) =
-                            circuit_breaker.check_tripped(&bead_id, error_summary, &worktree_path)
-                        {
-                            // Circuit breaker tripped — escalate to human review
-                            failed_beads += 1;
-                            handle_tripped_failure(&tripped);
-                            // Do NOT reset the worker — worktree is preserved for inspection
-                            // Do NOT clean up the worktree
-                        } else {
-                            tracing::warn!(
-                                worker_id,
-                                bead_id = %bead_id,
-                                reason = ?result.failure_reason,
-                                state = %circuit_breaker.state(&bead_id),
-                                "integration failed, retries remain"
-                            );
-                            // Reset the worker back to idle so it can retry
-                            if let Err(e) = pool.reset_worker(worker_id) {
-                                tracing::warn!(error = %e, worker_id, "failed to reset worker after integration failure");
-                            }
+                            tracing::warn!(error = %e, worker_id, "failed to reset worker after integration failure");
                         }
                     }
                 }
@@ -886,13 +853,6 @@ fn check_and_process_expand_files(pool: &WorkerPool, db_conn: &Connection) {
             );
         }
     }
-}
-
-/// Close a bead directly without a merge step (for single-agent mode).
-///
-/// Runs `bd close` and `bd sync` since the agent already committed to the main branch.
-fn close_bead_direct(bead_id: &str) {
-    close_bead_in_bd(bead_id, "single-agent direct commit");
 }
 
 /// Open epic hierarchy derived from `bd list --status=open --json`.
@@ -2800,15 +2760,7 @@ mod tests {
     }
 
     #[test]
-    fn test_close_bead_direct_does_not_panic() {
-        // When bd is not available, close_bead_direct should handle gracefully
-        close_bead_direct("beads-test-nonexistent");
-    }
-
-    #[test]
-    fn test_coordinator_single_agent_direct_commit() {
-        // Verify that in single-agent mode (max=1), the pool reports is_single_agent()
-        // which the coordinator uses to skip integration and call close_bead_direct() instead.
+    fn test_worker_pool_single_agent_detection() {
         let dir = tempdir().unwrap();
         let wt_dir = dir.path().join("worktrees");
 
@@ -2820,10 +2772,8 @@ mod tests {
         };
         let pool = WorkerPool::new(&workers_config, dir.path().to_path_buf(), wt_dir, 0);
 
-        // Single-agent mode should be detected
         assert!(pool.is_single_agent());
 
-        // Multi-agent mode should NOT be single-agent
         let multi_config = WorkersConfig {
             max: 3,
             base_branch: "main".to_string(),
