@@ -21,7 +21,7 @@ use crate::signals::SignalHandler;
 use crate::status::{HarnessState, StatusTracker};
 use crate::worktree;
 use rusqlite::Connection;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use tokio::time::Duration;
 
@@ -259,6 +259,7 @@ pub async fn run(
                     );
 
                     close_bead_direct(&bead_id);
+                    auto_close_parent_epics(&bead_id);
 
                     completed_beads += 1;
                     print_coordinator_integration_progress(
@@ -311,6 +312,8 @@ pub async fn run(
                             commit = ?result.merge_commit,
                             "integration succeeded"
                         );
+
+                        auto_close_parent_epics(&bead_id);
 
                         // Run auto-promotion cycle after successful integration
                         run_auto_promotion(config, &db_conn, &data_dir.db(), completed_beads);
@@ -786,6 +789,247 @@ fn check_and_process_expand_files(pool: &WorkerPool, db_conn: &Connection) {
 /// Runs `bd close` and `bd sync` since the agent already committed to the main branch.
 fn close_bead_direct(bead_id: &str) {
     close_bead_in_bd(bead_id, "single-agent direct commit");
+}
+
+/// Open epic hierarchy derived from `bd list --status=open --json`.
+#[derive(Debug, Default)]
+struct OpenEpicHierarchy {
+    open_ids: HashSet<String>,
+    parent_children: HashMap<String, Vec<String>>,
+    child_parents: HashMap<String, Vec<String>>,
+}
+
+/// After closing a bead, auto-close parent epics whose children are all closed.
+///
+/// This walks upward recursively (child -> parent epic -> grandparent epic), and
+/// logs warnings on any `bd` failures without interrupting coordinator flow.
+fn auto_close_parent_epics(closed_bead_id: &str) {
+    let output = match std::process::Command::new("bd")
+        .args(["list", "--status=open", "--json"])
+        .output()
+    {
+        Ok(output) if output.status.success() => output,
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            tracing::warn!(
+                bead_id = closed_bead_id,
+                stderr = %stderr.trim(),
+                "failed to query open beads for parent epic auto-close"
+            );
+            return;
+        }
+        Err(e) => {
+            tracing::warn!(
+                bead_id = closed_bead_id,
+                error = %e,
+                "failed to run bd list for parent epic auto-close"
+            );
+            return;
+        }
+    };
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut hierarchy = parse_open_epic_hierarchy(&stdout);
+
+    if hierarchy.child_parents.is_empty() {
+        return;
+    }
+
+    let mut stack = vec![closed_bead_id.to_string()];
+    while let Some(child_id) = stack.pop() {
+        let parents = hierarchy
+            .child_parents
+            .get(&child_id)
+            .cloned()
+            .unwrap_or_default();
+
+        for parent_id in parents {
+            if !hierarchy.open_ids.contains(&parent_id) {
+                continue;
+            }
+
+            let has_open_children = hierarchy
+                .parent_children
+                .get(&parent_id)
+                .map(|children| children.iter().any(|c| hierarchy.open_ids.contains(c)))
+                .unwrap_or(false);
+
+            if has_open_children {
+                continue;
+            }
+
+            if close_epic_when_children_complete(&parent_id) {
+                hierarchy.open_ids.remove(&parent_id);
+                stack.push(parent_id);
+            }
+        }
+    }
+}
+
+/// Parse open epic -> child and child -> parent mappings from `bd list --status=open --json`.
+fn parse_open_epic_hierarchy(json_str: &str) -> OpenEpicHierarchy {
+    let parsed: Result<Vec<serde_json::Value>, _> = serde_json::from_str(json_str);
+    let mut hierarchy = OpenEpicHierarchy::default();
+
+    let beads = match parsed {
+        Ok(beads) => beads,
+        Err(e) => {
+            tracing::debug!(error = %e, "failed to parse open beads JSON for epic auto-close");
+            return hierarchy;
+        }
+    };
+
+    for bead in &beads {
+        if let Some(id) = bead.get("id").and_then(|v| v.as_str()) {
+            hierarchy.open_ids.insert(id.to_string());
+        }
+    }
+
+    for bead in &beads {
+        let Some(parent_id) = bead.get("id").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let issue_type = bead
+            .get("issue_type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("task");
+        if !issue_type.eq_ignore_ascii_case("epic") {
+            continue;
+        }
+
+        let dependencies = bead
+            .get("dependencies")
+            .and_then(|d| d.as_array())
+            .cloned()
+            .unwrap_or_default();
+
+        for dep in dependencies {
+            let dep_type = dep
+                .get("type")
+                .or_else(|| dep.get("dependency_type"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if !dep_type.eq_ignore_ascii_case("parent-child") {
+                continue;
+            }
+
+            let child_id = dep
+                .get("depends_on_id")
+                .or_else(|| dep.get("id"))
+                .and_then(|v| v.as_str());
+            let Some(child_id) = child_id else {
+                continue;
+            };
+
+            hierarchy
+                .parent_children
+                .entry(parent_id.to_string())
+                .or_default()
+                .push(child_id.to_string());
+            hierarchy
+                .child_parents
+                .entry(child_id.to_string())
+                .or_default()
+                .push(parent_id.to_string());
+        }
+    }
+
+    hierarchy
+}
+
+/// Compute which parent epics become auto-close candidates, assuming each close succeeds.
+#[cfg(test)]
+fn plan_parent_epic_autoclose_order(
+    closed_bead_id: &str,
+    hierarchy: &OpenEpicHierarchy,
+) -> Vec<String> {
+    let mut order = Vec::new();
+    let mut open_ids = hierarchy.open_ids.clone();
+    let mut stack = vec![closed_bead_id.to_string()];
+
+    while let Some(child_id) = stack.pop() {
+        let parents = hierarchy
+            .child_parents
+            .get(&child_id)
+            .cloned()
+            .unwrap_or_default();
+
+        for parent_id in parents {
+            if !open_ids.contains(&parent_id) {
+                continue;
+            }
+
+            let has_open_children = hierarchy
+                .parent_children
+                .get(&parent_id)
+                .map(|children| children.iter().any(|c| open_ids.contains(c)))
+                .unwrap_or(false);
+            if has_open_children {
+                continue;
+            }
+
+            open_ids.remove(&parent_id);
+            order.push(parent_id.clone());
+            stack.push(parent_id);
+        }
+    }
+
+    order
+}
+
+/// Auto-close an epic whose children are complete. Returns true when close succeeds.
+fn close_epic_when_children_complete(epic_id: &str) -> bool {
+    let reason = "all children completed";
+    match std::process::Command::new("bd")
+        .args(["close", epic_id, &format!("--reason={reason}")])
+        .output()
+    {
+        Ok(out) if out.status.success() => {
+            tracing::info!(bead_id = epic_id, reason, "auto-closed parent epic");
+        }
+        Ok(out) => {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            tracing::warn!(
+                bead_id = epic_id,
+                reason,
+                stderr = %stderr.trim(),
+                "failed to auto-close parent epic"
+            );
+            return false;
+        }
+        Err(e) => {
+            tracing::warn!(
+                bead_id = epic_id,
+                reason,
+                error = %e,
+                "failed to run bd close for parent epic"
+            );
+            return false;
+        }
+    }
+
+    match std::process::Command::new("bd").args(["sync"]).output() {
+        Ok(out) if out.status.success() => {
+            tracing::info!(bead_id = epic_id, "bd sync succeeded after epic auto-close");
+        }
+        Ok(out) => {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            tracing::warn!(
+                bead_id = epic_id,
+                stderr = %stderr.trim(),
+                "bd sync failed after epic auto-close"
+            );
+        }
+        Err(e) => {
+            tracing::warn!(
+                bead_id = epic_id,
+                error = %e,
+                "failed to run bd sync after epic auto-close"
+            );
+        }
+    }
+
+    true
 }
 
 /// Recover orphaned in_progress beads on coordinator startup.
@@ -1581,6 +1825,51 @@ mod tests {
         assert_eq!(result.ready.len(), 2);
         assert!(result.ready.iter().any(|b| b.id == "epic-1"));
         assert!(result.ready.iter().any(|b| b.id == "task-1"));
+    }
+
+    #[test]
+    fn test_parse_open_epic_hierarchy_extracts_parent_child_edges() {
+        let json = r#"[
+            {"id": "epic-1", "issue_type": "epic", "dependencies": [{"depends_on_id": "task-1", "type": "parent-child"}]},
+            {"id": "epic-2", "issue_type": "epic", "dependencies": [{"id": "epic-1", "dependency_type": "parent-child"}]},
+            {"id": "task-1", "issue_type": "task", "dependencies": []}
+        ]"#;
+
+        let hierarchy = parse_open_epic_hierarchy(json);
+        assert!(hierarchy.open_ids.contains("epic-1"));
+        assert!(hierarchy.open_ids.contains("epic-2"));
+        assert!(hierarchy.open_ids.contains("task-1"));
+        assert_eq!(hierarchy.parent_children["epic-1"], vec!["task-1"]);
+        assert_eq!(hierarchy.parent_children["epic-2"], vec!["epic-1"]);
+        assert_eq!(hierarchy.child_parents["task-1"], vec!["epic-1"]);
+        assert_eq!(hierarchy.child_parents["epic-1"], vec!["epic-2"]);
+    }
+
+    #[test]
+    fn test_plan_parent_epic_autoclose_order_chains_upward() {
+        let json = r#"[
+            {"id": "epic-parent", "issue_type": "epic", "dependencies": [{"depends_on_id": "epic-child", "type": "parent-child"}]},
+            {"id": "epic-child", "issue_type": "epic", "dependencies": [{"depends_on_id": "task-closed", "type": "parent-child"}]}
+        ]"#;
+
+        let hierarchy = parse_open_epic_hierarchy(json);
+        let order = plan_parent_epic_autoclose_order("task-closed", &hierarchy);
+        assert_eq!(order, vec!["epic-child", "epic-parent"]);
+    }
+
+    #[test]
+    fn test_plan_parent_epic_autoclose_order_requires_all_children_closed() {
+        let json = r#"[
+            {"id": "epic-1", "issue_type": "epic", "dependencies": [
+                {"depends_on_id": "task-closed", "type": "parent-child"},
+                {"depends_on_id": "task-open", "type": "parent-child"}
+            ]},
+            {"id": "task-open", "issue_type": "task", "dependencies": []}
+        ]"#;
+
+        let hierarchy = parse_open_epic_hierarchy(json);
+        let order = plan_parent_epic_autoclose_order("task-closed", &hierarchy);
+        assert!(order.is_empty());
     }
 
     #[test]
