@@ -79,27 +79,27 @@ pub fn generate_config_toml(
 
     let (check, test, lint, format) = match project_type {
         ProjectType::Rust => (
-            "\"cargo check --release\"",
-            "\"cargo test --release\"",
-            "\"cargo clippy --fix --allow-dirty\"",
-            "\"cargo fmt --check\"",
+            "[\"cargo check --release\"]",
+            "[\"cargo test --release\"]",
+            "[\"cargo clippy --fix --allow-dirty\"]",
+            "[\"cargo fmt --check\"]",
         ),
         ProjectType::Node => (
-            "\"npm run build\"",
-            "\"npm test\"",
-            "\"npm run lint\"",
+            "[\"npm run build\"]",
+            "[\"npm test\"]",
+            "[\"npm run lint\"]",
             "[]",
         ),
         ProjectType::Python => (
             "[]",
-            "\"pytest\"",
-            "\"ruff check .\"",
-            "\"ruff format --check .\"",
+            "[\"pytest\"]",
+            "[\"ruff check .\"]",
+            "[\"ruff format --check .\"]",
         ),
         ProjectType::Go => (
-            "\"go build ./...\"",
-            "\"go test ./...\"",
-            "\"golangci-lint run\"",
+            "[\"go build ./...\"]",
+            "[\"go test ./...\"]",
+            "[\"golangci-lint run\"]",
             "[]",
         ),
         ProjectType::Unknown => ("[]", "[]", "[]", "[]"),
@@ -692,10 +692,10 @@ mod tests {
         assert!(toml.contains("\"--dangerously-skip-permissions\""));
         assert!(toml.contains("\"--verbose\""));
         assert!(toml.contains("prompt_via = \"arg\""));
-        assert!(toml.contains("check = \"cargo check --release\""));
-        assert!(toml.contains("test = \"cargo test --release\""));
-        assert!(toml.contains("lint = \"cargo clippy --fix --allow-dirty\""));
-        assert!(toml.contains("format = \"cargo fmt --check\""));
+        assert!(toml.contains("check = [\"cargo check --release\"]"));
+        assert!(toml.contains("test = [\"cargo test --release\"]"));
+        assert!(toml.contains("lint = [\"cargo clippy --fix --allow-dirty\"]"));
+        assert!(toml.contains("format = [\"cargo fmt --check\"]"));
         assert!(toml.contains("[workers]"));
         assert!(toml.contains("max = 1"));
     }
@@ -708,9 +708,9 @@ mod tests {
             .unwrap();
         let cmds = default_commands(&ProjectType::Node);
         let toml = generate_config_toml(&ProjectType::Node, &agent, &cmds);
-        assert!(toml.contains("check = \"npm run build\""));
-        assert!(toml.contains("test = \"npm test\""));
-        assert!(toml.contains("lint = \"npm run lint\""));
+        assert!(toml.contains("check = [\"npm run build\"]"));
+        assert!(toml.contains("test = [\"npm test\"]"));
+        assert!(toml.contains("lint = [\"npm run lint\"]"));
         assert!(toml.contains("format = []"));
     }
 
