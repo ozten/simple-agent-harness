@@ -107,7 +107,7 @@ Full documentation lives in [`docs/`](docs/README.md):
 
 ```bash
 # Build from source
-cargo build --release
+cargo build --release --workspace
 
 # Run tests
 cargo test
