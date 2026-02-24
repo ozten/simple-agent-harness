@@ -2,6 +2,13 @@
 
 ## CRITICAL: Execution Efficiency Rules (MUST FOLLOW)
 
+### Session mode check (run before Rule A/B/C)
+Before applying the coding-bead workflow below, determine whether this session is an analysis/bookkeeping/meta-process task (for example: prompt tuning, reviewing metrics, documenting process changes, or other non-code implementation work).
+
+If the session is analysis/bookkeeping/meta-process and code implementation is NOT explicitly requested, skip coding-session Task Selection/Execution Protocol requirements (including `bd ready`, task claiming, quality gates, and `blacksmith finish`). Use only the commands needed to inspect evidence and record process artifacts for the requested analysis.
+
+If the session includes code implementation (or explicitly asks you to work a bead), follow the full Rule A/B/C + Task Selection + Execution Protocol workflow.
+
 These two rules are NON-NEGOTIABLE. Violating them wastes 25-35% of your turn budget.
 
 ### Rule A: ALWAYS batch independent tool calls in the SAME turn.
