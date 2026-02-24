@@ -134,7 +134,11 @@ fn parse_markdown_affected_files(design: &str) -> Option<Vec<String>> {
         }
     }
 
-    if paths.is_empty() { None } else { Some(paths) }
+    if paths.is_empty() {
+        None
+    } else {
+        Some(paths)
+    }
 }
 
 fn is_markdown_heading(line: &str) -> bool {
@@ -351,7 +355,8 @@ mod tests {
 
     #[test]
     fn parse_markdown_affected_files_fallback() {
-        let design = "Task details\n\n## Affected files\n- src/scheduler.rs (modified)\n- Cargo.toml\n";
+        let design =
+            "Task details\n\n## Affected files\n- src/scheduler.rs (modified)\n- Cargo.toml\n";
         let result = parse_affected_set(design).unwrap();
         assert_eq!(result, vec!["src/scheduler.rs", "Cargo.toml"]);
     }
