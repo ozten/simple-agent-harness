@@ -14,7 +14,9 @@ use crate::defaults;
 use crate::estimation::{self, BeadNode};
 use crate::improve;
 use crate::ingest;
-use crate::integrator::{close_bead_in_bd, CircuitBreaker, IntegrationQueue, TrippedFailure};
+use crate::integrator::{
+    close_bead_in_bd, CircuitBreaker, IntegrationQueue, TrippedFailure, ValidationCircuitBreaker,
+};
 use crate::pool::{PoolError, SessionOutcome, WorkerPool};
 use crate::prompt;
 use crate::ratelimit;
@@ -115,6 +117,8 @@ pub async fn run(
         IntegrationQueue::new(repo_dir.clone(), config.workers.base_branch.clone())
             .with_speck_validate(config.speck_validate.clone());
     let mut circuit_breaker = CircuitBreaker::new();
+    let mut validation_circuit_breaker =
+        ValidationCircuitBreaker::new(config.speck_validate.max_validation_retries);
 
     // Ensure output directory exists
     if let Err(e) = std::fs::create_dir_all(&output_dir) {
@@ -433,6 +437,7 @@ pub async fn run(
                         &db_conn,
                         Some(&resolved_integration),
                         &mut circuit_breaker,
+                        &mut validation_circuit_breaker,
                     );
 
                     if result.success {
@@ -481,11 +486,21 @@ pub async fn run(
                         let error_summary =
                             result.failure_reason.as_deref().unwrap_or("unknown error");
 
-                        // Check if the circuit breaker has tripped (integrate() already recorded attempts)
-                        if let Some(tripped) =
+                        // Check if the validation circuit breaker has tripped first
+                        // (integrate() already recorded validation attempts)
+                        if let Some(tripped) = validation_circuit_breaker.check_tripped(
+                            &bead_id,
+                            error_summary,
+                            &worktree_path,
+                        ) {
+                            // Validation retries exhausted — escalate to human review
+                            failed_beads += 1;
+                            handle_tripped_failure(&tripped);
+                            // Do NOT reset the worker — worktree is preserved for inspection
+                        } else if let Some(tripped) =
                             circuit_breaker.check_tripped(&bead_id, error_summary, &worktree_path)
                         {
-                            // Circuit breaker tripped — escalate to human review
+                            // Integration circuit breaker tripped — escalate to human review
                             failed_beads += 1;
                             handle_tripped_failure(&tripped);
                             // Do NOT reset the worker — worktree is preserved for inspection

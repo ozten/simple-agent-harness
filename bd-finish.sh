@@ -38,27 +38,47 @@ FILES=("$@")
 echo -e "${GREEN}=== bd-finish: closing ${BEAD_ID} ===${NC}"
 
 # 0a. Cargo check gate — abort if code doesn't compile
-echo -e "${YELLOW}[0a/8] Running cargo check...${NC}"
+echo -e "${YELLOW}[0a] Running cargo check...${NC}"
 if ! cargo check --release 2>&1; then
   echo ""
   echo -e "${RED}=== CARGO CHECK FAILED ===${NC}"
   echo -e "${RED}Bead ${BEAD_ID} will NOT be closed. Fix compilation errors first.${NC}"
   exit 1
 fi
-echo -e "${GREEN}[0a/8] cargo check passed${NC}"
+echo -e "${GREEN}[0a] cargo check passed${NC}"
 
 # 0b. Cargo test gate — abort if tests fail
-echo -e "${YELLOW}[0b/8] Running cargo test...${NC}"
+echo -e "${YELLOW}[0b] Running cargo test...${NC}"
 if ! cargo test --release 2>&1; then
   echo ""
   echo -e "${RED}=== CARGO TEST FAILED ===${NC}"
   echo -e "${RED}Bead ${BEAD_ID} will NOT be closed. Fix failing tests first.${NC}"
   exit 1
 fi
-echo -e "${GREEN}[0b/8] cargo test passed${NC}"
+echo -e "${GREEN}[0b] cargo test passed${NC}"
 
-# 0c. Verify bead deliverables — check affected files exist, run verify commands
-echo -e "${YELLOW}[0c/8] Verifying bead deliverables...${NC}"
+# 0c. Lint gate
+echo -e "${YELLOW}[0c] Running lint gate...${NC}"
+if ! cargo clippy --fix --allow-dirty 2>&1; then
+  echo ""
+  echo -e "${RED}=== LINT GATE FAILED ===${NC}"
+  echo -e "${RED}Bead ${BEAD_ID} will NOT be closed. Fix lint errors first.${NC}"
+  exit 1
+fi
+echo -e "${GREEN}[0c] Lint gate passed${NC}"
+
+# 0d. Format gate
+echo -e "${YELLOW}[0d] Running format gate...${NC}"
+if ! cargo fmt --check 2>&1; then
+  echo ""
+  echo -e "${RED}=== FORMAT GATE FAILED ===${NC}"
+  echo -e "${RED}Bead ${BEAD_ID} will NOT be closed. Fix formatting errors first.${NC}"
+  exit 1
+fi
+echo -e "${GREEN}[0d] Format gate passed${NC}"
+
+# 0e. Verify bead deliverables — check affected files exist, run verify commands
+echo -e "${YELLOW}[0e] Verifying bead deliverables...${NC}"
 VERIFY_FAILED=0
 
 # Extract bead description via bd show --json
@@ -137,53 +157,53 @@ if [ "$VERIFY_FAILED" -eq 1 ]; then
   echo -e "${RED}  bd update ${BEAD_ID} --description=\"...\"${NC}"
   exit 1
 fi
-echo -e "${GREEN}[0c/8] Bead deliverable verification passed${NC}"
+echo -e "${GREEN}[0e] Bead deliverable verification passed${NC}"
 
 # 1. Append PROGRESS.txt to PROGRESS_LOG.txt with timestamp
 if [ -f PROGRESS.txt ]; then
   echo "" >> PROGRESS_LOG.txt
   echo "--- $(date '+%Y-%m-%d %H:%M:%S') | ${BEAD_ID} ---" >> PROGRESS_LOG.txt
   cat PROGRESS.txt >> PROGRESS_LOG.txt
-  echo -e "${GREEN}[1/8] Appended PROGRESS.txt to PROGRESS_LOG.txt${NC}"
+  echo -e "${GREEN}[1] Appended PROGRESS.txt to PROGRESS_LOG.txt${NC}"
 else
-  echo -e "${YELLOW}[1/8] No PROGRESS.txt found, skipping log append${NC}"
+  echo -e "${YELLOW}[1] No PROGRESS.txt found, skipping log append${NC}"
 fi
 
 # 2. Stage files
 if [ ${#FILES[@]} -gt 0 ]; then
   git add "${FILES[@]}"
-  echo -e "${GREEN}[2/8] Staged ${#FILES[@]} specified files${NC}"
+  echo -e "${GREEN}[2] Staged ${#FILES[@]} specified files${NC}"
 else
   git add -u
-  echo -e "${GREEN}[2/8] Staged all tracked modified files (git add -u)${NC}"
+  echo -e "${GREEN}[2] Staged all tracked modified files (git add -u)${NC}"
 fi
 # Always include the progress files if they exist
 git add -f PROGRESS.txt PROGRESS_LOG.txt 2>/dev/null || true
 
 # 3. Commit
 git commit -m "${BEAD_ID}: ${COMMIT_MSG}" --no-verify
-echo -e "${GREEN}[3/8] Committed: ${BEAD_ID}: ${COMMIT_MSG}${NC}"
+echo -e "${GREEN}[3] Committed: ${BEAD_ID}: ${COMMIT_MSG}${NC}"
 
 # 4. bd close
 bd close "$BEAD_ID" --reason="$COMMIT_MSG"
-echo -e "${GREEN}[4/8] Closed bead ${BEAD_ID}${NC}"
+echo -e "${GREEN}[4] Closed bead ${BEAD_ID}${NC}"
 
 # 5. bd sync
 bd sync 2>/dev/null || true
-echo -e "${GREEN}[5/8] Synced beads${NC}"
+echo -e "${GREEN}[5] Synced beads${NC}"
 
 # 6. Auto-commit .beads/ if dirty
 if ! git diff --quiet .beads/ 2>/dev/null || ! git diff --cached --quiet .beads/ 2>/dev/null; then
   git add .beads/
   git commit -m "bd sync: $(date '+%Y-%m-%d %H:%M:%S')" --no-verify
-  echo -e "${GREEN}[6/8] Committed .beads/ changes${NC}"
+  echo -e "${GREEN}[6] Committed .beads/ changes${NC}"
 else
-  echo -e "${GREEN}[6/8] .beads/ already clean${NC}"
+  echo -e "${GREEN}[6] .beads/ already clean${NC}"
 fi
 
 # 7. Push
 git push
-echo -e "${GREEN}[7/8] Pushed to remote${NC}"
+echo -e "${GREEN}[7] Pushed to remote${NC}"
 
 echo ""
 echo -e "${GREEN}=== Done. ${BEAD_ID} closed and pushed. ===${NC}"

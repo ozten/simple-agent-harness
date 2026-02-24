@@ -281,12 +281,16 @@ fn looks_like_prose(cmd: &str) -> bool {
 }
 
 /// Run the full finish protocol:
-/// 1. Quality gates (check, test, lint, format)
-/// 2. Deliverable verification
-/// 3. Stage files + git commit
-/// 4. bd close + bd sync
-/// 5. Auto-commit .beads/ changes
-/// 6. git push
+/// 0a. Check gate (compilation)
+/// 0b. Test gate
+/// 0c. Lint gate (e.g. clippy --fix)
+/// 0d. Format gate (e.g. fmt --check)
+/// 0e. Deliverable verification
+/// 1. Append PROGRESS.txt to log
+/// 2. Stage files + git commit
+/// 3. bd close + bd sync
+/// 4. Auto-commit .beads/ changes
+/// 5. git push
 pub fn handle_finish(
     bead_id: &str,
     commit_msg: &str,
@@ -330,8 +334,36 @@ pub fn handle_finish(
     }
     eprintln!("[0b] Test gate passed\n");
 
-    // 0c. Deliverable verification
-    eprintln!("[0c] Verifying bead deliverables...");
+    // 0c. Lint gate
+    if !gates_config.lint.is_empty() {
+        eprintln!("[0c] Running lint gate...");
+        if let Err(e) = run_gate("lint", &gates_config.lint, &working_dir) {
+            eprintln!("\n=== LINT GATE FAILED ===");
+            eprintln!("Bead {bead_id} will NOT be closed. Fix lint errors first.");
+            return FinishResult {
+                success: false,
+                message: e,
+            };
+        }
+        eprintln!("[0c] Lint gate passed\n");
+    }
+
+    // 0d. Format gate
+    if !gates_config.format.is_empty() {
+        eprintln!("[0d] Running format gate...");
+        if let Err(e) = run_gate("format", &gates_config.format, &working_dir) {
+            eprintln!("\n=== FORMAT GATE FAILED ===");
+            eprintln!("Bead {bead_id} will NOT be closed. Fix formatting errors first.");
+            return FinishResult {
+                success: false,
+                message: e,
+            };
+        }
+        eprintln!("[0d] Format gate passed\n");
+    }
+
+    // 0e. Deliverable verification
+    eprintln!("[0e] Verifying bead deliverables...");
     if let Err(e) = verify_deliverables(bead_id, &working_dir) {
         eprintln!("\n=== DELIVERABLE VERIFICATION FAILED ===");
         eprintln!("Bead {bead_id} will NOT be closed.");
@@ -340,7 +372,7 @@ pub fn handle_finish(
             message: e,
         };
     }
-    eprintln!("[0c] Deliverable verification passed\n");
+    eprintln!("[0e] Deliverable verification passed\n");
 
     // --- Step 1: Append PROGRESS.txt to PROGRESS_LOG.txt ---
     let progress_path = working_dir.join("PROGRESS.txt");
@@ -721,5 +753,49 @@ mod tests {
         let result = handle_finish("test-bead", "test message", &[], &gates);
         assert!(!result.success);
         assert!(result.message.contains("test gate failed"));
+    }
+
+    #[test]
+    fn test_handle_finish_lint_gate_failure() {
+        let gates = QualityGatesConfig {
+            check: vec!["true".to_string()],
+            test: vec!["true".to_string()],
+            lint: vec!["exit 1".to_string()],
+            format: vec![],
+        };
+        let result = handle_finish("test-bead", "test message", &[], &gates);
+        assert!(!result.success);
+        assert!(result.message.contains("lint gate failed"));
+    }
+
+    #[test]
+    fn test_handle_finish_format_gate_failure() {
+        let gates = QualityGatesConfig {
+            check: vec!["true".to_string()],
+            test: vec!["true".to_string()],
+            lint: vec!["true".to_string()],
+            format: vec!["exit 1".to_string()],
+        };
+        let result = handle_finish("test-bead", "test message", &[], &gates);
+        assert!(!result.success);
+        assert!(result.message.contains("format gate failed"));
+    }
+
+    #[test]
+    fn test_handle_finish_skips_empty_lint_format_gates() {
+        // When lint/format are empty, they should be skipped (not fail)
+        // The finish will fail later at git operations, but not at gates
+        let gates = QualityGatesConfig {
+            check: vec!["true".to_string()],
+            test: vec!["true".to_string()],
+            lint: vec![],
+            format: vec![],
+        };
+        let result = handle_finish("test-bead", "test message", &[], &gates);
+        // Will fail at deliverable verification or git, but NOT at lint/format gates
+        assert!(
+            !result.message.contains("lint gate failed")
+                && !result.message.contains("format gate failed")
+        );
     }
 }

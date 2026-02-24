@@ -745,10 +745,22 @@ impl Default for QualityGatesConfig {
 /// integration and stores check details in the DB.
 #[derive(Debug, Deserialize, Clone)]
 #[serde(default)]
-#[derive(Default)]
 pub struct SpeckValidateConfig {
     /// Enable speck validate as a pre-integration quality gate. Default: false.
     pub enabled: bool,
+    /// Maximum number of agent retry attempts after a speck validation failure.
+    /// Each retry re-spawns the coding agent with failure context in the prompt.
+    /// Default: 2.
+    pub max_validation_retries: u32,
+}
+
+impl Default for SpeckValidateConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_validation_retries: 2,
+        }
+    }
 }
 
 /// Configuration for the self-improvement promotion cycle.

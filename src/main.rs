@@ -583,6 +583,7 @@ fn handle_integration_retry(
 
     let queue = integrator::IntegrationQueue::new(repo_dir, base_branch);
     let mut cb = integrator::CircuitBreaker::new();
+    let mut vcb = integrator::ValidationCircuitBreaker::new(2);
 
     let result = queue.integrate(
         assignment.worker_id as u32,
@@ -592,6 +593,7 @@ fn handle_integration_retry(
         &conn,
         agent_config.as_ref(),
         &mut cb,
+        &mut vcb,
     );
 
     if result.success {

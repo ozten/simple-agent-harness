@@ -178,6 +178,81 @@ impl CircuitBreaker {
     }
 }
 
+/// Circuit breaker for speck validation retries. Tracks per-bead validation
+/// attempt counts independently from the integration circuit breaker.
+///
+/// After `max_retries` failures the breaker trips and the bead is escalated
+/// to human review without resetting or retrying further.
+#[derive(Debug)]
+pub struct ValidationCircuitBreaker {
+    attempts: HashMap<String, u32>,
+    max_retries: u32,
+}
+
+impl ValidationCircuitBreaker {
+    pub fn new(max_retries: u32) -> Self {
+        Self {
+            attempts: HashMap::new(),
+            max_retries,
+        }
+    }
+
+    /// Get the current circuit state for a bead.
+    ///
+    /// Trips when attempts exceed `max_retries` (so `max_retries` spawns are
+    /// possible before the breaker trips on the next failure).
+    pub fn state(&self, bead_id: &str) -> CircuitState {
+        match self.attempts.get(bead_id).copied() {
+            None | Some(0) => CircuitState::Closed,
+            Some(n) if n > self.max_retries => CircuitState::Tripped { attempts: n },
+            Some(n) => CircuitState::Retrying { attempt: n },
+        }
+    }
+
+    /// Record a failed validation attempt for a bead. Returns the new state.
+    pub fn record_attempt(&mut self, bead_id: &str) -> CircuitState {
+        let count = self.attempts.entry(bead_id.to_string()).or_insert(0);
+        *count += 1;
+        tracing::info!(
+            bead_id,
+            attempt = *count,
+            max = self.max_retries,
+            "validation circuit breaker: recorded attempt"
+        );
+        self.state(bead_id)
+    }
+
+    /// Reset the validation circuit breaker for a bead (e.g., after successful integration).
+    pub fn reset(&mut self, bead_id: &str) {
+        self.attempts.remove(bead_id);
+    }
+
+    /// Get attempt count for a bead.
+    pub fn attempt_count(&self, bead_id: &str) -> u32 {
+        self.attempts.get(bead_id).copied().unwrap_or(0)
+    }
+
+    /// Check if a bead's validation circuit breaker has tripped and build escalation info.
+    ///
+    /// Returns `Some(TrippedFailure)` if the breaker is tripped, `None` otherwise.
+    pub fn check_tripped(
+        &self,
+        bead_id: &str,
+        error_summary: &str,
+        worktree_path: &Path,
+    ) -> Option<TrippedFailure> {
+        match self.state(bead_id) {
+            CircuitState::Tripped { attempts } => Some(TrippedFailure {
+                bead_id: bead_id.to_string(),
+                error_summary: error_summary.to_string(),
+                worktree_path: worktree_path.to_path_buf(),
+                attempts,
+            }),
+            _ => None,
+        }
+    }
+}
+
 /// Tracks successful integrations and triggers periodic reconciliation.
 ///
 /// After every N successful integrations (configurable via `reconciliation.every`),
@@ -551,6 +626,7 @@ impl IntegrationQueue {
         db_conn: &Connection,
         integration_agent: Option<&ResolvedAgentConfig>,
         circuit_breaker: &mut CircuitBreaker,
+        validation_circuit_breaker: &mut ValidationCircuitBreaker,
     ) -> IntegrationResult {
         tracing::info!(
             worker_id,
@@ -710,32 +786,119 @@ impl IntegrationQueue {
             }
         }
 
-        // Step 4a: speck validate gate (if enabled)
+        // Step 4a: speck validate gate with retry loop (if enabled)
+        //
+        // On failure, re-spawn the agent with the validation failure details up to
+        // `max_validation_retries` times. After that, the validation circuit breaker
+        // trips and the bead is returned as failed for human-review escalation.
         if self.speck_validate.enabled {
-            match self.run_speck_validate(bead_id, worktree_path) {
-                SpeckValidateOutcome::Passed => {
-                    tracing::info!(worker_id, bead_id, "speck validate passed");
-                }
-                SpeckValidateOutcome::Failed { notes } => {
-                    tracing::warn!(
-                        worker_id,
-                        bead_id,
-                        notes = %notes,
-                        "speck validate failed"
-                    );
-                    let reason = format!("speck validate failed: {notes}");
-                    self.record_failure(assignment_id, db_conn, &reason);
-                    return IntegrationResult {
-                        worker_id,
-                        assignment_id,
-                        bead_id: bead_id.to_string(),
-                        success: false,
-                        merge_commit: None,
-                        failure_reason: Some(reason),
-                    };
-                }
-                SpeckValidateOutcome::Skipped { reason } => {
-                    tracing::warn!(worker_id, bead_id, reason = %reason, "speck validate skipped");
+            loop {
+                match self.run_speck_validate(bead_id, worktree_path) {
+                    SpeckValidateOutcome::Passed => {
+                        tracing::info!(worker_id, bead_id, "speck validate passed");
+                        break;
+                    }
+                    SpeckValidateOutcome::Failed { notes } => {
+                        tracing::warn!(
+                            worker_id,
+                            bead_id,
+                            notes = %notes,
+                            state = %validation_circuit_breaker.state(bead_id),
+                            "speck validate failed"
+                        );
+
+                        // Record the validation attempt
+                        let state = validation_circuit_breaker.record_attempt(bead_id);
+                        if state.is_tripped() {
+                            let reason = format!(
+                                "speck validate failed after {} attempts: {}",
+                                state.attempt_count(),
+                                notes
+                            );
+                            tracing::warn!(
+                                worker_id,
+                                bead_id,
+                                attempts = state.attempt_count(),
+                                "speck validate: validation retries exhausted"
+                            );
+                            self.record_failure(assignment_id, db_conn, &reason);
+                            return IntegrationResult {
+                                worker_id,
+                                assignment_id,
+                                bead_id: bead_id.to_string(),
+                                success: false,
+                                merge_commit: None,
+                                failure_reason: Some(reason),
+                            };
+                        }
+
+                        // Spawn agent to fix validation failures
+                        if let Some(agent_config) = integration_agent {
+                            let fix_prompt = format!(
+                                "Previous attempt failed speck validation: {notes}. \
+                                 Fix the issues and try again."
+                            );
+                            match self.spawn_integration_agent_sync(
+                                agent_config,
+                                worktree_path,
+                                &fix_prompt,
+                            ) {
+                                Ok(exit_code) => {
+                                    if exit_code != Some(0) {
+                                        tracing::warn!(
+                                            worker_id,
+                                            bead_id,
+                                            exit_code = ?exit_code,
+                                            "validation fix agent exited with non-zero status"
+                                        );
+                                    }
+                                    // Loop back to re-check with speck validate
+                                }
+                                Err(e) => {
+                                    let reason =
+                                        format!("failed to spawn validation fix agent: {e}");
+                                    tracing::error!(
+                                        worker_id,
+                                        bead_id,
+                                        error = %e,
+                                        "validation fix agent spawn failed"
+                                    );
+                                    self.record_failure(assignment_id, db_conn, &reason);
+                                    return IntegrationResult {
+                                        worker_id,
+                                        assignment_id,
+                                        bead_id: bead_id.to_string(),
+                                        success: false,
+                                        merge_commit: None,
+                                        failure_reason: Some(reason),
+                                    };
+                                }
+                            }
+                        } else {
+                            // No agent available — cannot retry, return failure immediately
+                            let reason = format!(
+                                "speck validate failed (no agent available to retry): {notes}"
+                            );
+                            self.record_failure(assignment_id, db_conn, &reason);
+                            return IntegrationResult {
+                                worker_id,
+                                assignment_id,
+                                bead_id: bead_id.to_string(),
+                                success: false,
+                                merge_commit: None,
+                                failure_reason: Some(reason),
+                            };
+                        }
+                    }
+                    SpeckValidateOutcome::Skipped { reason } => {
+                        tracing::warn!(
+                            worker_id,
+                            bead_id,
+                            reason = %reason,
+                            "speck validate skipped"
+                        );
+                        break;
+                    }
                 }
             }
         }
@@ -843,8 +1006,9 @@ impl IntegrationQueue {
             tracing::warn!(error = %e, "failed to update assignment status to integrated");
         }
 
-        // Reset circuit breaker on success
+        // Reset circuit breakers on success
         circuit_breaker.reset(bead_id);
+        validation_circuit_breaker.reset(bead_id);
 
         // Step 8: Clean up the worktree
         if let Err(e) = worktree::remove(&self.repo_dir, worktree_path) {
@@ -1722,6 +1886,7 @@ mod tests {
 
         let queue = IntegrationQueue::new(repo_dir.to_path_buf(), "main".to_string());
         let mut cb = CircuitBreaker::new();
+        let mut vcb = ValidationCircuitBreaker::new(2);
         let result = queue.integrate(
             0,
             assignment_id,
@@ -1730,6 +1895,7 @@ mod tests {
             &conn,
             None,
             &mut cb,
+            &mut vcb,
         );
 
         assert!(
@@ -1819,6 +1985,7 @@ mod tests {
 
         let queue = IntegrationQueue::new(repo_dir.to_path_buf(), "main".to_string());
         let mut cb = CircuitBreaker::new();
+        let mut vcb = ValidationCircuitBreaker::new(2);
         let result = queue.integrate(
             0,
             assignment_id,
@@ -1827,6 +1994,7 @@ mod tests {
             &conn,
             None,
             &mut cb,
+            &mut vcb,
         );
 
         assert!(!result.success, "integration should fail due to conflict");
@@ -1866,6 +2034,7 @@ mod tests {
 
         let queue = IntegrationQueue::new(repo_dir.to_path_buf(), "main".to_string());
         let mut cb = CircuitBreaker::new();
+        let mut vcb = ValidationCircuitBreaker::new(2);
         let result = queue.integrate(
             0,
             assignment_id,
@@ -1874,6 +2043,7 @@ mod tests {
             &conn,
             None,
             &mut cb,
+            &mut vcb,
         );
 
         assert!(
@@ -1966,6 +2136,7 @@ mod tests {
     #[test]
     fn test_circuit_state_retrying_after_one_attempt() {
         let mut cb = CircuitBreaker::new();
+        let mut vcb = ValidationCircuitBreaker::new(2);
         let state = cb.record_attempt("beads-abc");
         assert_eq!(state, CircuitState::Retrying { attempt: 1 });
         assert!(state.can_retry());
@@ -1976,6 +2147,7 @@ mod tests {
     #[test]
     fn test_circuit_state_retrying_after_two_attempts() {
         let mut cb = CircuitBreaker::new();
+        let mut vcb = ValidationCircuitBreaker::new(2);
         cb.record_attempt("beads-abc");
         let state = cb.record_attempt("beads-abc");
         assert_eq!(state, CircuitState::Retrying { attempt: 2 });
@@ -1987,6 +2159,7 @@ mod tests {
     #[test]
     fn test_circuit_state_tripped_after_max_attempts() {
         let mut cb = CircuitBreaker::new();
+        let mut vcb = ValidationCircuitBreaker::new(2);
         cb.record_attempt("beads-abc");
         cb.record_attempt("beads-abc");
         let state = cb.record_attempt("beads-abc");
@@ -1999,6 +2172,7 @@ mod tests {
     #[test]
     fn test_circuit_breaker_reset() {
         let mut cb = CircuitBreaker::new();
+        let mut vcb = ValidationCircuitBreaker::new(2);
         cb.record_attempt("beads-abc");
         cb.record_attempt("beads-abc");
         cb.reset("beads-abc");
@@ -2010,6 +2184,7 @@ mod tests {
     #[test]
     fn test_circuit_breaker_independent_beads() {
         let mut cb = CircuitBreaker::new();
+        let mut vcb = ValidationCircuitBreaker::new(2);
         cb.record_attempt("beads-abc");
         cb.record_attempt("beads-abc");
         cb.record_attempt("beads-def");
@@ -2023,6 +2198,7 @@ mod tests {
     #[test]
     fn test_circuit_breaker_exceeds_max() {
         let mut cb = CircuitBreaker::new();
+        let mut vcb = ValidationCircuitBreaker::new(2);
         for _ in 0..5 {
             cb.record_attempt("beads-abc");
         }
@@ -2055,6 +2231,7 @@ mod tests {
     #[test]
     fn test_check_tripped_returns_none_when_not_tripped() {
         let mut cb = CircuitBreaker::new();
+        let mut vcb = ValidationCircuitBreaker::new(2);
         cb.record_attempt("beads-abc");
         let result = cb.check_tripped("beads-abc", "some error", Path::new("/tmp/wt"));
         assert!(result.is_none(), "should not be tripped after 1 attempt");
@@ -2070,6 +2247,7 @@ mod tests {
     #[test]
     fn test_check_tripped_returns_some_when_tripped() {
         let mut cb = CircuitBreaker::new();
+        let mut vcb = ValidationCircuitBreaker::new(2);
         for _ in 0..MAX_INTEGRATION_ATTEMPTS {
             cb.record_attempt("beads-abc");
         }
@@ -2279,6 +2457,7 @@ edition = "2021"
 
         let queue = IntegrationQueue::new(repo_dir.to_path_buf(), "main".to_string());
         let mut cb = CircuitBreaker::new();
+        let mut vcb = ValidationCircuitBreaker::new(2);
         let result = queue.integrate(
             0,
             assignment_id,
@@ -2287,6 +2466,7 @@ edition = "2021"
             &conn,
             None,
             &mut cb,
+            &mut vcb,
         );
 
         assert!(
@@ -2485,6 +2665,7 @@ mod tests {
 
         let queue = IntegrationQueue::new(repo_dir.to_path_buf(), "main".to_string());
         let mut cb = CircuitBreaker::new();
+        let mut vcb = ValidationCircuitBreaker::new(2);
         let result = queue.integrate(
             0,
             assignment_id,
@@ -2493,6 +2674,7 @@ mod tests {
             &conn,
             Some(&agent),
             &mut cb,
+            &mut vcb,
         );
 
         assert!(
@@ -2524,7 +2706,17 @@ mod tests {
 
         let queue = IntegrationQueue::new(repo_dir.to_path_buf(), "main".to_string());
         let mut cb = CircuitBreaker::new();
-        let result = queue.integrate(0, assignment_id, "beads-rb", &wt_path, &conn, None, &mut cb);
+        let mut vcb = ValidationCircuitBreaker::new(2);
+        let result = queue.integrate(
+            0,
+            assignment_id,
+            "beads-rb",
+            &wt_path,
+            &conn,
+            None,
+            &mut cb,
+            &mut vcb,
+        );
         assert!(result.success);
         let merge_commit = result.merge_commit.unwrap();
 
@@ -2614,7 +2806,10 @@ mod tests {
 
         let queue = IntegrationQueue::new(repo_dir.to_path_buf(), "main".to_string());
         let mut cb = CircuitBreaker::new();
-        let result = queue.integrate(0, aid_a, "beads-a", &wt_path, &conn, None, &mut cb);
+        let mut vcb = ValidationCircuitBreaker::new(2);
+        let result = queue.integrate(
+            0, aid_a, "beads-a", &wt_path, &conn, None, &mut cb, &mut vcb,
+        );
         assert!(result.success);
         let merge_commit_a = result.merge_commit.unwrap();
 
@@ -2789,11 +2984,15 @@ mod tests {
         }
 
         let queue = IntegrationQueue::new(repo_dir.to_path_buf(), "main".to_string())
-            .with_speck_validate(crate::config::SpeckValidateConfig { enabled: true });
+            .with_speck_validate(crate::config::SpeckValidateConfig {
+                enabled: true,
+                ..Default::default()
+            });
 
         let old_path = std::env::var("PATH").unwrap_or_default();
         std::env::set_var("PATH", format!("{}:{}", bin_dir.display(), old_path));
         let mut cb = CircuitBreaker::new();
+        let mut vcb = ValidationCircuitBreaker::new(2);
         let result = queue.integrate(
             0,
             assignment_id,
@@ -2802,6 +3001,7 @@ mod tests {
             &conn,
             None,
             &mut cb,
+            &mut vcb,
         );
         std::env::set_var("PATH", old_path);
 
@@ -2813,6 +3013,94 @@ mod tests {
         assert!(
             reason.contains("speck validate failed"),
             "failure reason should mention speck validate: {reason}"
+        );
+    }
+
+    #[test]
+    fn test_validation_circuit_breaker_state_transitions() {
+        let mut vcb = ValidationCircuitBreaker::new(2);
+        let bead_id = "beads-validate-test";
+
+        // Initially closed
+        assert!(vcb.state(bead_id).can_retry());
+        assert!(!vcb.state(bead_id).is_tripped());
+
+        // After 1st attempt: retrying, can still retry (1 <= 2)
+        let state = vcb.record_attempt(bead_id);
+        assert!(state.can_retry(), "should allow retry after 1st failure");
+        assert!(!state.is_tripped());
+
+        // After 2nd attempt: retrying, can still retry (2 <= 2)
+        let state = vcb.record_attempt(bead_id);
+        assert!(state.can_retry(), "should allow retry after 2nd failure");
+        assert!(!state.is_tripped());
+
+        // After 3rd attempt: tripped (3 > 2)
+        let state = vcb.record_attempt(bead_id);
+        assert!(!state.can_retry(), "should not allow retry after 3rd failure");
+        assert!(state.is_tripped());
+        assert_eq!(state.attempt_count(), 3);
+
+        // check_tripped returns Some after tripping
+        let worktree = std::path::Path::new("/tmp/wt-vcb-test");
+        let tripped = vcb.check_tripped(bead_id, "all checks failed", worktree);
+        assert!(tripped.is_some(), "check_tripped should return Some when tripped");
+        let t = tripped.unwrap();
+        assert_eq!(t.bead_id, bead_id);
+        assert_eq!(t.attempts, 3);
+
+        // Reset clears the state
+        vcb.reset(bead_id);
+        assert!(vcb.state(bead_id).can_retry(), "should be closed after reset");
+        assert_eq!(vcb.attempt_count(bead_id), 0);
+    }
+
+    #[test]
+    fn test_validation_circuit_breaker_zero_retries() {
+        // max_retries=0 means no retries: first failure trips immediately
+        let mut vcb = ValidationCircuitBreaker::new(0);
+        let bead_id = "beads-zero-retries";
+
+        // 1st attempt: 1 > 0 → tripped immediately
+        let state = vcb.record_attempt(bead_id);
+        assert!(state.is_tripped(), "should trip immediately with max_retries=0");
+        assert_eq!(state.attempt_count(), 1);
+    }
+
+    #[test]
+    fn test_validation_circuit_breaker_independent_from_integration() {
+        // Verify that the two circuit breakers track different bead states independently
+        let mut cb = CircuitBreaker::new();
+        let mut vcb = ValidationCircuitBreaker::new(2);
+        let bead_id = "beads-independent";
+
+        // Trip the integration circuit breaker
+        cb.record_attempt(bead_id);
+        cb.record_attempt(bead_id);
+        cb.record_attempt(bead_id);
+        assert!(cb.state(bead_id).is_tripped(), "integration CB should be tripped");
+
+        // Validation CB should still be closed
+        assert!(
+            vcb.state(bead_id).can_retry(),
+            "validation CB should be unaffected by integration CB"
+        );
+
+        // Trip the validation CB
+        vcb.record_attempt(bead_id);
+        vcb.record_attempt(bead_id);
+        vcb.record_attempt(bead_id);
+        assert!(vcb.state(bead_id).is_tripped(), "validation CB should now be tripped");
+
+        // Reset validation CB, integration CB remains tripped
+        vcb.reset(bead_id);
+        assert!(
+            vcb.state(bead_id).can_retry(),
+            "validation CB should be reset"
+        );
+        assert!(
+            cb.state(bead_id).is_tripped(),
+            "integration CB should remain tripped"
         );
     }
 }
