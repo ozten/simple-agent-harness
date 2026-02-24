@@ -28,6 +28,10 @@ Do NOT triage other beads. Do NOT run `bd ready` to find more work. Do NOT explo
 The sequence after closing is: `blacksmith progress add --bead-id <id> --stdin` -> run `blacksmith finish` -> STOP.
 Each session handles exactly ONE bead. The loop script handles picking the next one.
 
+### Rule E: Minimize command output to the smallest useful slice.
+Use narrow commands and flags by default so analysis/bookkeeping turns stay cheap and readable. Prefer commands like `git status --short`, `rg -n <pattern>`, `sed -n '<start>,<end>p'`, and targeted test filters over broad listings or full-file dumps.
+Only print large outputs (full files, recursive listings, long logs) when you are about to edit that file or the wider output is required to unblock the task.
+
 ---
 
 ## Context Loading
