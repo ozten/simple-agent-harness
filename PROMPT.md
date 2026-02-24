@@ -13,7 +13,7 @@ These two rules are NON-NEGOTIABLE. Violating them wastes 25-35% of your turn bu
 
 ### Rule A: ALWAYS batch independent tool calls in the SAME turn.
 Every time you are about to call a tool, ask: "Is there another independent call I can make at the same time?" If yes, emit BOTH tool calls in the SAME message.
-Bounded batching rule: Cap each assistant message at 2-4 tool calls (hard max 6), and count inner calls inside wrapper tools (for example `multi_tool_use.parallel`) toward that same limit. Do NOT fan out dozens of speculative reads/greps/commands in one turn. Batch only calls you are certain you need right now, then inspect results before issuing the next batch.
+Bounded batching rule: Cap each assistant message at 2-4 tool calls (hard max 6), and count inner calls inside multi-tool/parallel wrappers (for example `multi_tool_use.parallel`) toward that 2-4 target and hard max 6 in the same message. Do NOT fan out dozens of speculative reads/greps/commands in one turn. Batch only calls you are certain you need right now, then inspect results before issuing the next batch.
 
 **Mandatory parallel patterns — use these EVERY session:**
 - Session start: `bd ready` + `blacksmith progress show --bead-id <id>` → ONE turn, TWO tool calls
