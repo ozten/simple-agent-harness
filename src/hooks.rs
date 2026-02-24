@@ -74,7 +74,10 @@ impl HookEnv {
             "BLACKSMITH_INTEGRATED_BEAD".to_string(),
             bead_id.to_string(),
         );
-        vars.insert("BLACKSMITH_MAIN_COMMIT".to_string(), main_commit.to_string());
+        vars.insert(
+            "BLACKSMITH_MAIN_COMMIT".to_string(),
+            main_commit.to_string(),
+        );
         Self { vars }
     }
 }
@@ -435,15 +438,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let marker = dir.path().join("marker");
         let runner = HookRunner::new(vec![], vec![]).with_post_integration(
-            vec![
-                "sleep 2".to_string(),
-                format!("touch {}", marker.display()),
-            ],
+            vec!["sleep 2".to_string(), format!("touch {}", marker.display())],
             1,
         );
         let env = HookEnv::post_integration("bd-1", "abc");
         runner.run_post_integration(&env);
-        assert!(marker.exists(), "later post-integration hook should still run");
+        assert!(
+            marker.exists(),
+            "later post-integration hook should still run"
+        );
     }
 
     #[test]

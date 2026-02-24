@@ -972,7 +972,8 @@ impl IntegrationQueue {
         };
         close_bead_in_bd(bead_id, &close_reason);
 
-        self.hooks.run_post_integration(&HookEnv::post_integration(bead_id, &worktree_head));
+        self.hooks
+            .run_post_integration(&HookEnv::post_integration(bead_id, &worktree_head));
 
         // Sync working tree to match the updated ref
         if let Err(e) = self.sync_working_tree() {
@@ -1956,15 +1957,9 @@ mod tests {
 
         let db_path = repo_dir.join("test.db");
         let conn = db::open_or_create(&db_path).unwrap();
-        let assignment_id = db::insert_worker_assignment(
-            &conn,
-            0,
-            "beads-hook",
-            "/tmp/wt-hook",
-            "completed",
-            None,
-        )
-        .unwrap();
+        let assignment_id =
+            db::insert_worker_assignment(&conn, 0, "beads-hook", "/tmp/wt-hook", "completed", None)
+                .unwrap();
         let wt_path = create_worktree_with_commit(repo_dir, &wt_dir, 0, "beads-hook");
         let hook_output = repo_dir.join("post_integration_env.txt");
 
@@ -1975,7 +1970,8 @@ mod tests {
             )],
             ..HooksConfig::default()
         };
-        let queue = IntegrationQueue::new(repo_dir.to_path_buf(), "main".to_string()).with_hooks(&hooks);
+        let queue =
+            IntegrationQueue::new(repo_dir.to_path_buf(), "main".to_string()).with_hooks(&hooks);
         let mut cb = CircuitBreaker::new();
         let mut vcb = ValidationCircuitBreaker::new(2);
 
@@ -3102,21 +3098,30 @@ mod tests {
 
         // After 3rd attempt: tripped (3 > 2)
         let state = vcb.record_attempt(bead_id);
-        assert!(!state.can_retry(), "should not allow retry after 3rd failure");
+        assert!(
+            !state.can_retry(),
+            "should not allow retry after 3rd failure"
+        );
         assert!(state.is_tripped());
         assert_eq!(state.attempt_count(), 3);
 
         // check_tripped returns Some after tripping
         let worktree = std::path::Path::new("/tmp/wt-vcb-test");
         let tripped = vcb.check_tripped(bead_id, "all checks failed", worktree);
-        assert!(tripped.is_some(), "check_tripped should return Some when tripped");
+        assert!(
+            tripped.is_some(),
+            "check_tripped should return Some when tripped"
+        );
         let t = tripped.unwrap();
         assert_eq!(t.bead_id, bead_id);
         assert_eq!(t.attempts, 3);
 
         // Reset clears the state
         vcb.reset(bead_id);
-        assert!(vcb.state(bead_id).can_retry(), "should be closed after reset");
+        assert!(
+            vcb.state(bead_id).can_retry(),
+            "should be closed after reset"
+        );
         assert_eq!(vcb.attempt_count(bead_id), 0);
     }
 
@@ -3128,7 +3133,10 @@ mod tests {
 
         // 1st attempt: 1 > 0 → tripped immediately
         let state = vcb.record_attempt(bead_id);
-        assert!(state.is_tripped(), "should trip immediately with max_retries=0");
+        assert!(
+            state.is_tripped(),
+            "should trip immediately with max_retries=0"
+        );
         assert_eq!(state.attempt_count(), 1);
     }
 
@@ -3143,7 +3151,10 @@ mod tests {
         cb.record_attempt(bead_id);
         cb.record_attempt(bead_id);
         cb.record_attempt(bead_id);
-        assert!(cb.state(bead_id).is_tripped(), "integration CB should be tripped");
+        assert!(
+            cb.state(bead_id).is_tripped(),
+            "integration CB should be tripped"
+        );
 
         // Validation CB should still be closed
         assert!(
@@ -3155,7 +3166,10 @@ mod tests {
         vcb.record_attempt(bead_id);
         vcb.record_attempt(bead_id);
         vcb.record_attempt(bead_id);
-        assert!(vcb.state(bead_id).is_tripped(), "validation CB should now be tripped");
+        assert!(
+            vcb.state(bead_id).is_tripped(),
+            "validation CB should now be tripped"
+        );
 
         // Reset validation CB, integration CB remains tripped
         vcb.reset(bead_id);
