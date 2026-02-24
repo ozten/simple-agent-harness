@@ -9,30 +9,32 @@
 **Causes:**
 - Agent command not found or not in PATH
 - Prompt file missing or empty
-- Agent failing silently (check exit code in event log)
+- Agent failing silently
 
 **Fix:**
 1. Run `blacksmith --dry-run` to verify config
 2. Run the agent command manually to check it works
-3. Check `blacksmith metrics events --session N` for the failed session's exit code
+3. Check `blacksmith metrics events --session N` for the exit code
 
 ### Session Killed by Watchdog
 
 **Symptoms:** Log shows "watchdog: killing stale session" after `stale_timeout_mins`.
 
 **Causes:**
-- Agent is stuck (infinite loop, waiting for input)
-- Agent writing to a different location than expected
+- Agent stuck (infinite loop, waiting for input)
+- Agent writing to unexpected location
 - Timeout too short for the task
 
 **Fix:**
 - Increase `watchdog.stale_timeout_mins` for long-running tasks
 - Verify agent output goes to the expected file
-- Use `--verbose` to see watchdog check details
+- Use `-v` to see watchdog check details
+
+See [Watchdog](core/watchdog.md).
 
 ### Rate Limit Loop
 
-**Symptoms:** Repeated rate-limit backoffs, eventually exits after `max_consecutive_rate_limits`.
+**Symptoms:** Repeated rate-limit backoffs, exits after `max_consecutive_rate_limits`.
 
 **Causes:**
 - API quota exhausted
@@ -40,8 +42,10 @@
 
 **Fix:**
 - Reduce `workers.max` to lower concurrency
-- Increase `backoff.max_delay_secs` to wait longer
-- Increase `backoff.max_consecutive_rate_limits` to wait it out
+- Increase `backoff.max_delay_secs`
+- Increase `backoff.max_consecutive_rate_limits`
+
+See [Retry & Backoff](core/retry-and-backoff.md).
 
 ### "Another blacksmith instance is already running"
 
@@ -61,45 +65,34 @@
 
 **Causes:**
 - Merge conflicts the integration agent can't resolve
-- Test failures introduced by the integration
+- Test failures from the integration
 - Manifest entry conflicts
 
 **Fix:**
-1. Check the worktree: `cd .blacksmith/worktrees/worker-N-beads-xxx/`
-2. Inspect the error in `blacksmith integration log`
-3. Fix manually, then `blacksmith integration retry beads-xxx`
+1. Inspect the worktree: `cd .blacksmith/worktrees/worker-N-beads-xxx/`
+2. Check the error: `blacksmith integration log`
+3. Fix manually, then: `blacksmith integration retry beads-xxx`
 4. Or rollback: `blacksmith integration rollback beads-xxx`
+
+See [Integration](multi-agent/integration.md).
 
 ### Config Validation Errors
 
 **Symptoms:** "Configuration validation failed" on startup.
 
 **Causes:**
-- Invalid regex in extraction rules or commit detection patterns
+- Invalid regex in extraction rules or commit detection
 - Missing prompt file
 - Invalid values (negative timeouts, etc.)
 
 **Fix:**
 - Run `blacksmith --dry-run` to see validation errors
-- Check regex syntax (uses Rust regex, not PCRE)
-- Ensure prompt file exists at the configured path
+- Check regex syntax (Rust regex, not PCRE)
+- Ensure prompt file exists
 
 ### Dashboard Smoke Test Failures
 
-**Symptoms:** `./scripts/smoke-test-ui.sh` reports FAIL on one or more endpoints.
-
-**Common causes and fixes:**
-
-| Failure | Likely cause | Fix |
-|---|---|---|
-| TIMEOUT waiting for serve | Binary not built with `--features serve`, or port 18420 in use | Rebuild with `cargo build --release --features serve`; kill conflicting process |
-| TIMEOUT waiting for UI | `blacksmith-ui` binary missing, or port 18080 in use | Rebuild with `cargo build --release -p blacksmith-ui`; kill conflicting process |
-| FAIL on a specific serve endpoint | Route removed or renamed in `src/serve.rs` | Check git diff for route changes, restore the route |
-| FAIL on a dashboard endpoint | Route removed or renamed in `blacksmith-ui/src/main.rs` | Check git diff for route changes, restore the route |
-| FAIL on proxied transcript | Serve session/transcript handler broken | Check `api_session_transcript` and `api_session_stream` in `src/serve.rs` |
-| FAIL on poll-data | Poller hasn't fetched yet or serve unreachable | Increase the sleep before dashboard checks, or check serve is healthy |
-
-See also: [Dashboard docs — Smoke Testing](dashboard.md#smoke-testing)
+See [Smoke Testing](dashboard/smoke-testing.md) for detailed failure signatures.
 
 ## Error Codes
 
@@ -112,29 +105,14 @@ See also: [Dashboard docs — Smoke Testing](dashboard.md#smoke-testing)
 ## Diagnostic Commands
 
 ```bash
-# Full config dump
-blacksmith --dry-run
-
-# Current state
-blacksmith --status
-
-# Recent session metrics
-blacksmith metrics status
-
-# Raw events for a session
-blacksmith metrics events --session 142
-
-# Worker pool state
-blacksmith workers status
-
-# Integration history
-blacksmith integration log
-
-# Check adapter detection
-blacksmith adapter info
-
-# Test adapter parsing
-blacksmith adapter test path/to/session.jsonl
+blacksmith --dry-run                          # Full config dump
+blacksmith --status                           # Current state
+blacksmith metrics status                     # Recent sessions
+blacksmith metrics events --session 142       # Raw events
+blacksmith workers status                     # Worker pool
+blacksmith integration log                    # Integration history
+blacksmith adapter info                       # Adapter detection
+blacksmith adapter test path/to/session.jsonl # Test parsing
 ```
 
 ## Log Levels
@@ -145,7 +123,7 @@ blacksmith adapter test path/to/session.jsonl
 | (default) | info | Iteration summaries, key events |
 | `-v` | debug | Watchdog checks, retry decisions, config details |
 
-Set `RUST_LOG` environment variable for fine-grained control:
+Fine-grained control via `RUST_LOG`:
 
 ```bash
 RUST_LOG=blacksmith::watchdog=debug blacksmith
@@ -155,17 +133,13 @@ RUST_LOG=blacksmith::watchdog=debug blacksmith
 
 ### Rebuild Metrics Database
 
-If observations seem wrong or corrupted:
-
 ```bash
 blacksmith metrics rebuild
 ```
 
-Drops and recreates observations from the events table.
+Drops and recreates observations from events.
 
 ### Re-ingest Sessions
-
-After changing extraction rules:
 
 ```bash
 blacksmith metrics reingest --all
@@ -173,20 +147,14 @@ blacksmith metrics reingest --all
 
 ### Migrate from Legacy Layout
 
-If upgrading from V2 (files in project root):
-
 ```bash
 blacksmith migrate --consolidate
 ```
 
-Moves `claude-iteration-*.jsonl`, `.iteration_counter`, and database into `.blacksmith/`.
-
 ### Force-Clean Worktrees
-
-If a worktree is in a bad state:
 
 ```bash
 git worktree remove .blacksmith/worktrees/worker-N-beads-xxx --force
 ```
 
-Then retry the bead — the coordinator will create a fresh worktree.
+The coordinator creates a fresh worktree on next assignment.

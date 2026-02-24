@@ -225,6 +225,15 @@ pub fn count_improvements(conn: &Connection) -> Result<i64> {
     conn.query_row("SELECT COUNT(*) FROM improvements", [], |row| row.get(0))
 }
 
+/// Count open improvements only — used by the backlog threshold check.
+pub fn count_open_improvements(conn: &Connection) -> Result<i64> {
+    conn.query_row(
+        "SELECT COUNT(*) FROM improvements WHERE status = 'open'",
+        [],
+        |row| row.get(0),
+    )
+}
+
 /// Fetch a single improvement by its ref (e.g. "R1").
 /// Returns None if no matching ref exists.
 pub fn get_improvement(conn: &Connection, ref_id: &str) -> Result<Option<Improvement>> {

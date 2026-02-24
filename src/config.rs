@@ -779,6 +779,28 @@ pub struct ImprovementsConfig {
     pub analyze_every: u32,
     /// How many recent sessions to include in the analysis prompt. Default: 20.
     pub analyze_sessions: u32,
+    /// Skip analysis when open improvements reach this count. 0 = no limit. Default: 10.
+    pub backlog_threshold: u32,
+    /// Floor for analyze_every — prevents `analyze_every=1` death spirals. Default: 5.
+    pub min_analyze_every: u32,
+    /// Auto-dismiss improvements open for this many sessions without action. 0 = disabled. Default: 30.
+    pub auto_dismiss_after: u32,
+    /// Minimum coding sessions between analysis runs. 0 = no cooldown. Default: 0.
+    pub analysis_cooldown_sessions: u32,
+    /// Hard cap on open improvements injected into analysis prompt. 0 = no cap. Default: 10.
+    pub max_open_improvements: u32,
+}
+
+impl ImprovementsConfig {
+    /// Effective analysis interval: clamps `analyze_every` to at least `min_analyze_every`,
+    /// preventing death spirals from `analyze_every=1`. Returns 0 (disabled) if analyze_every is 0.
+    pub fn effective_analyze_every(&self) -> u32 {
+        if self.analyze_every == 0 {
+            0
+        } else {
+            self.analyze_every.max(self.min_analyze_every)
+        }
+    }
 }
 
 impl Default for ImprovementsConfig {
@@ -788,6 +810,11 @@ impl Default for ImprovementsConfig {
             prompt_file: PathBuf::from("PROMPT.md"),
             analyze_every: 0,
             analyze_sessions: 20,
+            backlog_threshold: 10,
+            min_analyze_every: 5,
+            auto_dismiss_after: 30,
+            analysis_cooldown_sessions: 0,
+            max_open_improvements: 10,
         }
     }
 }
