@@ -173,6 +173,14 @@ blacksmith improve add "Always check Cargo.toml when adding new modules" \
   --context "Session 50 closed a bead with uncompilable code because Cargo.toml was missing the fs2 dependency"
 ```
 
+### Evidence threshold for process-improvement analyses
+
+With fewer than 3 recent sessions, also cap evidence collection to the minimum commands needed to inspect the cited metrics, review existing open improvements, and verify the specific PROMPT.md text related to any candidate change. Avoid broad repo scans or large multi-command fanout unless a severe anomaly cannot be validated from that minimal evidence.
+
+### Metrics noise filter for self-improvement analyses
+
+When analyzing recent sessions for prompt/process changes, treat sessions with turns.total = 1 and session.duration_secs = 0 as low-confidence evidence (likely harness/setup/fast-exit artifacts) unless corroborated by at least 2 additional sessions showing the same pattern. Do not file a new PROMPT.md improvement based solely on a single low-confidence session; use it only to review already-open improvements or request more data.
+
 Record improvements as you work — don't batch them to the end of the session.
 
 ## Important
