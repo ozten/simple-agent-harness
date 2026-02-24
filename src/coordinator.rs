@@ -112,7 +112,8 @@ pub async fn run(
     );
     let output_dir = data_dir.sessions_dir();
     let integration_queue =
-        IntegrationQueue::new(repo_dir.clone(), config.workers.base_branch.clone());
+        IntegrationQueue::new(repo_dir.clone(), config.workers.base_branch.clone())
+            .with_speck_validate(config.speck_validate.clone());
     let mut circuit_breaker = CircuitBreaker::new();
 
     // Ensure output directory exists
@@ -205,15 +206,16 @@ pub async fn run(
         if signals
             .check_stop_file(&config.shutdown.stop_file)
             .is_detected()
-            && !draining {
-                draining = true;
-                drain_reason = Some(CoordinatorExitReason::StopFile);
-                status.update(HarnessState::ShuttingDown);
-                tracing::info!(
-                    active_workers = pool.active_count(),
-                    "STOP file detected, draining active workers"
-                );
-            }
+            && !draining
+        {
+            draining = true;
+            drain_reason = Some(CoordinatorExitReason::StopFile);
+            status.update(HarnessState::ShuttingDown);
+            tracing::info!(
+                active_workers = pool.active_count(),
+                "STOP file detected, draining active workers"
+            );
+        }
 
         // Poll for completed workers
         let outcomes = pool.poll_completed().await;
@@ -579,8 +581,7 @@ pub async fn run(
 
             // Reserve one idle slot for the analysis agent when it's due,
             // so coding beads don't starve it of workers.
-            let analysis_due =
-                should_spawn_analysis(config, total_completed_sessions, &pool);
+            let analysis_due = should_spawn_analysis(config, total_completed_sessions, &pool);
             let coding_slots = if analysis_due {
                 (pool.idle_count() as usize).saturating_sub(1)
             } else {
@@ -724,19 +725,14 @@ fn is_analysis_bead(id: &str) -> bool {
 ///
 /// Returns false if disabled, if an analysis worker is already running in the pool,
 /// or if the session count hasn't hit the configured interval.
-fn should_spawn_analysis(
-    config: &HarnessConfig,
-    total_sessions: u32,
-    pool: &WorkerPool,
-) -> bool {
+fn should_spawn_analysis(config: &HarnessConfig, total_sessions: u32, pool: &WorkerPool) -> bool {
     let every = config.improvements.analyze_every;
     if every == 0 {
         return false; // disabled
     }
     // Check if an analysis worker is already running in the pool
     let analysis_running = pool.snapshot().iter().any(|(_, state, bead_id)| {
-        *state == crate::pool::WorkerState::Coding
-            && bead_id.map(is_analysis_bead).unwrap_or(false)
+        *state == crate::pool::WorkerState::Coding && bead_id.map(is_analysis_bead).unwrap_or(false)
     });
     if analysis_running {
         return false;
@@ -753,7 +749,8 @@ fn assemble_analysis_prompt(
     // Load template: custom file in .blacksmith/ or embedded default
     let custom_path = data_dir.root().join("ANALYSIS_PROMPT.md");
     let template = if custom_path.exists() {
-        std::fs::read_to_string(&custom_path).unwrap_or_else(|_| defaults::ANALYSIS_PROMPT.to_string())
+        std::fs::read_to_string(&custom_path)
+            .unwrap_or_else(|_| defaults::ANALYSIS_PROMPT.to_string())
     } else {
         defaults::ANALYSIS_PROMPT.to_string()
     };
@@ -770,14 +767,7 @@ fn assemble_analysis_prompt(
     } else {
         improvements
             .iter()
-            .map(|imp| {
-                format!(
-                    "- [{}] {}: {}",
-                    imp.ref_id,
-                    imp.category,
-                    imp.title
-                )
-            })
+            .map(|imp| format!("- [{}] {}: {}", imp.ref_id, imp.category, imp.title))
             .collect::<Vec<_>>()
             .join("\n")
     };
@@ -806,10 +796,7 @@ fn format_observations_table(observations: &[db::Observation]) -> String {
             .duration
             .map(|d| d.to_string())
             .unwrap_or_else(|| "-".to_string());
-        let outcome = obs
-            .outcome
-            .as_deref()
-            .unwrap_or("-");
+        let outcome = obs.outcome.as_deref().unwrap_or("-");
         // Truncate data to keep the table readable
         let data = if obs.data.len() > 120 {
             format!("{}...", &obs.data[..120])
@@ -2034,6 +2021,7 @@ mod tests {
             quality_gates: QualityGatesConfig::default(),
             improvements: ImprovementsConfig::default(),
             serve: ServeConfig::default(),
+            speck_validate: crate::config::SpeckValidateConfig::default(),
         }
     }
 
@@ -3286,15 +3274,7 @@ mod tests {
         }
 
         // Insert an open improvement
-        db::insert_improvement(
-            &db_conn,
-            "workflow",
-            "Batch file reads",
-            None,
-            None,
-            None,
-        )
-        .unwrap();
+        db::insert_improvement(&db_conn, "workflow", "Batch file reads", None, None, None).unwrap();
 
         let mut config = test_config(dir.path());
         config.improvements.analyze_sessions = 20;
@@ -3332,15 +3312,13 @@ mod tests {
 
     #[test]
     fn test_format_observations_table_with_data() {
-        let obs = vec![
-            db::Observation {
-                session: 1,
-                ts: "2026-02-20T10:00:00Z".to_string(),
-                duration: Some(300),
-                outcome: Some("success".to_string()),
-                data: r#"{"turns.total": 50}"#.to_string(),
-            },
-        ];
+        let obs = vec![db::Observation {
+            session: 1,
+            ts: "2026-02-20T10:00:00Z".to_string(),
+            duration: Some(300),
+            outcome: Some("success".to_string()),
+            data: r#"{"turns.total": 50}"#.to_string(),
+        }];
         let table = format_observations_table(&obs);
         assert!(table.contains("| Session |"));
         assert!(table.contains("| 1 |"));
@@ -3351,7 +3329,10 @@ mod tests {
     #[test]
     fn test_chrono_timestamp_is_numeric() {
         let ts = chrono_timestamp();
-        assert!(ts.parse::<u64>().is_ok(), "timestamp should be numeric: {ts}");
+        assert!(
+            ts.parse::<u64>().is_ok(),
+            "timestamp should be numeric: {ts}"
+        );
     }
 
     // ── Runaway analysis loop regression tests ───────────────────────
@@ -3493,8 +3474,7 @@ mod tests {
 
         // After 1 coding session, analysis is due
         let total_completed_sessions = 1;
-        let analysis_due =
-            should_spawn_analysis(&config, total_completed_sessions, &pool);
+        let analysis_due = should_spawn_analysis(&config, total_completed_sessions, &pool);
         assert!(analysis_due);
 
         // With 1 idle worker and analysis_due, coding_slots should be 0
@@ -3505,7 +3485,10 @@ mod tests {
             pool.idle_count() as usize
         };
         assert_eq!(pool.idle_count(), 1);
-        assert_eq!(coding_slots, 0, "single slot should be reserved for analysis");
+        assert_eq!(
+            coding_slots, 0,
+            "single slot should be reserved for analysis"
+        );
 
         // After analysis completes (counter unchanged), if there are no new
         // coding completions, counter stays at 1 and analysis_due stays true.
@@ -3531,8 +3514,7 @@ mod tests {
         config.improvements.analyze_every = 1;
 
         let total_completed_sessions = 1;
-        let analysis_due =
-            should_spawn_analysis(&config, total_completed_sessions, &pool);
+        let analysis_due = should_spawn_analysis(&config, total_completed_sessions, &pool);
         assert!(analysis_due);
 
         let coding_slots = if analysis_due {
@@ -3541,7 +3523,10 @@ mod tests {
             pool.idle_count() as usize
         };
         assert_eq!(pool.idle_count(), 2);
-        assert_eq!(coding_slots, 1, "one slot for coding, one reserved for analysis");
+        assert_eq!(
+            coding_slots, 1,
+            "one slot for coding, one reserved for analysis"
+        );
     }
 
     /// Prove that should_spawn_analysis returns false at session 0,
@@ -3658,5 +3643,4 @@ mod tests {
             "analysis should trigger after a real coding session"
         );
     }
-
 }

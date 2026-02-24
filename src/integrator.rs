@@ -10,12 +10,13 @@
 ///
 /// Only one integration runs at a time to keep main's history linear.
 /// Workers continue coding while one task integrates.
-use crate::config::ResolvedAgentConfig;
+use crate::config::{ResolvedAgentConfig, SpeckValidateConfig};
 use crate::db;
 use crate::task_manifest;
 use crate::worktree;
 use rusqlite::Connection;
 use std::collections::{HashMap, HashSet};
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -259,6 +260,17 @@ pub struct IntegrationResult {
     pub failure_reason: Option<String>,
 }
 
+/// Outcome of running `speck validate` as a pre-integration gate.
+#[derive(Debug)]
+enum SpeckValidateOutcome {
+    /// All checks passed.
+    Passed,
+    /// One or more checks failed; notes contain human-readable details.
+    Failed { notes: String },
+    /// Gate was skipped (e.g. `speck` not found); integration continues.
+    Skipped { reason: String },
+}
+
 /// Close a bead in bd and sync metadata. Failures are logged as warnings and
 /// do not propagate to callers.
 pub(crate) fn close_bead_in_bd(bead_id: &str, reason: &str) {
@@ -499,6 +511,8 @@ pub struct IntegrationQueue {
     repo_dir: PathBuf,
     /// Base branch name (e.g., "main").
     base_branch: String,
+    /// Configuration for the speck validate gate.
+    speck_validate: SpeckValidateConfig,
 }
 
 impl IntegrationQueue {
@@ -507,7 +521,14 @@ impl IntegrationQueue {
         Self {
             repo_dir,
             base_branch,
+            speck_validate: SpeckValidateConfig::default(),
         }
+    }
+
+    /// Configure the speck validate pre-integration gate.
+    pub fn with_speck_validate(mut self, config: SpeckValidateConfig) -> Self {
+        self.speck_validate = config;
+        self
     }
 
     /// Integrate a single completed worktree into main.
@@ -685,6 +706,36 @@ impl IntegrationQueue {
                             }
                         }
                     }
+                }
+            }
+        }
+
+        // Step 4a: speck validate gate (if enabled)
+        if self.speck_validate.enabled {
+            match self.run_speck_validate(bead_id, worktree_path) {
+                SpeckValidateOutcome::Passed => {
+                    tracing::info!(worker_id, bead_id, "speck validate passed");
+                }
+                SpeckValidateOutcome::Failed { notes } => {
+                    tracing::warn!(
+                        worker_id,
+                        bead_id,
+                        notes = %notes,
+                        "speck validate failed"
+                    );
+                    let reason = format!("speck validate failed: {notes}");
+                    self.record_failure(assignment_id, db_conn, &reason);
+                    return IntegrationResult {
+                        worker_id,
+                        assignment_id,
+                        bead_id: bead_id.to_string(),
+                        success: false,
+                        merge_commit: None,
+                        failure_reason: Some(reason),
+                    };
+                }
+                SpeckValidateOutcome::Skipped { reason } => {
+                    tracing::warn!(worker_id, bead_id, reason = %reason, "speck validate skipped");
                 }
             }
         }
@@ -1007,6 +1058,112 @@ impl IntegrationQueue {
     ///
     /// Tries `cargo check` first (for Rust projects), then `tsc --noEmit` (for TypeScript).
     /// Returns `Ok(())` if the check passes, or `Err(error_output)` with compiler diagnostics.
+    /// Run `speck validate --bead <bead_id> --json` in the worktree and return the outcome.
+    ///
+    /// Returns:
+    /// - `Passed` if all checks pass
+    /// - `Failed { notes }` if any check fails, with formatted notes for the DB
+    /// - `Skipped { reason }` if `speck` is not found (warning, not error)
+    fn run_speck_validate(&self, bead_id: &str, worktree_path: &Path) -> SpeckValidateOutcome {
+        let output = match Command::new("speck")
+            .args(["validate", "--bead", bead_id, "--json"])
+            .current_dir(worktree_path)
+            .output()
+        {
+            Ok(out) => out,
+            Err(e) if e.kind() == ErrorKind::NotFound => {
+                return SpeckValidateOutcome::Skipped {
+                    reason: "speck binary not found".to_string(),
+                };
+            }
+            Err(e) => {
+                return SpeckValidateOutcome::Skipped {
+                    reason: format!("failed to run speck validate: {e}"),
+                };
+            }
+        };
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
+        // Parse the JSON output
+        let parsed: Result<serde_json::Value, _> = serde_json::from_str(&stdout);
+        let json = match parsed {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(
+                    bead_id,
+                    error = %e,
+                    stdout = %stdout.trim(),
+                    stderr = %stderr.trim(),
+                    "failed to parse speck validate JSON output; skipping gate"
+                );
+                return SpeckValidateOutcome::Skipped {
+                    reason: "failed to parse speck validate JSON output".to_string(),
+                };
+            }
+        };
+
+        // Log each check result
+        if let Some(checks) = json.get("checks").and_then(|c| c.as_array()) {
+            for check in checks {
+                let name = check.get("name").and_then(|v| v.as_str()).unwrap_or("?");
+                let passed = check
+                    .get("passed")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                let detail = check.get("detail").and_then(|v| v.as_str()).unwrap_or("");
+                let category = check
+                    .get("category")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("?");
+                if passed {
+                    tracing::info!(bead_id, name, category, "speck check passed");
+                } else {
+                    tracing::warn!(bead_id, name, category, detail, "speck check failed");
+                }
+            }
+        }
+
+        let overall_passed = json
+            .get("passed")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        if overall_passed {
+            SpeckValidateOutcome::Passed
+        } else {
+            // Build failure notes from failed checks
+            let failed_checks: Vec<String> = json
+                .get("checks")
+                .and_then(|c| c.as_array())
+                .map(|checks| {
+                    checks
+                        .iter()
+                        .filter(|c| !c.get("passed").and_then(|v| v.as_bool()).unwrap_or(true))
+                        .map(|c| {
+                            let name = c.get("name").and_then(|v| v.as_str()).unwrap_or("unknown");
+                            let detail = c.get("detail").and_then(|v| v.as_str()).unwrap_or("");
+                            if detail.is_empty() {
+                                name.to_string()
+                            } else {
+                                format!("{name}: {detail}")
+                            }
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            let notes = if failed_checks.is_empty() {
+                "validation failed (no check details available)".to_string()
+            } else {
+                failed_checks.join("; ")
+            };
+
+            SpeckValidateOutcome::Failed { notes }
+        }
+    }
+
     fn run_compiler_check(&self, worktree_path: &Path) -> Result<(), String> {
         // Try cargo check first (Rust projects)
         let cargo_toml = worktree_path.join("Cargo.toml");
@@ -2504,5 +2661,158 @@ mod tests {
         assert_eq!(result.reverted_commit.as_deref(), Some("abc123"));
         assert_eq!(result.manifest_entries_reversed, 3);
         assert!(result.blocked_by.is_empty());
+    }
+
+    #[test]
+    fn test_speck_validate_skipped_when_binary_not_found() {
+        let dir = init_test_repo();
+        let queue = IntegrationQueue::new(dir.path().to_path_buf(), "main".to_string());
+        // Temporarily set PATH to an empty dir so `speck` is not found
+        let empty = dir.path().join("empty_bin");
+        std::fs::create_dir_all(&empty).unwrap();
+        let old_path = std::env::var("PATH").unwrap_or_default();
+        std::env::set_var("PATH", &empty);
+        let outcome = queue.run_speck_validate("test-bead", dir.path());
+        std::env::set_var("PATH", old_path);
+        assert!(
+            matches!(outcome, SpeckValidateOutcome::Skipped { .. }),
+            "expected Skipped when speck not found, got {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn test_speck_validate_passed_when_json_says_passed() {
+        let dir = init_test_repo();
+        let queue = IntegrationQueue::new(dir.path().to_path_buf(), "main".to_string());
+
+        // Create a fake `speck` script that outputs a passing JSON result
+        let bin_dir = dir.path().join("fake_bin_pass");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        let script = bin_dir.join("speck");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\necho '{\"spec_id\":\"test-bead\",\"passed\":true,\"checks\":[{\"name\":\"test-suite: cargo test\",\"passed\":true,\"detail\":\"\",\"category\":\"executable\"}]}'\n",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let old_path = std::env::var("PATH").unwrap_or_default();
+        std::env::set_var("PATH", format!("{}:{}", bin_dir.display(), old_path));
+        let outcome = queue.run_speck_validate("test-bead", dir.path());
+        std::env::set_var("PATH", old_path);
+
+        assert!(
+            matches!(outcome, SpeckValidateOutcome::Passed),
+            "expected Passed, got {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn test_speck_validate_failed_when_json_says_failed() {
+        let dir = init_test_repo();
+        let queue = IntegrationQueue::new(dir.path().to_path_buf(), "main".to_string());
+
+        // Create a fake `speck` script that outputs a failing JSON result
+        let bin_dir = dir.path().join("fake_bin_fail");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        let script = bin_dir.join("speck");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\necho '{\"spec_id\":\"test-bead\",\"passed\":false,\"checks\":[{\"name\":\"cargo test\",\"passed\":false,\"detail\":\"2 tests failed\",\"category\":\"executable\"}]}'\n",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let old_path = std::env::var("PATH").unwrap_or_default();
+        std::env::set_var("PATH", format!("{}:{}", bin_dir.display(), old_path));
+        let outcome = queue.run_speck_validate("test-bead", dir.path());
+        std::env::set_var("PATH", old_path);
+
+        match outcome {
+            SpeckValidateOutcome::Failed { notes } => {
+                assert!(
+                    notes.contains("cargo test"),
+                    "notes should mention check name"
+                );
+                assert!(
+                    notes.contains("2 tests failed"),
+                    "notes should include detail"
+                );
+            }
+            other => panic!("expected Failed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_speck_validate_gate_blocks_integration_on_failure() {
+        let dir = init_test_repo();
+        let repo_dir = dir.path();
+        let wt_dir = repo_dir.join("worktrees");
+        std::fs::create_dir_all(&wt_dir).unwrap();
+
+        let db_path = repo_dir.join("test.db");
+        let conn = db::open_or_create(&db_path).unwrap();
+
+        let assignment_id = db::insert_worker_assignment(
+            &conn,
+            0,
+            "beads-speck-gate",
+            "/tmp/wt-0",
+            "completed",
+            None,
+        )
+        .unwrap();
+
+        let wt_path = create_worktree_with_commit(repo_dir, &wt_dir, 0, "beads-speck-gate");
+
+        // Create a fake `speck` that always fails validation
+        let bin_dir = repo_dir.join("fake_bin_gate");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        let script = bin_dir.join("speck");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\necho '{\"spec_id\":\"beads-speck-gate\",\"passed\":false,\"checks\":[{\"name\":\"unit tests\",\"passed\":false,\"detail\":\"assertion failed\",\"category\":\"executable\"}]}'\n",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let queue = IntegrationQueue::new(repo_dir.to_path_buf(), "main".to_string())
+            .with_speck_validate(crate::config::SpeckValidateConfig { enabled: true });
+
+        let old_path = std::env::var("PATH").unwrap_or_default();
+        std::env::set_var("PATH", format!("{}:{}", bin_dir.display(), old_path));
+        let mut cb = CircuitBreaker::new();
+        let result = queue.integrate(
+            0,
+            assignment_id,
+            "beads-speck-gate",
+            &wt_path,
+            &conn,
+            None,
+            &mut cb,
+        );
+        std::env::set_var("PATH", old_path);
+
+        assert!(
+            !result.success,
+            "integration should fail when speck validate fails"
+        );
+        let reason = result.failure_reason.unwrap();
+        assert!(
+            reason.contains("speck validate failed"),
+            "failure reason should mention speck validate: {reason}"
+        );
     }
 }

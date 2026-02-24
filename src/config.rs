@@ -27,6 +27,7 @@ pub struct HarnessConfig {
     pub quality_gates: QualityGatesConfig,
     pub improvements: ImprovementsConfig,
     pub serve: ServeConfig,
+    pub speck_validate: SpeckValidateConfig,
 }
 
 impl HarnessConfig {
@@ -735,6 +736,19 @@ impl Default for QualityGatesConfig {
             format: vec!["cargo fmt --check".to_string()],
         }
     }
+}
+
+/// Configuration for the speck validate pre-integration quality gate.
+///
+/// When enabled, `speck validate --bead <bead_id> --json` is run after the
+/// compiler check and before fast-forwarding main. Validation failure blocks
+/// integration and stores check details in the DB.
+#[derive(Debug, Deserialize, Clone)]
+#[serde(default)]
+#[derive(Default)]
+pub struct SpeckValidateConfig {
+    /// Enable speck validate as a pre-integration quality gate. Default: false.
+    pub enabled: bool,
 }
 
 /// Configuration for the self-improvement promotion cycle.
@@ -2305,7 +2319,13 @@ model = "claude-sonnet-4-6"
         // --model and the model value are appended
         assert_eq!(
             resolved.args,
-            vec!["-p", "{prompt}", "--verbose", "--model", "claude-sonnet-4-6"]
+            vec![
+                "-p",
+                "{prompt}",
+                "--verbose",
+                "--model",
+                "claude-sonnet-4-6"
+            ]
         );
     }
 
