@@ -4675,3 +4675,46 @@ Implemented three features for the self-improvement feedback loop:
 
 ### Suggested Next Tasks
 - Align `blacksmith finish` internals with command-based progress tracking (it still has legacy optional `PROGRESS.txt` append behavior).
+
+--- 2026-02-24 06:24:54 | test-bead ---
+## Session: Implement blacksmith progress command (simple-agent-harness-c34r)
+
+### Completed
+- Added first-class `blacksmith progress` command family in CLI:
+  - `blacksmith progress add`
+  - `blacksmith progress list`
+  - `blacksmith progress show`
+- Implemented new SQLite-backed `progress_entries` storage in `src/db.rs` with helpers:
+  - `insert_progress_entry`
+  - `list_progress_entries`
+  - `latest_progress_entry`
+- Added `src/progress.rs` handlers with multiline input support via:
+  - `--stdin`
+  - `--file`
+  - `--text`
+- Added missing bead-ID warning behavior while still persisting entries.
+- Added/updated tests for:
+  - DB progress table/helpers
+  - Progress command handlers
+  - Main/worktree shared DB behavior for progress entries
+- Updated workflow docs in `PROMPT.md` and `templates/PROMPT.md.tmpl` to remove file-based progress instructions (`PROGRESS.txt` / `PROGRESS_LOG.txt`) and use `blacksmith progress` commands.
+
+### Verification Run
+- `blacksmith --help | rg '^  progress\b'`
+- `blacksmith progress --help`
+- `printf '## Handoff\n- Completed X\n- Next Y\n' | blacksmith progress add --bead-id simple-agent-harness-c34r --stdin`
+- `blacksmith progress show --bead-id simple-agent-harness-c34r`
+- `blacksmith progress list --bead-id simple-agent-harness-c34r --last 5`
+- `blacksmith progress add --stdin <<< 'entry without bead id'`
+- `rg -n 'Read PROGRESS.txt|write PROGRESS.txt|PROGRESS_LOG.txt' PROMPT.md templates/PROMPT.md.tmpl`
+- `cargo test --release`
+- `cargo clippy --fix --allow-dirty`
+- `cargo fmt --check` (then `cargo fmt` to resolve reported formatting diffs)
+
+### Current State
+- All tests pass in release profile.
+- Progress CLI and SQLite storage are implemented and covered by tests.
+- Prompt/template workflow now references command-based progress tracking.
+
+### Suggested Next Tasks
+- Align `blacksmith finish` internals with command-based progress tracking (it still has legacy optional `PROGRESS.txt` append behavior).
