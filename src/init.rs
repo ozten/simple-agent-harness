@@ -129,6 +129,9 @@ check = {check}
 test = {test}
 lint = {lint}
 format = {format}
+
+[improvements]
+analyze_every = 5
 "#,
         command = agent.command,
         args = args_str,
@@ -698,6 +701,8 @@ mod tests {
         assert!(toml.contains("format = [\"cargo fmt --check\"]"));
         assert!(toml.contains("[workers]"));
         assert!(toml.contains("max = 1"));
+        assert!(toml.contains("[improvements]"));
+        assert!(toml.contains("analyze_every = 5"));
     }
 
     #[test]

@@ -417,6 +417,7 @@ pub async fn run(
                         );
 
                         run_auto_promotion(config, &db_conn, &data_dir.db(), completed_beads);
+                        dismiss_stale_improvements(config, &db_conn);
                     }
 
                     if let Err(e) = pool.reset_worker(worker_id) {
@@ -465,6 +466,7 @@ pub async fn run(
 
                             // Run auto-promotion cycle after successful integration
                             run_auto_promotion(config, &db_conn, &data_dir.db(), completed_beads);
+                            dismiss_stale_improvements(config, &db_conn);
                         }
 
                         // Reset the worker back to idle after successful integration
@@ -596,7 +598,7 @@ pub async fn run(
 
             // Reserve one idle slot for the analysis agent when it's due,
             // so coding beads don't starve it of workers.
-            let analysis_due = should_spawn_analysis(config, total_completed_sessions, &pool);
+            let analysis_due = should_spawn_analysis(config, total_completed_sessions, &pool, &db_conn);
             let coding_slots = if analysis_due {
                 (pool.idle_count() as usize).saturating_sub(1)
             } else {
@@ -663,7 +665,7 @@ pub async fn run(
             // Spawn analysis agent if conditions are met and an idle slot is available
             // (scheduled after coding beads so coding gets priority)
             if pool.idle_count() > 0
-                && should_spawn_analysis(config, total_completed_sessions, &pool)
+                && should_spawn_analysis(config, total_completed_sessions, &pool, &db_conn)
             {
                 let ts = chrono_timestamp();
                 let analysis_bead_id = format!("analysis-{ts}");
@@ -739,9 +741,15 @@ fn is_analysis_bead(id: &str) -> bool {
 /// Determine whether the analysis agent should be spawned.
 ///
 /// Returns false if disabled, if an analysis worker is already running in the pool,
-/// or if the session count hasn't hit the configured interval.
-fn should_spawn_analysis(config: &HarnessConfig, total_sessions: u32, pool: &WorkerPool) -> bool {
-    let every = config.improvements.analyze_every;
+/// if the open improvement backlog exceeds the threshold, or if the session count
+/// hasn't hit the configured interval (clamped by `min_analyze_every`).
+fn should_spawn_analysis(
+    config: &HarnessConfig,
+    total_sessions: u32,
+    pool: &WorkerPool,
+    db_conn: &Connection,
+) -> bool {
+    let every = config.improvements.effective_analyze_every();
     if every == 0 {
         return false; // disabled
     }
@@ -751,6 +759,19 @@ fn should_spawn_analysis(config: &HarnessConfig, total_sessions: u32, pool: &Wor
     });
     if analysis_running {
         return false;
+    }
+    // Backlog threshold: skip analysis if too many open improvements are queued
+    let threshold = config.improvements.backlog_threshold;
+    if threshold > 0 {
+        let open_count = db::count_open_improvements(db_conn).unwrap_or(0);
+        if open_count >= threshold as i64 {
+            tracing::info!(
+                open_count,
+                threshold,
+                "skipping analysis: open improvement backlog at threshold"
+            );
+            return false;
+        }
     }
     total_sessions > 0 && total_sessions.is_multiple_of(every)
 }
@@ -787,13 +808,41 @@ fn assemble_analysis_prompt(
             .join("\n")
     };
 
+    // Query recently promoted improvements for outcome-based gating
+    let promoted = db::list_improvements(db_conn, Some("promoted"), None).unwrap_or_default();
+    let promoted_text = if promoted.is_empty() {
+        "(none)".to_string()
+    } else {
+        promoted
+            .iter()
+            .map(|imp| format!("- [{}] {}: {}", imp.ref_id, imp.category, imp.title))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
+    let open_count = improvements.len();
+
     // Count total sessions
     let session_count = observations.len();
+
+    // Max improvements per run: use max_open_improvements as the cap, default to 3
+    let max_improvements = if config.improvements.max_open_improvements > 0 {
+        config.improvements.max_open_improvements.saturating_sub(open_count as u32).max(1)
+    } else {
+        3
+    };
 
     template
         .replace("{{recent_metrics}}", &metrics_table)
         .replace("{{open_improvements}}", &improvements_text)
+        .replace("{{promoted_improvements}}", &promoted_text)
         .replace("{{session_count}}", &session_count.to_string())
+        .replace("{{max_improvements}}", &max_improvements.to_string())
+        .replace("{{open_count}}", &open_count.to_string())
+        .replace(
+            "{{backlog_threshold}}",
+            &config.improvements.backlog_threshold.to_string(),
+        )
 }
 
 /// Format observations as a markdown table for the analysis prompt.
@@ -937,6 +986,54 @@ fn run_auto_promotion(
                 ref_id = %imp.ref_id,
                 "failed to append promoted improvement to prompt file"
             );
+        }
+    }
+}
+
+/// Auto-dismiss improvements that have been open for more than `auto_dismiss_after` sessions.
+///
+/// Prevents integral windup — stale improvements accumulate and clog the backlog.
+fn dismiss_stale_improvements(config: &HarnessConfig, db_conn: &Connection) {
+    let threshold = config.improvements.auto_dismiss_after;
+    if threshold == 0 {
+        return; // disabled
+    }
+
+    let open = match db::list_improvements(db_conn, Some("open"), None) {
+        Ok(list) => list,
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to list open improvements for stale dismissal");
+            return;
+        }
+    };
+
+    for imp in &open {
+        let sessions_since = sessions_since_improvement(db_conn, &imp.created);
+        if sessions_since >= threshold as i64 {
+            tracing::info!(
+                ref_id = %imp.ref_id,
+                title = %imp.title,
+                sessions_since,
+                threshold,
+                "auto-dismissing stale improvement"
+            );
+            if let Err(e) = db::update_improvement(
+                db_conn,
+                &imp.ref_id,
+                Some("dismissed"),
+                None,
+                None,
+                Some(&format!(
+                    r#"{{"dismiss_reason": "auto-dismissed: open for {} sessions (threshold: {})"}}"#,
+                    sessions_since, threshold
+                )),
+            ) {
+                tracing::warn!(
+                    error = %e,
+                    ref_id = %imp.ref_id,
+                    "failed to auto-dismiss stale improvement"
+                );
+            }
         }
     }
 }
@@ -1988,6 +2085,11 @@ mod tests {
     use crate::signals::SignalHandler;
     use tempfile::tempdir;
 
+    /// Create a test database connection in the given directory.
+    fn test_db(dir: &std::path::Path) -> Connection {
+        db::open_or_create(&dir.join("test.db")).unwrap()
+    }
+
     fn test_config(dir: &std::path::Path) -> HarnessConfig {
         HarnessConfig {
             session: SessionConfig {
@@ -2034,7 +2136,16 @@ mod tests {
             reconciliation: ReconciliationConfig::default(),
             architecture: ArchitectureConfig::default(),
             quality_gates: QualityGatesConfig::default(),
-            improvements: ImprovementsConfig::default(),
+            improvements: ImprovementsConfig {
+                // Disable new safety features in test_config so existing tests
+                // aren't disrupted. New tests override these explicitly.
+                min_analyze_every: 1,
+                backlog_threshold: 0,
+                auto_dismiss_after: 0,
+                analysis_cooldown_sessions: 0,
+                max_open_improvements: 0,
+                ..ImprovementsConfig::default()
+            },
             serve: ServeConfig::default(),
             speck_validate: crate::config::SpeckValidateConfig::default(),
         }
@@ -3232,15 +3343,17 @@ mod tests {
     fn test_should_spawn_analysis_disabled() {
         let dir = tempdir().unwrap();
         let pool = test_pool(dir.path());
+        let db_conn = test_db(dir.path());
         let mut config = test_config(std::path::Path::new("/tmp"));
         config.improvements.analyze_every = 0;
-        assert!(!should_spawn_analysis(&config, 10, &pool));
+        assert!(!should_spawn_analysis(&config, 10, &pool, &db_conn));
     }
 
     #[test]
     fn test_should_spawn_analysis_already_running() {
         let dir = tempdir().unwrap();
         let mut pool = test_pool(dir.path());
+        let db_conn = test_db(dir.path());
         let mut config = test_config(std::path::Path::new("/tmp"));
         config.improvements.analyze_every = 5;
         // Simulate an analysis worker already running in the pool
@@ -3251,21 +3364,22 @@ mod tests {
             Some("analysis-1234567890".to_string()),
             None,
         );
-        assert!(!should_spawn_analysis(&config, 5, &pool));
+        assert!(!should_spawn_analysis(&config, 5, &pool, &db_conn));
     }
 
     #[test]
     fn test_should_spawn_analysis_triggers_at_interval() {
         let dir = tempdir().unwrap();
         let pool = test_pool(dir.path());
+        let db_conn = test_db(dir.path());
         let mut config = test_config(std::path::Path::new("/tmp"));
         config.improvements.analyze_every = 10;
-        assert!(!should_spawn_analysis(&config, 0, &pool));
-        assert!(!should_spawn_analysis(&config, 3, &pool));
-        assert!(!should_spawn_analysis(&config, 9, &pool));
-        assert!(should_spawn_analysis(&config, 10, &pool));
-        assert!(!should_spawn_analysis(&config, 11, &pool));
-        assert!(should_spawn_analysis(&config, 20, &pool));
+        assert!(!should_spawn_analysis(&config, 0, &pool, &db_conn));
+        assert!(!should_spawn_analysis(&config, 3, &pool, &db_conn));
+        assert!(!should_spawn_analysis(&config, 9, &pool, &db_conn));
+        assert!(should_spawn_analysis(&config, 10, &pool, &db_conn));
+        assert!(!should_spawn_analysis(&config, 11, &pool, &db_conn));
+        assert!(should_spawn_analysis(&config, 20, &pool, &db_conn));
     }
 
     #[test]
@@ -3420,6 +3534,7 @@ mod tests {
     fn test_analyze_every_1_no_infinite_loop() {
         let dir = tempdir().unwrap();
         let pool = test_pool(dir.path());
+        let db_conn = test_db(dir.path());
         let mut config = test_config(std::path::Path::new("/tmp"));
         config.improvements.analyze_every = 1;
 
@@ -3431,7 +3546,7 @@ mod tests {
         // First coding session completes → counter = 1
         total_completed_sessions += 1;
         assert!(
-            should_spawn_analysis(&config, total_completed_sessions, &pool),
+            should_spawn_analysis(&config, total_completed_sessions, &pool, &db_conn),
             "analysis should trigger after first coding session"
         );
 
@@ -3463,7 +3578,7 @@ mod tests {
         total_completed_sessions += 1;
         assert_eq!(total_completed_sessions, 2);
         assert!(
-            should_spawn_analysis(&config, total_completed_sessions, &pool),
+            should_spawn_analysis(&config, total_completed_sessions, &pool, &db_conn),
             "analysis should trigger after second coding session"
         );
     }
@@ -3474,6 +3589,7 @@ mod tests {
     #[test]
     fn test_single_worker_coding_not_starved_by_analysis() {
         let dir = tempdir().unwrap();
+        let db_conn = test_db(dir.path());
         let wt_dir = dir.path().join("worktrees");
         let _ = std::fs::create_dir_all(&wt_dir);
         let workers_config = crate::config::WorkersConfig {
@@ -3489,7 +3605,7 @@ mod tests {
 
         // After 1 coding session, analysis is due
         let total_completed_sessions = 1;
-        let analysis_due = should_spawn_analysis(&config, total_completed_sessions, &pool);
+        let analysis_due = should_spawn_analysis(&config, total_completed_sessions, &pool, &db_conn);
         assert!(analysis_due);
 
         // With 1 idle worker and analysis_due, coding_slots should be 0
@@ -3515,6 +3631,7 @@ mod tests {
     #[test]
     fn test_two_workers_analysis_gets_one_slot() {
         let dir = tempdir().unwrap();
+        let db_conn = test_db(dir.path());
         let wt_dir = dir.path().join("worktrees");
         let _ = std::fs::create_dir_all(&wt_dir);
         let workers_config = crate::config::WorkersConfig {
@@ -3529,7 +3646,7 @@ mod tests {
         config.improvements.analyze_every = 1;
 
         let total_completed_sessions = 1;
-        let analysis_due = should_spawn_analysis(&config, total_completed_sessions, &pool);
+        let analysis_due = should_spawn_analysis(&config, total_completed_sessions, &pool, &db_conn);
         assert!(analysis_due);
 
         let coding_slots = if analysis_due {
@@ -3551,11 +3668,12 @@ mod tests {
     fn test_no_analysis_before_any_coding_session() {
         let dir = tempdir().unwrap();
         let pool = test_pool(dir.path());
+        let db_conn = test_db(dir.path());
         let mut config = test_config(std::path::Path::new("/tmp"));
         config.improvements.analyze_every = 1;
 
         assert!(
-            !should_spawn_analysis(&config, 0, &pool),
+            !should_spawn_analysis(&config, 0, &pool, &db_conn),
             "must not trigger analysis before any coding sessions"
         );
     }
@@ -3566,11 +3684,12 @@ mod tests {
     fn test_already_running_guard_prevents_duplicate_analysis() {
         let dir = tempdir().unwrap();
         let mut pool = test_pool(dir.path());
+        let db_conn = test_db(dir.path());
         let mut config = test_config(std::path::Path::new("/tmp"));
         config.improvements.analyze_every = 1;
 
         // Analysis is due (total_completed_sessions=1, 1%1==0)
-        assert!(should_spawn_analysis(&config, 1, &pool));
+        assert!(should_spawn_analysis(&config, 1, &pool, &db_conn));
 
         // Now simulate an analysis worker running
         pool.set_worker_state_for_test(
@@ -3583,12 +3702,12 @@ mod tests {
 
         // Even though 1%1==0, the running guard blocks it
         assert!(
-            !should_spawn_analysis(&config, 1, &pool),
+            !should_spawn_analysis(&config, 1, &pool, &db_conn),
             "must not spawn second analysis while one is already running"
         );
         // And for subsequent coding completions too
-        assert!(!should_spawn_analysis(&config, 2, &pool));
-        assert!(!should_spawn_analysis(&config, 3, &pool));
+        assert!(!should_spawn_analysis(&config, 2, &pool, &db_conn));
+        assert!(!should_spawn_analysis(&config, 3, &pool, &db_conn));
     }
 
     /// Simulate the exact bug report scenario end-to-end:
@@ -3606,6 +3725,7 @@ mod tests {
     fn test_bug_report_scenario_no_runaway_loop() {
         let dir = tempdir().unwrap();
         let pool = test_pool(dir.path());
+        let db_conn = test_db(dir.path());
         let mut config = test_config(std::path::Path::new("/tmp"));
         config.improvements.analyze_every = 1;
         config.improvements.analyze_sessions = 1;
@@ -3619,7 +3739,7 @@ mod tests {
         for _ in 0..30 {
             // Analysis completes and is counted (old bug)
             broken_counter += 1;
-            if should_spawn_analysis(&config, broken_counter, &pool) {
+            if should_spawn_analysis(&config, broken_counter, &pool, &db_conn) {
                 broken_analysis_spawns += 1;
             }
         }
@@ -3637,7 +3757,7 @@ mod tests {
         for _ in 0..30 {
             // Analysis completes — NOT counted (the fix)
             // fixed_counter stays at 0
-            if should_spawn_analysis(&config, fixed_counter, &pool) {
+            if should_spawn_analysis(&config, fixed_counter, &pool, &db_conn) {
                 fixed_analysis_from_analysis += 1;
             }
         }
@@ -3654,8 +3774,225 @@ mod tests {
         // A coding session finally completes → counter goes to 1
         fixed_counter += 1;
         assert!(
-            should_spawn_analysis(&config, fixed_counter, &pool),
+            should_spawn_analysis(&config, fixed_counter, &pool, &db_conn),
             "analysis should trigger after a real coding session"
         );
+    }
+
+    // ── Backlog threshold tests ─────────────────────────────────────────
+
+    #[test]
+    fn test_backlog_threshold_blocks_analysis() {
+        let dir = tempdir().unwrap();
+        let pool = test_pool(dir.path());
+        let db_conn = test_db(dir.path());
+        let mut config = test_config(std::path::Path::new("/tmp"));
+        config.improvements.analyze_every = 5;
+        config.improvements.backlog_threshold = 10;
+
+        // Insert 10 open improvements to hit the threshold
+        for i in 0..10 {
+            db::insert_improvement(
+                &db_conn,
+                "workflow",
+                &format!("Improvement {i}"),
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        }
+
+        assert!(
+            !should_spawn_analysis(&config, 5, &pool, &db_conn),
+            "analysis should be blocked when backlog is at threshold"
+        );
+    }
+
+    #[test]
+    fn test_backlog_threshold_allows_below() {
+        let dir = tempdir().unwrap();
+        let pool = test_pool(dir.path());
+        let db_conn = test_db(dir.path());
+        let mut config = test_config(std::path::Path::new("/tmp"));
+        config.improvements.analyze_every = 5;
+        config.improvements.backlog_threshold = 5;
+
+        // Insert 4 open improvements (below threshold of 5)
+        for i in 0..4 {
+            db::insert_improvement(
+                &db_conn,
+                "workflow",
+                &format!("Improvement {i}"),
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        }
+
+        assert!(
+            should_spawn_analysis(&config, 5, &pool, &db_conn),
+            "analysis should be allowed when backlog is below threshold"
+        );
+    }
+
+    #[test]
+    fn test_backlog_threshold_disabled() {
+        let dir = tempdir().unwrap();
+        let pool = test_pool(dir.path());
+        let db_conn = test_db(dir.path());
+        let mut config = test_config(std::path::Path::new("/tmp"));
+        config.improvements.analyze_every = 5;
+        config.improvements.backlog_threshold = 0; // disabled
+
+        // Insert 100 open improvements — threshold disabled so it shouldn't matter
+        for i in 0..100 {
+            db::insert_improvement(
+                &db_conn,
+                "workflow",
+                &format!("Improvement {i}"),
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        }
+
+        assert!(
+            should_spawn_analysis(&config, 5, &pool, &db_conn),
+            "analysis should always be allowed when backlog_threshold=0"
+        );
+    }
+
+    // ── effective_analyze_every tests ───────────────────────────────────
+
+    #[test]
+    fn test_effective_analyze_every_clamps() {
+        let mut cfg = ImprovementsConfig::default();
+        cfg.analyze_every = 1;
+        cfg.min_analyze_every = 5;
+        assert_eq!(cfg.effective_analyze_every(), 5);
+    }
+
+    #[test]
+    fn test_effective_analyze_every_zero_stays_zero() {
+        let mut cfg = ImprovementsConfig::default();
+        cfg.analyze_every = 0;
+        cfg.min_analyze_every = 5;
+        assert_eq!(cfg.effective_analyze_every(), 0, "disabled stays disabled");
+    }
+
+    #[test]
+    fn test_effective_analyze_every_no_clamp_when_above() {
+        let mut cfg = ImprovementsConfig::default();
+        cfg.analyze_every = 10;
+        cfg.min_analyze_every = 5;
+        assert_eq!(cfg.effective_analyze_every(), 10);
+    }
+
+    // ── count_open_improvements tests ──────────────────────────────────
+
+    #[test]
+    fn test_count_open_improvements() {
+        let dir = tempdir().unwrap();
+        let db_conn = test_db(dir.path());
+
+        // Insert a mix of statuses
+        db::insert_improvement(&db_conn, "workflow", "Open 1", None, None, None).unwrap();
+        db::insert_improvement(&db_conn, "cost", "Open 2", None, None, None).unwrap();
+        let ref3 =
+            db::insert_improvement(&db_conn, "quality", "To dismiss", None, None, None).unwrap();
+        db::update_improvement(&db_conn, &ref3, Some("dismissed"), None, None, None).unwrap();
+        let ref4 =
+            db::insert_improvement(&db_conn, "prompt", "To promote", None, None, None).unwrap();
+        db::update_improvement(&db_conn, &ref4, Some("promoted"), None, None, None).unwrap();
+
+        assert_eq!(
+            db::count_open_improvements(&db_conn).unwrap(),
+            2,
+            "only open improvements should be counted"
+        );
+    }
+
+    // ── dismiss_stale_improvements tests ───────────────────────────────
+
+    #[test]
+    fn test_dismiss_stale_improvements() {
+        let dir = tempdir().unwrap();
+        let db_conn = test_db(dir.path());
+        let mut config = test_config(dir.path());
+        config.improvements.auto_dismiss_after = 30;
+
+        // Insert an old improvement
+        db::insert_improvement(&db_conn, "workflow", "Old improvement", None, None, None).unwrap();
+
+        // Insert 31 observations after the improvement was created
+        for i in 1..=31 {
+            db::upsert_observation(
+                &db_conn,
+                i,
+                &format!("2099-01-{:02}T10:00:00Z", (i % 28) + 1),
+                Some(300),
+                Some("success"),
+                "{}",
+            )
+            .unwrap();
+        }
+
+        dismiss_stale_improvements(&config, &db_conn);
+
+        let open = db::count_open_improvements(&db_conn).unwrap();
+        assert_eq!(open, 0, "stale improvement should have been dismissed");
+    }
+
+    #[test]
+    fn test_dismiss_stale_disabled() {
+        let dir = tempdir().unwrap();
+        let db_conn = test_db(dir.path());
+        let mut config = test_config(dir.path());
+        config.improvements.auto_dismiss_after = 0; // disabled
+
+        db::insert_improvement(&db_conn, "workflow", "Old improvement", None, None, None).unwrap();
+
+        // Insert 100 observations
+        for i in 1..=100 {
+            db::upsert_observation(
+                &db_conn,
+                i,
+                &format!("2099-01-{:02}T10:00:00Z", (i % 28) + 1),
+                Some(300),
+                Some("success"),
+                "{}",
+            )
+            .unwrap();
+        }
+
+        dismiss_stale_improvements(&config, &db_conn);
+
+        let open = db::count_open_improvements(&db_conn).unwrap();
+        assert_eq!(open, 1, "improvement should remain open when auto_dismiss_after=0");
+    }
+
+    // ── Analysis prompt template tests ─────────────────────────────────
+
+    #[test]
+    fn test_assemble_analysis_prompt_new_placeholders_replaced() {
+        let dir = tempdir().unwrap();
+        let data_dir = test_data_dir(dir.path());
+        let db_path = data_dir.db();
+        let db_conn = db::open_or_create(&db_path).unwrap();
+
+        let mut config = test_config(dir.path());
+        config.improvements.analyze_sessions = 20;
+        config.improvements.backlog_threshold = 10;
+        config.improvements.max_open_improvements = 5;
+
+        let prompt = assemble_analysis_prompt(&config, &data_dir, &db_conn);
+
+        assert!(!prompt.contains("{{promoted_improvements}}"));
+        assert!(!prompt.contains("{{max_improvements}}"));
+        assert!(!prompt.contains("{{open_count}}"));
+        assert!(!prompt.contains("{{backlog_threshold}}"));
     }
 }

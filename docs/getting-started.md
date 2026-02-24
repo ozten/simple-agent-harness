@@ -1,50 +1,42 @@
 # Getting Started
 
+## Prerequisites
+
+- Git repository
+- [beads](https://github.com/steveyegge/beads) (`bd`) installed and configured
+- An AI coding agent installed (Claude Code by default)
+
 ## Install
 
 ```bash
+curl -fsSL https://raw.githubusercontent.com/ozten/blacksmith/main/scripts/install.sh | bash
+```
+
+To install a specific version:
+
+```bash
+BLACKSMITH_VERSION=0.1.0 curl -fsSL https://raw.githubusercontent.com/ozten/blacksmith/main/scripts/install.sh | bash
+```
+
+Or build from source:
+
+```bash
 cargo build --release
+# Binary at target/release/blacksmith
 ```
 
-The binary is at `target/release/blacksmith`.
-
-## First Run
-
-1. Create a `PROMPT.md` with instructions for your agent.
-2. Run:
+## Initialize
 
 ```bash
-blacksmith
-```
-
-That's it. With no config file, sensible defaults apply: runs `claude` for up to 25 productive iterations, monitors for stale sessions, retries empty outputs, and handles rate limits with exponential backoff.
-
-## Initialize Data Directory
-
-```bash
+cd your-project
 blacksmith init
 ```
 
-Creates `.blacksmith/` with default config, prompt, skills, and database. This happens automatically on first run, but you can run it explicitly to inspect the defaults.
+This creates the `.blacksmith/` directory with default config, prompt template, skills, and database. See [Initialization](deployment/initialization.md) for details on what gets created.
 
-## Configuration
+## Edit Your Prompt
 
-Create `.blacksmith/config.toml` to override defaults (or `blacksmith.toml` in the project root — both work, but the new location is preferred):
-
-```toml
-[session]
-max_iterations = 10
-prompt_file = "PROMPT.md"
-
-[watchdog]
-stale_timeout_mins = 15
-
-[hooks]
-pre_session = ["git pull --rebase"]
-post_session = ["./notify.sh"]
-```
-
-See [Configuration Reference](configuration.md) for all options.
+Open `.blacksmith/PROMPT.md` and write instructions for your agent. This is what the agent sees each session — project context, coding conventions, what to work on.
 
 ## Validate Config
 
@@ -54,7 +46,17 @@ blacksmith --dry-run
 
 Prints the fully resolved configuration (defaults + file + CLI overrides) without running.
 
+## Run
+
+```bash
+blacksmith
+```
+
+Blacksmith runs `claude` by default for up to 25 productive iterations, monitoring for stale sessions, retrying empty outputs, and handling rate limits with exponential backoff.
+
 ## Check Status
+
+From another terminal:
 
 ```bash
 blacksmith --status
@@ -62,42 +64,34 @@ blacksmith --status
 
 Shows whether a harness is running, current iteration, uptime, and worker status.
 
-## Key Concepts
+## View Metrics
 
-### Productive Iterations
-
-Only sessions that produce meaningful output (above `min_output_bytes`) count as productive iterations toward `max_iterations`. Empty sessions trigger retries, and rate-limited sessions trigger backoff — neither counts.
-
-### Graceful Shutdown
-
-- `touch STOP` — exits after the current session
-- `Ctrl+C` — first press finishes the current session, second press (within 3s) force-kills
-
-### Metrics
-
-Blacksmith automatically collects per-session metrics (turns, cost, duration). View them with:
+After sessions complete:
 
 ```bash
 blacksmith metrics status
 ```
 
-### Multi-Agent Mode
+See [Metrics Overview](metrics/overview.md) for the full metrics system.
 
-To run multiple agents in parallel:
+## Stop
 
-```toml
-[workers]
-max = 3
-```
+Three ways to stop:
 
-See [Multi-Agent Coordination](multi-agent.md).
+| Method | Behavior |
+|---|---|
+| `touch STOP` | Clean exit after current session |
+| `Ctrl+C` | First press finishes current session, second force-kills |
+| `SIGTERM` | Same as first `Ctrl+C` |
+
+See [Graceful Shutdown](core/graceful-shutdown.md) for details.
 
 ## Using a Different Agent
 
-Blacksmith works with any AI coding agent. Configure the command and adapter:
+Blacksmith works with any AI coding agent. Change the command in `.blacksmith/config.toml`:
 
 ```toml
-# Codex (OpenAI)
+# Codex
 [agent]
 command = "codex"
 args = ["exec", "--json", "--yolo", "{prompt}"]
@@ -113,24 +107,36 @@ command = "opencode"
 args = ["run", "{prompt}"]
 ```
 
-The adapter is auto-detected from the command name. See [Agent Adapters](adapters.md) for full flag reference and metrics support.
+The adapter is auto-detected from the command name. See [Adapters Overview](adapters/overview.md) for details.
 
-## Project Structure
+## Enable Multi-Agent Mode
 
+To run multiple agents in parallel:
+
+```toml
+[workers]
+max = 3
 ```
-your-project/
-├── PROMPT.md           # Agent instructions
-├── STOP                # Touch to stop gracefully
-└── .blacksmith/        # Data directory (auto-created)
-    ├── config.toml     # Configuration (optional)
-    ├── blacksmith.db   # Metrics database
-    ├── sessions/       # Session output files
-    └── ...
+
+See [Multi-Agent Overview](multi-agent/overview.md).
+
+## Launch the Dashboard
+
+Optional web UI for monitoring:
+
+```bash
+# Start the API server in each project
+blacksmith serve &
+
+# Start the dashboard (once)
+blacksmith-ui
 ```
+
+Open http://localhost:8080. See [Dashboard Overview](dashboard/overview.md).
 
 ## Next Steps
 
-- [CLI Reference](cli-reference.md) — All commands and flags
-- [Core Loop](core-loop.md) — How sessions work
-- [Metrics & Improvements](metrics.md) — Track and improve agent performance
-- [Configuration Reference](configuration.md) — Every config option
+- [Overview](overview.md) — Key concepts and architecture
+- [Session Lifecycle](core/session-lifecycle.md) — How each iteration works
+- [Configuration Reference](reference/configuration.md) — All config options
+- [CLI Reference](reference/cli.md) — All commands and flags

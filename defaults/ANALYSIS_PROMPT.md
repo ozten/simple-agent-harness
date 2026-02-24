@@ -16,6 +16,14 @@ problem it describes no longer appears in recent sessions), close it.
 
 {{open_improvements}}
 
+## Recently Promoted Improvements
+
+These improvements were recently promoted. Check whether they actually moved the
+metrics they targeted. If recent promotions show no measurable improvement,
+focus only on closing/dismissing stale items — do NOT file new improvements.
+
+{{promoted_improvements}}
+
 ## Session Count
 
 Total completed sessions this run: {{session_count}}
@@ -38,6 +46,17 @@ exist, or the approach was wrong), dismiss it:
 blacksmith improve dismiss <REF> --reason "<why>"
 ```
 
+### Step 1.5: Check promotion effectiveness
+
+Before filing any new improvements, review the recently promoted improvements
+above. If promoted improvements did NOT produce measurable metric improvements
+in subsequent sessions, SKIP filing new improvements entirely. The system needs
+time to absorb existing changes before adding more.
+
+Only proceed to Steps 2-4 if:
+- There are no recent promotions, OR
+- Recent promotions show clear metric improvements in later sessions
+
 ### Step 2: Analyze metrics for new patterns
 
 Look for:
@@ -55,55 +74,45 @@ Score each potential improvement on two axes (1-5 each):
 - Multiply: score = value x tractability
 - Only proceed with score >= 6.
 
-### Step 4: File improvements as PROMPT.md edits
+### Step 4: Apply improvements directly
 
-Every improvement **must** be a concrete edit to PROMPT.md. The `--body` field
-must contain the exact text to add, remove, or change in PROMPT.md.
+Every improvement **must** be a concrete edit to PROMPT.md. Apply the edit
+yourself directly — do NOT create beads or work items.
 
-Good example:
-```
-blacksmith improve add --category prompt \
-  "Add rule: batch independent file reads" \
-  --body "Add to PROMPT.md ## Efficiency section: 'When reading multiple files that are independent, emit all Read calls in a single turn.'"
-```
-
-Bad examples (DO NOT do these):
-- `--body "Every turn should include at least one tool call."` (abstract advice, not a PROMPT.md edit)
-- `--body "Reduce API calls"` (vague, no file or edit specified)
-- `--body "Consider batching reads"` (suggestion, not a concrete rule)
-
-Use `blacksmith improve add`:
+For each improvement:
+1. File the improvement record:
 ```
 blacksmith improve add --category <category> "<title>" --body "<exact PROMPT.md edit>"
 ```
+2. Apply the edit to PROMPT.md yourself using your file editing tools.
+3. Promote the improvement immediately after applying:
+```
+blacksmith improve promote <REF>
+```
+
 Categories: workflow, cost, quality, prompt
 
-### Step 5: Create beads for approved edits
-
-For each improvement filed, also create a bead so a coding agent implements it:
-
-```
-bd create --type process --priority <0|1> "<title>" \
-  --design "Edit PROMPT.md: <exact description of what to add/change/remove>"
-```
+**Do NOT create beads** (`bd create`) — this causes a positive feedback spiral
+where analysis creates work that triggers more analysis. Apply edits directly.
 
 ## Rules
 
-- File at most **3 improvements** per analysis run to avoid flooding the queue.
+- File at most **{{max_improvements}}** improvements per analysis run.
 - Every improvement must specify a **concrete PROMPT.md edit** — what text to add,
   change, or remove, and where in the file.
 - Do NOT file improvements for problems already covered by open improvements.
 - Do NOT file vague improvements like "improve performance" — be specific.
 - Focus on **process** improvements (prompt rules, workflow), not feature work.
 - Always close resolved improvements before filing new ones.
+- Currently **{{open_count}}** improvements are open (threshold: {{backlog_threshold}}).
 
 ## When Done
 
-After creating beads and recording improvements, commit your changes:
+After applying edits, commit your changes:
 
 ```
-git add .beads/
-git commit -m "analysis: file process improvement beads"
+git add PROMPT.md .beads/
+git commit -m "analysis: apply process improvements to PROMPT.md"
 ```
 
 Then signal completion — the coordinator will merge your changes.

@@ -24,15 +24,37 @@ Every time you are about to call a tool, ask: "Is there another independent call
 **A session with ZERO parallel calls is a failure.** Target at least 5 turns with 2+ parallel calls per session.
 
 ### Rule B: NEVER emit a text-only turn. Every assistant message MUST include at least one tool call.
-WRONG: "Let me check the tests." (turn 1) → `Grep(tests/)` (turn 2)
-RIGHT: "Let me check the tests." + `Grep(tests/)` (turn 1 — one message, includes both text AND tool call)
-
 If you want to narrate what you're doing, include the narration AND the tool call in the same message. A text-only turn doubles your turn count for zero benefit.
+
+**Common violations — NEVER do these:**
+- WRONG: "Let me check the tests." (turn 1) → `Grep(tests/)` (turn 2)
+- WRONG: "I'll now read the file and make changes." (turn 1) → `Read(file)` (turn 2)
+- WRONG: "The tests passed. Let me now run lint." (turn 1) → `Bash(lint)` (turn 2)
+- WRONG: "I see the issue. The function needs X." (turn 1) → `Edit(file)` (turn 2)
+
+**RIGHT pattern — always combine narration with action:**
+- RIGHT: "Let me check the tests." + `Grep(tests/)` → ONE turn
+- RIGHT: "Tests passed, running lint." + `Bash(lint)` → ONE turn
+- RIGHT: "I see the issue — fixing now." + `Edit(file)` → ONE turn
+
+**Target: 0% narration-only turns per session.**
 
 ### Rule C: After closing your bead, EXIT IMMEDIATELY.
 Do NOT triage other beads. Do NOT run `bd ready` to find more work. Do NOT explore what to do next.
 The sequence after closing is: `blacksmith progress add --bead-id <id> --stdin` -> run `blacksmith finish` -> STOP.
 Each session handles exactly ONE bead. The loop script handles picking the next one.
+
+### Rule D: RETRY BUDGET — stop after 5 failed attempts of the same approach.
+If you try the same approach (edit a file, run a command, check the result) and it fails **5 times**, STOP. Do not keep looping. Instead:
+
+1. Revert your changes: `git checkout -- .`
+2. Mark the failure: `bd update <id> --status=open --notes="[FAILED-ATTEMPT] <YYYY-MM-DD> retry-budget-exceeded: <brief description of the loop>"`
+3. Record a progress entry describing what you tried and why it kept failing
+4. Exit the session cleanly
+
+**What counts as "the same approach":** Editing the same file or set of files to fix the same error, then re-running the same command and getting the same (or similar) failure. Minor variations (e.g., tweaking a value by 1) still count as the same approach.
+
+**What to do instead of retrying:** If your first 3 attempts haven't converged on a fix, step back and reconsider. Read error messages carefully, check upstream callers, or look for a fundamentally different approach. If no alternative exists, bail out — the next session (or a human) can take a fresh look.
 
 ---
 
@@ -113,6 +135,8 @@ For the selected task (e.g., bd-X):
      This runs quality gates (check + test), verifies bead deliverables, then handles: staging, committing, bd close, bd sync, auto-committing .beads/, recording bead closure metadata, and git push — all in one command.
      **If quality gates fail, the bead is NOT closed.** Fix the issues and re-run.
    - If no specific files to stage, omit the file list and it will stage all tracked modified files.
+   - **Max 3 `blacksmith finish` attempts.** If `blacksmith finish` fails 3 times, fall back to closing manually: run `bd close bd-X --reason="<description>"` then `bd sync`, then commit `.beads/` and push. Do NOT keep retrying indefinitely.
+   - **Nothing to commit is OK.** If a prior session already committed the code and `blacksmith finish` succeeds through all gates, it will handle the empty-commit case gracefully. Do NOT try to create artificial changes just to have something to commit.
    - **After `blacksmith finish` completes, STOP. Do not triage more work. Do not run bd ready. Session is done.**
 
 ## Turn Budget (R1)
@@ -126,6 +150,12 @@ You have a **hard budget of 80 assistant turns** per session. Track your turn co
 
 If you realize before turn 40 that the task is too large to complete in the remaining budget, STOP immediately. Mark the failure, and exit. Do not burn 40 more turns on a doomed session.
 
+**Turn 60 gate — TOO-LARGE check:** At turn 60, if you have NOT yet started step 4 (Verify), the bead is too large for one session. STOP immediately:
+```bash
+bd update <id> --status=open --notes="[TOO-LARGE] YYYY-MM-DD: exceeded 60 turns before verification"
+```
+Record a progress entry and exit cleanly. The next session will detect the [TOO-LARGE] marker and decompose the bead.
+
 ### Marking a Failed Attempt
 When bailing out of a task for any reason, always run:
 ```bash
@@ -138,6 +168,13 @@ Use a specific reason: `too-large`, `tests-failing`, `lint-unfixable`, `missing-
 - After calling `blacksmith finish`, do NOT continue. Do NOT triage. Do NOT run bd ready again.
 - If task cannot be completed, mark the failure (see above), record progress with `blacksmith progress add`, exit cleanly
 - If tests fail, debug and fix within this iteration
+
+### Graceful Shutdown
+If you sense you're running low on context or turns (turn 70+) and haven't finished:
+1. **Save progress immediately**: run `blacksmith progress add --bead-id bd-X --stdin` with what you've done so far, what remains, and what state the code is in
+2. **If code compiles and tests pass**: attempt `blacksmith finish` — partial progress that passes gates is better than nothing
+3. **If code is broken**: revert with `git checkout -- .`, mark the failure, record progress, and exit
+4. **Never let a session end silently** — always leave a progress entry or failure marker so the next session knows what happened
 
 ## Improvement Recording
 
