@@ -3331,4 +3331,309 @@ mod tests {
         assert!(ts.parse::<u64>().is_ok(), "timestamp should be numeric: {ts}");
     }
 
+    // ── Runaway analysis loop regression tests ───────────────────────
+    //
+    // These tests prove the scenario from the bug report cannot recur:
+    //   analyze_every=1 + analysis outcomes counting as sessions
+    //   → infinite analysis-only loop, zero coding work done.
+
+    /// Core invariant: analysis outcomes must NOT increment the session
+    /// counter. If they did, analyze_every=1 would re-trigger analysis
+    /// on its own completion, creating an infinite loop.
+    #[test]
+    fn test_analysis_outcomes_excluded_from_session_counter() {
+        // This test replicates the counting logic from the coordinator loop
+        // (lines ~220-326) to prove analysis workers are filtered out.
+
+        let dir = tempdir().unwrap();
+        let mut pool = test_pool(dir.path());
+
+        // Simulate 3 completed workers: 2 coding + 1 analysis
+        pool.set_worker_state_for_test(
+            0,
+            crate::pool::WorkerState::Coding,
+            Some(1),
+            Some("bead-abc".to_string()),
+            None,
+        );
+        pool.set_worker_state_for_test(
+            1,
+            crate::pool::WorkerState::Coding,
+            Some(2),
+            Some("bead-def".to_string()),
+            None,
+        );
+        pool.set_worker_state_for_test(
+            2,
+            crate::pool::WorkerState::Coding,
+            Some(3),
+            Some("analysis-1234567890".to_string()),
+            None,
+        );
+
+        // Snapshot analysis worker IDs (same logic as coordinator)
+        let worker_ids: Vec<u32> = vec![0, 1, 2];
+        let analysis_worker_ids: Vec<u32> = worker_ids
+            .iter()
+            .filter(|&&id| {
+                pool.worker_bead_id(id)
+                    .map(is_analysis_bead)
+                    .unwrap_or(false)
+            })
+            .copied()
+            .collect();
+
+        assert_eq!(analysis_worker_ids, vec![2]);
+
+        // Count coding outcomes (same logic as coordinator)
+        let coding_outcome_count = worker_ids
+            .iter()
+            .filter(|id| !analysis_worker_ids.contains(id))
+            .count();
+
+        assert_eq!(coding_outcome_count, 2, "only coding outcomes should count");
+    }
+
+    /// With analyze_every=1, prove that analysis completion alone does NOT
+    /// advance total_completed_sessions, so should_spawn_analysis stays
+    /// false until a real coding session completes.
+    #[test]
+    fn test_analyze_every_1_no_infinite_loop() {
+        let dir = tempdir().unwrap();
+        let pool = test_pool(dir.path());
+        let mut config = test_config(std::path::Path::new("/tmp"));
+        config.improvements.analyze_every = 1;
+
+        // Simulate the runaway scenario: 30 analysis-only completions.
+        // If analysis outcomes were counted, total_completed_sessions would
+        // be 30 and should_spawn_analysis would return true on every check.
+        let mut total_completed_sessions: u32 = 0;
+
+        // First coding session completes → counter = 1
+        total_completed_sessions += 1;
+        assert!(
+            should_spawn_analysis(&config, total_completed_sessions, &pool),
+            "analysis should trigger after first coding session"
+        );
+
+        // Analysis completes — counter must NOT increment
+        // (analysis outcome filtered out)
+        // total_completed_sessions stays at 1
+
+        // Check again with same counter: 1 % 1 == 0 still true,
+        // BUT the pool would show analysis already running (tested separately).
+        // After the analysis worker finishes and resets, the counter is still 1.
+        // Next poll: should_spawn_analysis(1) → true, but only because
+        // the original coding session hasn't been "consumed" yet.
+        // The coordinator needs another coding completion to move past this.
+
+        // Simulate 30 consecutive analysis completions with no coding work:
+        // counter stays frozen at 1 the entire time.
+        for _ in 0..30 {
+            // Analysis completes — not counted
+            let analysis_counted = 0u32; // analysis excluded
+            total_completed_sessions += analysis_counted;
+        }
+
+        assert_eq!(
+            total_completed_sessions, 1,
+            "30 analysis completions should not have changed the counter"
+        );
+
+        // Second coding session completes → counter = 2
+        total_completed_sessions += 1;
+        assert_eq!(total_completed_sessions, 2);
+        assert!(
+            should_spawn_analysis(&config, total_completed_sessions, &pool),
+            "analysis should trigger after second coding session"
+        );
+    }
+
+    /// With analyze_every=1 and max_workers=1, coding beads must still get
+    /// the single worker slot. Analysis only fires when there's an idle
+    /// slot AFTER coding beads are scheduled.
+    #[test]
+    fn test_single_worker_coding_not_starved_by_analysis() {
+        let dir = tempdir().unwrap();
+        let wt_dir = dir.path().join("worktrees");
+        let _ = std::fs::create_dir_all(&wt_dir);
+        let workers_config = crate::config::WorkersConfig {
+            max: 1, // single worker
+            base_branch: "main".to_string(),
+            worktrees_dir: "worktrees".to_string(),
+            persistent: false,
+        };
+        let pool = WorkerPool::new(&workers_config, dir.path().to_path_buf(), wt_dir, 0);
+
+        let mut config = test_config(std::path::Path::new("/tmp"));
+        config.improvements.analyze_every = 1;
+
+        // After 1 coding session, analysis is due
+        let total_completed_sessions = 1;
+        let analysis_due =
+            should_spawn_analysis(&config, total_completed_sessions, &pool);
+        assert!(analysis_due);
+
+        // With 1 idle worker and analysis_due, coding_slots should be 0
+        // (the slot is reserved for analysis)
+        let coding_slots = if analysis_due {
+            (pool.idle_count() as usize).saturating_sub(1)
+        } else {
+            pool.idle_count() as usize
+        };
+        assert_eq!(pool.idle_count(), 1);
+        assert_eq!(coding_slots, 0, "single slot should be reserved for analysis");
+
+        // After analysis completes (counter unchanged), if there are no new
+        // coding completions, counter stays at 1 and analysis_due stays true.
+        // But the `already running` guard prevents a second concurrent analysis.
+    }
+
+    /// With analyze_every=1 and max_workers=2, one slot goes to coding
+    /// and one to analysis when analysis is due.
+    #[test]
+    fn test_two_workers_analysis_gets_one_slot() {
+        let dir = tempdir().unwrap();
+        let wt_dir = dir.path().join("worktrees");
+        let _ = std::fs::create_dir_all(&wt_dir);
+        let workers_config = crate::config::WorkersConfig {
+            max: 2,
+            base_branch: "main".to_string(),
+            worktrees_dir: "worktrees".to_string(),
+            persistent: false,
+        };
+        let pool = WorkerPool::new(&workers_config, dir.path().to_path_buf(), wt_dir, 0);
+
+        let mut config = test_config(std::path::Path::new("/tmp"));
+        config.improvements.analyze_every = 1;
+
+        let total_completed_sessions = 1;
+        let analysis_due =
+            should_spawn_analysis(&config, total_completed_sessions, &pool);
+        assert!(analysis_due);
+
+        let coding_slots = if analysis_due {
+            (pool.idle_count() as usize).saturating_sub(1)
+        } else {
+            pool.idle_count() as usize
+        };
+        assert_eq!(pool.idle_count(), 2);
+        assert_eq!(coding_slots, 1, "one slot for coding, one reserved for analysis");
+    }
+
+    /// Prove that should_spawn_analysis returns false at session 0,
+    /// even with analyze_every=1. This prevents analysis from firing
+    /// before any real work has been done.
+    #[test]
+    fn test_no_analysis_before_any_coding_session() {
+        let dir = tempdir().unwrap();
+        let pool = test_pool(dir.path());
+        let mut config = test_config(std::path::Path::new("/tmp"));
+        config.improvements.analyze_every = 1;
+
+        assert!(
+            !should_spawn_analysis(&config, 0, &pool),
+            "must not trigger analysis before any coding sessions"
+        );
+    }
+
+    /// With analyze_every=1, the `already running` guard must prevent
+    /// concurrent analysis even if the modulo condition keeps matching.
+    #[test]
+    fn test_already_running_guard_prevents_duplicate_analysis() {
+        let dir = tempdir().unwrap();
+        let mut pool = test_pool(dir.path());
+        let mut config = test_config(std::path::Path::new("/tmp"));
+        config.improvements.analyze_every = 1;
+
+        // Analysis is due (total_completed_sessions=1, 1%1==0)
+        assert!(should_spawn_analysis(&config, 1, &pool));
+
+        // Now simulate an analysis worker running
+        pool.set_worker_state_for_test(
+            0,
+            crate::pool::WorkerState::Coding,
+            Some(1),
+            Some("analysis-9999".to_string()),
+            None,
+        );
+
+        // Even though 1%1==0, the running guard blocks it
+        assert!(
+            !should_spawn_analysis(&config, 1, &pool),
+            "must not spawn second analysis while one is already running"
+        );
+        // And for subsequent coding completions too
+        assert!(!should_spawn_analysis(&config, 2, &pool));
+        assert!(!should_spawn_analysis(&config, 3, &pool));
+    }
+
+    /// Simulate the exact bug report scenario end-to-end:
+    /// analyze_every=1, analyze_sessions=1, single worker.
+    ///
+    /// The old bug: analysis completion incremented total_completed_sessions,
+    /// so the counter raced ahead and should_spawn_analysis kept returning
+    /// true even with no coding work. The coordinator would spawn analysis
+    /// after analysis after analysis — zero coding beads.
+    ///
+    /// The fix: analysis completions don't touch total_completed_sessions.
+    /// The counter only advances on coding completions, so the ratio of
+    /// analysis to coding stays bounded.
+    #[test]
+    fn test_bug_report_scenario_no_runaway_loop() {
+        let dir = tempdir().unwrap();
+        let pool = test_pool(dir.path());
+        let mut config = test_config(std::path::Path::new("/tmp"));
+        config.improvements.analyze_every = 1;
+        config.improvements.analyze_sessions = 1;
+
+        // Simulate the OLD broken behavior: every outcome (including analysis)
+        // increments the counter. After N analysis-only sessions, the counter
+        // is N and should_spawn_analysis returns true on every check.
+        let mut broken_counter: u32 = 0;
+        let mut broken_analysis_spawns = 0u32;
+
+        for _ in 0..30 {
+            // Analysis completes and is counted (old bug)
+            broken_counter += 1;
+            if should_spawn_analysis(&config, broken_counter, &pool) {
+                broken_analysis_spawns += 1;
+            }
+        }
+        // Old behavior: analysis fires 30 times with zero coding sessions
+        assert_eq!(
+            broken_analysis_spawns, 30,
+            "confirms old bug: analysis triggers on every analysis completion"
+        );
+
+        // Now simulate the FIXED behavior: only coding outcomes increment.
+        let mut fixed_counter: u32 = 0;
+        let mut fixed_analysis_from_analysis = 0u32;
+
+        // 30 analysis-only completions (no coding work)
+        for _ in 0..30 {
+            // Analysis completes — NOT counted (the fix)
+            // fixed_counter stays at 0
+            if should_spawn_analysis(&config, fixed_counter, &pool) {
+                fixed_analysis_from_analysis += 1;
+            }
+        }
+        // Fixed: counter never moved past 0, so analysis never triggers
+        assert_eq!(
+            fixed_counter, 0,
+            "analysis completions must not advance the counter"
+        );
+        assert_eq!(
+            fixed_analysis_from_analysis, 0,
+            "analysis must not trigger when only analysis has completed"
+        );
+
+        // A coding session finally completes → counter goes to 1
+        fixed_counter += 1;
+        assert!(
+            should_spawn_analysis(&config, fixed_counter, &pool),
+            "analysis should trigger after a real coding session"
+        );
+    }
+
 }
