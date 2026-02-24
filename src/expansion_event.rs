@@ -78,8 +78,7 @@ pub fn get_recent(conn: &Connection, limit: u32) -> Result<Vec<ExpansionEvent>> 
     Ok(events)
 }
 
-/// Record an expansion event (test-only; no production callers yet).
-#[cfg(test)]
+/// Record an expansion event.
 pub fn record(conn: &Connection, event: &ExpansionEvent) -> Result<()> {
     let predicted_json =
         serde_json::to_string(&event.predicted_modules).unwrap_or_else(|_| "[]".to_string());

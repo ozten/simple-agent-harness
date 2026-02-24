@@ -12,8 +12,10 @@
 /// Workers continue coding while one task integrates.
 use crate::config::{ResolvedAgentConfig, SpeckValidateConfig};
 use crate::db;
+use crate::expansion_event::{self, ExpansionEvent};
 use crate::task_manifest;
 use crate::worktree;
+use glob::Pattern;
 use rusqlite::Connection;
 use std::collections::{HashMap, HashSet};
 use std::io::ErrorKind;
@@ -921,6 +923,20 @@ impl IntegrationQueue {
             }
         };
 
+        let pending_expansion_event =
+            match self.build_expansion_event(assignment_id, bead_id, worktree_path, db_conn) {
+                Ok(event) => event,
+                Err(e) => {
+                    tracing::warn!(
+                        worker_id,
+                        bead_id,
+                        error = %e,
+                        "failed to compute expansion event (non-fatal)"
+                    );
+                    None
+                }
+            };
+
         // Step 6: Fast-forward main to the worktree's HEAD
         match self.fast_forward_main(&worktree_head) {
             Ok(()) => {
@@ -1004,6 +1020,12 @@ impl IntegrationQueue {
             db::update_worker_assignment_status(db_conn, assignment_id, "integrated", None)
         {
             tracing::warn!(error = %e, "failed to update assignment status to integrated");
+        }
+
+        if let Some(event) = pending_expansion_event.as_ref() {
+            if let Err(e) = expansion_event::record(db_conn, event) {
+                tracing::warn!(error = %e, bead_id, "failed to record expansion event");
+            }
         }
 
         // Reset circuit breakers on success
@@ -1109,6 +1131,103 @@ impl IntegrationQueue {
         }
 
         Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    }
+
+    /// Build an expansion event if the assignment declared affected globs and
+    /// the integrated changes touched files outside that declared set.
+    fn build_expansion_event(
+        &self,
+        assignment_id: i64,
+        bead_id: &str,
+        worktree_path: &Path,
+        db_conn: &Connection,
+    ) -> Result<Option<ExpansionEvent>, IntegrationError> {
+        let Some(assignment) = db::get_worker_assignment(db_conn, assignment_id)? else {
+            return Ok(None);
+        };
+        let Some(affected_globs_raw) = assignment.affected_globs else {
+            return Ok(None);
+        };
+        let declared_globs = parse_comma_separated_globs(&affected_globs_raw);
+        let merge_base = self.get_merge_base_with_base_branch(worktree_path)?;
+        let modified_files = self.changed_files_since(worktree_path, &merge_base)?;
+        if modified_files.is_empty() {
+            return Ok(None);
+        }
+
+        let expansions: Vec<String> = modified_files
+            .iter()
+            .filter(|path| !path_matches_any_glob(path, &declared_globs))
+            .cloned()
+            .collect();
+
+        if expansions.is_empty() {
+            return Ok(None);
+        }
+
+        Ok(Some(ExpansionEvent {
+            task_id: bead_id.to_string(),
+            predicted_modules: declared_globs,
+            actual_modules: modified_files,
+            expansion_reason: format!(
+                "Files outside declared affected globs: {}",
+                expansions.join(", ")
+            ),
+            timestamp: chrono_now_utc(),
+        }))
+    }
+
+    /// Get the merge base between the worktree HEAD and the tracked base branch.
+    fn get_merge_base_with_base_branch(
+        &self,
+        worktree_path: &Path,
+    ) -> Result<String, IntegrationError> {
+        let output = Command::new("git")
+            .args(["merge-base", "HEAD", &self.base_branch])
+            .current_dir(worktree_path)
+            .output()
+            .map_err(|e| IntegrationError::Git(format!("failed to run git merge-base: {e}")))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(IntegrationError::Git(format!(
+                "git merge-base HEAD {} failed: {}",
+                self.base_branch,
+                stderr.trim()
+            )));
+        }
+
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    }
+
+    /// List files changed between a commit and the current worktree HEAD.
+    fn changed_files_since(
+        &self,
+        worktree_path: &Path,
+        base_commit: &str,
+    ) -> Result<Vec<String>, IntegrationError> {
+        let range = format!("{base_commit}..HEAD");
+        let output = Command::new("git")
+            .args(["diff", "--name-only", &range])
+            .current_dir(worktree_path)
+            .output()
+            .map_err(|e| IntegrationError::Git(format!("failed to run git diff: {e}")))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(IntegrationError::Git(format!(
+                "git diff --name-only {} failed: {}",
+                range,
+                stderr.trim()
+            )));
+        }
+
+        Ok(String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(ToString::to_string)
+            .collect())
     }
 
     /// Sync the working tree to match HEAD after an update-ref.
@@ -1702,6 +1821,23 @@ fn is_leap_year(y: i64) -> bool {
     (y % 4 == 0 && y % 100 != 0) || (y % 400 == 0)
 }
 
+fn parse_comma_separated_globs(s: &str) -> Vec<String> {
+    s.split(',')
+        .map(|g| g.trim().to_string())
+        .filter(|g| !g.is_empty())
+        .collect()
+}
+
+fn path_matches_any_glob(path: &str, declared_globs: &[String]) -> bool {
+    declared_globs.iter().any(|glob| match Pattern::new(glob) {
+        Ok(pattern) => pattern.matches(path),
+        Err(e) => {
+            tracing::warn!(glob, error = %e, "invalid affected glob pattern");
+            false
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1929,6 +2065,132 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(wa.status, "integrated");
+    }
+
+    #[test]
+    fn test_integration_records_expansion_event_for_uncovered_file() {
+        let dir = init_test_repo();
+        let repo_dir = dir.path();
+        let wt_dir = repo_dir.join("worktrees");
+        std::fs::create_dir_all(&wt_dir).unwrap();
+
+        let db_path = repo_dir.join("test.db");
+        let conn = db::open_or_create(&db_path).unwrap();
+        let assignment_id = db::insert_worker_assignment(
+            &conn,
+            0,
+            "beads-expand",
+            "/tmp/wt-0",
+            "completed",
+            Some("src/**"),
+        )
+        .unwrap();
+
+        let wt_path = create_worktree_with_commit(repo_dir, &wt_dir, 0, "beads-expand");
+        let queue = IntegrationQueue::new(repo_dir.to_path_buf(), "main".to_string());
+        let mut cb = CircuitBreaker::new();
+        let mut vcb = ValidationCircuitBreaker::new(2);
+
+        let result = queue.integrate(
+            0,
+            assignment_id,
+            "beads-expand",
+            &wt_path,
+            &conn,
+            None,
+            &mut cb,
+            &mut vcb,
+        );
+
+        assert!(result.success, "{result:?}");
+        let events = expansion_event::get_recent(&conn, 10).unwrap();
+        let event = events
+            .iter()
+            .find(|e| e.task_id == "beads-expand")
+            .expect("expected expansion event");
+        assert_eq!(event.predicted_modules, vec!["src/**".to_string()]);
+        assert!(event.actual_modules.iter().any(|p| p == "feature.txt"));
+        assert!(event.expansion_reason.contains("feature.txt"));
+    }
+
+    #[test]
+    fn test_integration_skips_expansion_event_without_declared_affected_set() {
+        let dir = init_test_repo();
+        let repo_dir = dir.path();
+        let wt_dir = repo_dir.join("worktrees");
+        std::fs::create_dir_all(&wt_dir).unwrap();
+
+        let db_path = repo_dir.join("test.db");
+        let conn = db::open_or_create(&db_path).unwrap();
+        let assignment_id = db::insert_worker_assignment(
+            &conn,
+            0,
+            "beads-no-affected",
+            "/tmp/wt-0",
+            "completed",
+            None,
+        )
+        .unwrap();
+
+        let wt_path = create_worktree_with_commit(repo_dir, &wt_dir, 0, "beads-no-affected");
+        let queue = IntegrationQueue::new(repo_dir.to_path_buf(), "main".to_string());
+        let mut cb = CircuitBreaker::new();
+        let mut vcb = ValidationCircuitBreaker::new(2);
+
+        let result = queue.integrate(
+            0,
+            assignment_id,
+            "beads-no-affected",
+            &wt_path,
+            &conn,
+            None,
+            &mut cb,
+            &mut vcb,
+        );
+
+        assert!(result.success, "{result:?}");
+        let events = expansion_event::get_recent(&conn, 10).unwrap();
+        assert!(events.iter().all(|e| e.task_id != "beads-no-affected"));
+    }
+
+    #[test]
+    fn test_integration_skips_expansion_event_when_all_files_covered() {
+        let dir = init_test_repo();
+        let repo_dir = dir.path();
+        let wt_dir = repo_dir.join("worktrees");
+        std::fs::create_dir_all(&wt_dir).unwrap();
+
+        let db_path = repo_dir.join("test.db");
+        let conn = db::open_or_create(&db_path).unwrap();
+        let assignment_id = db::insert_worker_assignment(
+            &conn,
+            0,
+            "beads-covered",
+            "/tmp/wt-0",
+            "completed",
+            Some("feature.txt"),
+        )
+        .unwrap();
+
+        let wt_path = create_worktree_with_commit(repo_dir, &wt_dir, 0, "beads-covered");
+        let queue = IntegrationQueue::new(repo_dir.to_path_buf(), "main".to_string());
+        let mut cb = CircuitBreaker::new();
+        let mut vcb = ValidationCircuitBreaker::new(2);
+
+        let result = queue.integrate(
+            0,
+            assignment_id,
+            "beads-covered",
+            &wt_path,
+            &conn,
+            None,
+            &mut cb,
+            &mut vcb,
+        );
+
+        assert!(result.success, "{result:?}");
+        let events = expansion_event::get_recent(&conn, 10).unwrap();
+        assert!(events.iter().all(|e| e.task_id != "beads-covered"));
     }
 
     #[test]
@@ -3037,21 +3299,30 @@ mod tests {
 
         // After 3rd attempt: tripped (3 > 2)
         let state = vcb.record_attempt(bead_id);
-        assert!(!state.can_retry(), "should not allow retry after 3rd failure");
+        assert!(
+            !state.can_retry(),
+            "should not allow retry after 3rd failure"
+        );
         assert!(state.is_tripped());
         assert_eq!(state.attempt_count(), 3);
 
         // check_tripped returns Some after tripping
         let worktree = std::path::Path::new("/tmp/wt-vcb-test");
         let tripped = vcb.check_tripped(bead_id, "all checks failed", worktree);
-        assert!(tripped.is_some(), "check_tripped should return Some when tripped");
+        assert!(
+            tripped.is_some(),
+            "check_tripped should return Some when tripped"
+        );
         let t = tripped.unwrap();
         assert_eq!(t.bead_id, bead_id);
         assert_eq!(t.attempts, 3);
 
         // Reset clears the state
         vcb.reset(bead_id);
-        assert!(vcb.state(bead_id).can_retry(), "should be closed after reset");
+        assert!(
+            vcb.state(bead_id).can_retry(),
+            "should be closed after reset"
+        );
         assert_eq!(vcb.attempt_count(bead_id), 0);
     }
 
@@ -3063,7 +3334,10 @@ mod tests {
 
         // 1st attempt: 1 > 0 → tripped immediately
         let state = vcb.record_attempt(bead_id);
-        assert!(state.is_tripped(), "should trip immediately with max_retries=0");
+        assert!(
+            state.is_tripped(),
+            "should trip immediately with max_retries=0"
+        );
         assert_eq!(state.attempt_count(), 1);
     }
 
@@ -3078,7 +3352,10 @@ mod tests {
         cb.record_attempt(bead_id);
         cb.record_attempt(bead_id);
         cb.record_attempt(bead_id);
-        assert!(cb.state(bead_id).is_tripped(), "integration CB should be tripped");
+        assert!(
+            cb.state(bead_id).is_tripped(),
+            "integration CB should be tripped"
+        );
 
         // Validation CB should still be closed
         assert!(
@@ -3090,7 +3367,10 @@ mod tests {
         vcb.record_attempt(bead_id);
         vcb.record_attempt(bead_id);
         vcb.record_attempt(bead_id);
-        assert!(vcb.state(bead_id).is_tripped(), "validation CB should now be tripped");
+        assert!(
+            vcb.state(bead_id).is_tripped(),
+            "validation CB should now be tripped"
+        );
 
         // Reset validation CB, integration CB remains tripped
         vcb.reset(bead_id);
