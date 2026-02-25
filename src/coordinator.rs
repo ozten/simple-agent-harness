@@ -598,7 +598,8 @@ pub async fn run(
 
             // Reserve one idle slot for the analysis agent when it's due,
             // so coding beads don't starve it of workers.
-            let analysis_due = should_spawn_analysis(config, total_completed_sessions, &pool, &db_conn);
+            let analysis_due =
+                should_spawn_analysis(config, total_completed_sessions, &pool, &db_conn);
             let coding_slots = if analysis_due {
                 (pool.idle_count() as usize).saturating_sub(1)
             } else {
@@ -827,7 +828,11 @@ fn assemble_analysis_prompt(
 
     // Max improvements per run: use max_open_improvements as the cap, default to 3
     let max_improvements = if config.improvements.max_open_improvements > 0 {
-        config.improvements.max_open_improvements.saturating_sub(open_count as u32).max(1)
+        config
+            .improvements
+            .max_open_improvements
+            .saturating_sub(open_count as u32)
+            .max(1)
     } else {
         3
     };
@@ -3605,7 +3610,8 @@ mod tests {
 
         // After 1 coding session, analysis is due
         let total_completed_sessions = 1;
-        let analysis_due = should_spawn_analysis(&config, total_completed_sessions, &pool, &db_conn);
+        let analysis_due =
+            should_spawn_analysis(&config, total_completed_sessions, &pool, &db_conn);
         assert!(analysis_due);
 
         // With 1 idle worker and analysis_due, coding_slots should be 0
@@ -3646,7 +3652,8 @@ mod tests {
         config.improvements.analyze_every = 1;
 
         let total_completed_sessions = 1;
-        let analysis_due = should_spawn_analysis(&config, total_completed_sessions, &pool, &db_conn);
+        let analysis_due =
+            should_spawn_analysis(&config, total_completed_sessions, &pool, &db_conn);
         assert!(analysis_due);
 
         let coding_slots = if analysis_due {
@@ -3971,7 +3978,10 @@ mod tests {
         dismiss_stale_improvements(&config, &db_conn);
 
         let open = db::count_open_improvements(&db_conn).unwrap();
-        assert_eq!(open, 1, "improvement should remain open when auto_dismiss_after=0");
+        assert_eq!(
+            open, 1,
+            "improvement should remain open when auto_dismiss_after=0"
+        );
     }
 
     // ── Analysis prompt template tests ─────────────────────────────────
