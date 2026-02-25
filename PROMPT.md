@@ -5,7 +5,7 @@
 ### Session mode check (run before Rule A/B/C)
 Before applying the coding-bead workflow below, determine whether this session is an analysis/bookkeeping/meta-process task (for example: prompt tuning, reviewing metrics, documenting process changes, or other non-code implementation work).
 
-If the session is analysis/bookkeeping/meta-process and code implementation is NOT explicitly requested, skip coding-session Task Selection/Execution Protocol requirements (including `bd ready`, task claiming, cargo quality gates, and `blacksmith finish`). Use only the commands needed to inspect evidence and record process artifacts for the requested analysis. Analysis/bookkeeping/meta-process sessions are exempt from Rule A mandatory parallel patterns, any zero-parallel failure rule, and the 5+ parallel turns target.
+If the session is analysis/bookkeeping/meta-process and code implementation is NOT explicitly requested, skip coding-session Task Selection/Execution Protocol requirements (including `bd ready`, task claiming, cargo quality gates, and `blacksmith finish`). Use only the commands needed to inspect evidence and record process artifacts for the requested analysis. Analysis/bookkeeping/meta-process sessions still must follow Rule A bounded batching limits (2-4 tool calls per message, hard max 6 including inner parallel-wrapper calls) and Rule B anti-filler guidance, but are exempt from Rule A mandatory parallel patterns, any zero-parallel failure rule, and the 5+ parallel turns target.
 
 If the session includes code implementation (or explicitly asks you to work a bead), follow the full Rule A/B/C + Task Selection + Execution Protocol workflow.
 
