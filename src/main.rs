@@ -1218,7 +1218,7 @@ async fn main() {
                 false
             }
         };
-        let llm_customized = if prompt_created {
+        let llm_customized = if prompt_created && init::has_anthropic_api_key() {
             match init::customize_prompt_with_llm(&project_root) {
                 Ok(true) => {
                     println!("PROMPT.md customized for your project using Claude.");

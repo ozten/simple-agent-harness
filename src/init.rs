@@ -514,7 +514,7 @@ pub fn guidance_message(
         } else {
             msg.push_str(
                 "PROMPT.md created with defaults — customize it for your project.\n\
-                 Tip: install Claude CLI (`claude`) to auto-customize PROMPT.md on init.\n",
+                 Tip: set ANTHROPIC_API_KEY and install Claude CLI to auto-customize PROMPT.md on init.\n",
             );
         }
     } else {
@@ -653,7 +653,7 @@ mod tests {
         assert!(msg.contains("Detected project type: Rust (Cargo)"));
         assert!(msg.contains("cargo test --release"));
         assert!(msg.contains("created with defaults"));
-        assert!(msg.contains("install Claude CLI"));
+        assert!(msg.contains("set ANTHROPIC_API_KEY"));
         assert!(msg.contains("Detected agent: claude"));
     }
 
@@ -680,6 +680,27 @@ mod tests {
         let msg = guidance_message(&ProjectType::Rust, &[], false, false, None);
         assert!(msg.contains("already exists"));
         assert!(!msg.contains("created with defaults"));
+    }
+
+    #[test]
+    fn has_anthropic_api_key_returns_false_when_unset() {
+        // Ensure the env var is not set in this process (it shouldn't be in test)
+        std::env::remove_var("ANTHROPIC_API_KEY");
+        assert!(!has_anthropic_api_key());
+    }
+
+    #[test]
+    fn has_anthropic_api_key_returns_false_when_empty() {
+        std::env::set_var("ANTHROPIC_API_KEY", "");
+        assert!(!has_anthropic_api_key());
+        std::env::remove_var("ANTHROPIC_API_KEY");
+    }
+
+    #[test]
+    fn has_anthropic_api_key_returns_true_when_set() {
+        std::env::set_var("ANTHROPIC_API_KEY", "sk-test-key");
+        assert!(has_anthropic_api_key());
+        std::env::remove_var("ANTHROPIC_API_KEY");
     }
 
     #[test]
