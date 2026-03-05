@@ -156,6 +156,10 @@ pub fn next_assignable_tasks(
         return ready_beads.iter().map(|b| b.id.clone()).collect();
     }
 
+    // Never assign a bead that is already being worked on.
+    let in_progress_ids: std::collections::HashSet<&str> =
+        in_progress.iter().map(|a| a.bead_id.as_str()).collect();
+
     // Collect all locked globs from in-progress assignments.
     // In-progress tasks with no affected set are skipped (optimistic — they
     // don't block other work; conflicts are caught at integration time).
@@ -169,16 +173,19 @@ pub fn next_assignable_tasks(
         }
     }
 
-    // If no in-progress task has declared globs, everything is assignable.
-    if locked_globs.is_empty() {
-        return ready_beads.iter().map(|b| b.id.clone()).collect();
-    }
-
     let locked_owned: Vec<String> = locked_globs.iter().map(|s| s.to_string()).collect();
 
     ready_beads
         .iter()
         .filter(|b| {
+            // Skip beads already assigned to a worker.
+            if in_progress_ids.contains(b.id.as_str()) {
+                return false;
+            }
+            // If no in-progress globs are declared, allow (glob check is moot).
+            if locked_owned.is_empty() {
+                return true;
+            }
             match &b.affected_globs {
                 // No affected set → optimistic: allow it, resolve at integration.
                 None => true,
@@ -601,5 +608,36 @@ mod tests {
         let beads = vec![bead("b1", 1, None)];
         let result = next_assignable_tasks(&beads, &[]);
         assert_eq!(result, vec!["b1"]);
+    }
+
+    #[test]
+    fn assignable_skips_already_assigned_beads() {
+        // A bead that is already in-progress should never be returned,
+        // even when it has no affected globs (the optimistic path).
+        let beads = vec![
+            bead("b1", 1, None),
+            bead("b2", 2, None),
+            bead("b3", 3, None),
+        ];
+        let in_progress = vec![
+            assignment("b1", None),
+            assignment("b2", None),
+        ];
+        let result = next_assignable_tasks(&beads, &in_progress);
+        // b1 and b2 are already assigned → only b3 is assignable
+        assert_eq!(result, vec!["b3"]);
+    }
+
+    #[test]
+    fn assignable_skips_already_assigned_even_with_globs() {
+        // Same bead ID in ready and in-progress should be filtered out
+        // regardless of glob declarations.
+        let beads = vec![
+            bead("b1", 1, Some(vec!["src/a.rs"])),
+            bead("b2", 2, Some(vec!["src/b.rs"])),
+        ];
+        let in_progress = vec![assignment("b1", Some(vec!["src/a.rs"]))];
+        let result = next_assignable_tasks(&beads, &in_progress);
+        assert_eq!(result, vec!["b2"]);
     }
 }
